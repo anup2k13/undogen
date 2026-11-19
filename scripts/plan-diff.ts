@@ -6,32 +6,17 @@
  *   npx tsx scripts/plan-diff.ts [--ref HEAD] [--cache .cache/specs] [--all]
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
+import { ensureSpecs } from './public-specs.js';
 
-const SPECS: Record<string, string> = {
-  github: 'https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json',
-  stripe: 'https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.json',
-  twilio: 'https://raw.githubusercontent.com/twilio/twilio-oai/main/spec/json/twilio_api_v2010.json',
-  asana: 'https://raw.githubusercontent.com/Asana/openapi/master/defs/asana_oas.yaml',
-  slack: 'https://raw.githubusercontent.com/slackapi/slack-api-specs/master/web-api/slack_web_openapi_v2.json',
-  kubernetes: 'https://raw.githubusercontent.com/kubernetes/kubernetes/master/api/openapi-spec/swagger.json',
-};
 
 const { values } = parseArgs({ options: { ref: { type: 'string', default: 'HEAD' }, cache: { type: 'string', default: '.cache/specs' }, all: { type: 'boolean' } } });
 const root = resolve(new URL('..', import.meta.url).pathname);
 const cache = resolve(root, values.cache!);
-mkdirSync(cache, { recursive: true });
-for (const [name, url] of Object.entries(SPECS)) {
-  const file = join(cache, name + (url.endsWith('.yaml') ? '.yaml' : '.json'));
-  if (existsSync(file)) continue;
-  console.error(`downloading ${name}…`);
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
-  writeFileSync(file, await res.text());
-}
+const files = await ensureSpecs(cache);
 
 /** Every plan field that matters, per "<api> <operationId>". */
 const dumpScript = `
@@ -44,7 +29,6 @@ for (const f of files) {
 }
 process.stdout.write(JSON.stringify(out));
 `;
-const files = Object.entries(SPECS).map(([n, u]) => n + (u.endsWith('.yaml') ? '.yaml' : '.json'));
 const work = mkdtempSync(join(tmpdir(), 'undogen-plan-diff-'));
 const script = join(work, 'dump.mts');
 writeFileSync(script, dumpScript);

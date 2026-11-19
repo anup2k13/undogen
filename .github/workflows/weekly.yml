@@ -1,0 +1,28 @@
+name: Weekly API check
+
+# The public API descriptions change every week. Re-run the analyzer on the latest ones:
+# the audit fails when a plan contradicts its operation's name (a likely analyzer bug),
+# and the benchmark table is uploaded to compare against docs/benchmarks.md.
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx tsx scripts/audit-plans.ts --refresh
+      - run: npx tsx scripts/benchmark.ts --out benchmarks.md
+        if: always()
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmarks
+          path: benchmarks.md

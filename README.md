@@ -298,7 +298,7 @@ Four commands help fill the gaps:
 | API | Write operations | Undo derived | Irreversible (gated) | Unknown | Time (incl. download) |
 |---|---:|---:|---:|---:|---:|
 | GitHub REST | 614 | 64% | 131 | 89 | 0.6s |
-| Kubernetes (Swagger 2.0) | 586 | 82% | 91 | 17 | 0.1s |
+| Kubernetes (Swagger 2.0) | 586 | 78% | 114 | 12 | 0.1s |
 | DigitalOcean (hundreds of `$ref` files) | 448 | 60% | 89 | 92 | 10–40s |
 | Stripe | 339 | 39% | 135 | 72 | 0.5s |
 | Asana | 143 | 73% | 9 | 29 | 0.8s |

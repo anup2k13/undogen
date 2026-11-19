@@ -523,6 +523,14 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
   const isCollection = !lastIsParam && index.hasItemChild(op.path);
   const isAction = !lastIsParam && !isCollection && segs.length >= 2 && isParamSeg(segs[segs.length - 2]!);
 
+  // 0b. A proxy route forwards the request to something else: whatever it does, undogen can't know or undo it.
+  if (segs.some((seg) => /^proxy$/i.test(seg))) {
+    return plan(op, 'irreversible', 'none', 0.9, {
+      reasons: ['Forwards the request through a proxy; its effects on the other side cannot be known or called back'],
+      caveats: ['Declare an inverse with x-undogen if you know what the proxied service does'],
+    });
+  }
+
   // 1. Effects that leave the system cannot be undone; pure computations need no undo.
   // The last path segment names an action only for POST (POST /x/{id}/email); for PUT/PATCH it is a sub-resource.
   const verbTokens = [...(op.method === 'post' ? tokenize(last) : []), verbOf(op)].flatMap(stems);

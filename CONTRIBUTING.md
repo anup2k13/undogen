@@ -30,7 +30,8 @@ Analyzer rules are heuristics, so every change is checked against real APIs:
 
 1. Add a test with a small spec that shows the shape (`test/analyze.test.ts`).
 2. Run `npx tsx scripts/plan-diff.ts`. It compiles GitHub, Stripe, Twilio, Asana, Slack and Kubernetes with your working tree and with `HEAD`, and lists every plan that changed. **Read every change.** Most false positives in this project were found this way (a token revocation paired with a read-only check, a team deletion matched to adding team access).
-3. If the numbers move, regenerate `docs/benchmarks.md` with `npx tsx scripts/benchmark.ts --out docs/benchmarks.md` and update the table in the README.
+3. Run `npx tsx scripts/audit-plans.ts`: it flags plans whose strategy contradicts the operation's own name (a "create" not named like one, a proxied request treated as undoable). It also runs weekly in CI against the latest specs.
+4. If the numbers move, regenerate `docs/benchmarks.md` with `npx tsx scripts/benchmark.ts --out docs/benchmarks.md` and update the table in the README.
 
 When in doubt, prefer `unknown` to a wrong inverse: an unknown operation is gated, a wrong inverse silently does the wrong thing.
 

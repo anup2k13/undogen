@@ -599,3 +599,21 @@ describe('analyze: Kubernetes pod subresources', () => {
     expect(byId.createCoreV1NamespacedPodEviction!.reversibility).toBe('irreversible');
   });
 });
+
+describe('analyze: proxy routes', () => {
+  it('gates every method on a proxy route, even with a GET to snapshot', () => {
+    const spec = parseSpec({
+      swagger: '2.0',
+      info: { title: 'k8s', version: '1' },
+      paths: {
+        '/api/v1/nodes/{name}/proxy/{path}': {
+          get: { operationId: 'connectGetNodeProxyWithPath', responses: { '200': { description: '' } } },
+          put: { operationId: 'connectPutNodeProxyWithPath', responses: { '200': { description: '' } } },
+          patch: { operationId: 'connectPatchNodeProxyWithPath', responses: { '200': { description: '' } } },
+          delete: { operationId: 'connectDeleteNodeProxyWithPath', responses: { '200': { description: '' } } },
+        },
+      },
+    });
+    expect(analyze(spec).plans.map((p) => p.reversibility)).toEqual(['irreversible', 'irreversible', 'irreversible']);
+  });
+});
