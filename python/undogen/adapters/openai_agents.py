@@ -15,6 +15,7 @@ with ``approved=True``. Pass ``needs_approval=False`` to rely on the client's ow
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, List, Optional
 
@@ -39,7 +40,9 @@ def to_openai_agents_tools(
             args = json.loads(args_json or "{}")
             try:
                 # The SDK only invokes an approval-gated tool after a human approved it.
-                result = _d.execute(approved=True, **args) if _approved else _d.execute(**args)
+                # The client is synchronous: run it in a thread so the agent's event loop keeps going.
+                kwargs = {"approved": True, **args} if _approved else args
+                result = await asyncio.to_thread(_d.execute, **kwargs)
                 return json.dumps(result)
             except UndogenError as err:
                 return json.dumps({"error": type(err).__name__, "message": str(err)})

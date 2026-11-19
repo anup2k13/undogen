@@ -12,6 +12,7 @@ refused, the tool returns the refusal as its result so the agent can explain or 
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, List, Optional
 
@@ -31,9 +32,14 @@ def to_langchain_tools(client: UndoableClient, only: Optional[List[str]] = None,
             except UndogenError as err:
                 return json.dumps({"error": type(err).__name__, "message": str(err)})
 
+        async def arun(_run=run, **kwargs: Any) -> str:
+            # The client is synchronous: keep async agents (LangGraph) responsive.
+            return await asyncio.to_thread(_run, **kwargs)
+
         tools.append(
             StructuredTool.from_function(
                 func=run,
+                coroutine=arun,
                 name=d.name,
                 description=d.description,
                 args_schema=d.input_schema,
