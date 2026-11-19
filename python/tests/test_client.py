@@ -1,0 +1,124 @@
+import json
+import subprocess
+
+import pytest
+
+from undogen import (
+    ConflictError,
+    DependencyError,
+    FileJournalStore,
+    IrreversibleOperationError,
+    ReplayBlockedError,
+    UndoableClient,
+    tool_definitions,
+)
+
+from .conftest import ROOT, TSX, get
+
+
+def patch(url, body):
+    import urllib.request
+
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="PATCH", headers={"content-type": "application/json"})
+    urllib.request.urlopen(req)
+
+
+def test_create_update_and_undo_all(bundle_path, server_url):
+    client = UndoableClient(bundle_path, server_url)
+    todo = client.call("createTodo", body={"title": "py"})
+    tid = todo["data"]["id"]
+    assert todo["entry"]["inverse"]["path"] == f"/todos/{tid}"
+    client.call("updateTodo", params={"todoId": tid}, body={"title": "changed"})
+    result = client.undo_all()
+    assert [e["operationId"] for e in result["undone"]] == ["updateTodo", "createTodo"]
+    assert result["failed"] == []
+    assert get(f"{server_url}/todos/{tid}")[0] == 404
+
+
+def test_conflict_is_refused_and_force_overrides(bundle_path, server_url):
+    agent = UndoableClient(bundle_path, server_url)
+    tid = agent.call("createTodo", body={"title": "orig"})["data"]["id"]
+    res = agent.call("updateTodo", params={"todoId": tid}, body={"title": "agent"})
+    patch(f"{server_url}/todos/{tid}", {"title": "human"})
+    with pytest.raises(ConflictError) as err:
+        agent.undo(res["entry"])
+    assert err.value.conflicts == [{"field": "title", "expected": "agent", "actual": "human"}]
+    assert get(f"{server_url}/todos/{tid}")[1]["title"] == "human"
+    agent.undo(res["entry"], force=True)
+    assert get(f"{server_url}/todos/{tid}")[1]["title"] == "orig"
+
+
+def test_dependencies_and_cascade(bundle_path, server_url):
+    client = UndoableClient(bundle_path, server_url)
+    created = client.call("createTodo", body={"title": "parent"})
+    comment = client.call("createComment", params={"todoId": created["data"]["id"]}, body={"text": "hi"})
+    with pytest.raises(DependencyError):
+        client.undo(created["entry"])
+    client.undo(created["entry"], cascade=True)
+    assert comment["entry"]["status"] == "undone"
+
+
+def test_id_remap_after_recreate(bundle_path, server_url):
+    setup = UndoableClient(bundle_path, server_url)
+    tid = setup.call("createTodo", body={"title": "orig"})["data"]["id"]
+    session = UndoableClient(bundle_path, server_url)
+    session.call("updateTodo", params={"todoId": tid}, body={"title": "edited"})
+    session.call("deleteTodo", params={"todoId": tid})
+    assert session.undo_all()["failed"] == []
+    new_id = session.remap_id("todoId", tid)
+    assert new_id != tid
+    assert get(f"{server_url}/todos/{new_id}")[1]["title"] == "orig"
+
+
+def test_restore_children(children_bundle_path, server_url):
+    setup = UndoableClient(children_bundle_path, server_url)
+    tid = setup.call("createTodo", body={"title": "with comments"})["data"]["id"]
+    setup.call("createComment", params={"todoId": tid}, body={"text": "a"})
+    agent = UndoableClient(children_bundle_path, server_url)
+    agent.call("deleteTodo", params={"todoId": tid})
+    agent.undo()
+    new_id = agent.remap_id("todoId", tid)
+    assert [c["text"] for c in get(f"{server_url}/todos/{new_id}/comments")[1]] == ["a"]
+
+
+def test_irreversible_gate_and_replays(bundle_path, server_url, tmp_path):
+    blocked = UndoableClient(bundle_path, server_url)
+    tid = blocked.call("createTodo", body={"title": "x"})["data"]["id"]
+    with pytest.raises(IrreversibleOperationError):
+        blocked.call("sendReminder", params={"todoId": tid})
+
+    path = str(tmp_path / "journal.jsonl")
+    first = UndoableClient(bundle_path, server_url, allow_irreversible=True, store=FileJournalStore(path))
+    first.call("sendReminder", params={"todoId": tid})
+    restarted = UndoableClient(bundle_path, server_url, allow_irreversible=True, store=FileJournalStore(path))
+    with pytest.raises(ReplayBlockedError):
+        restarted.call("sendReminder", params={"todoId": tid})
+    # A human approval upstream (e.g. the agent framework) is explicit consent.
+    assert restarted.call("sendReminder", params={"todoId": tid}, approved=True)["status"] == 202
+
+
+def test_journal_is_compatible_with_the_typescript_cli(bundle_path, server_url, tmp_path):
+    path = str(tmp_path / "shared.jsonl")
+    client = UndoableClient(bundle_path, server_url, store=FileJournalStore(path))
+    tid = client.call("createTodo", body={"title": "cross-language"})["data"]["id"]
+    out = subprocess.run(
+        [str(TSX), str(ROOT / "src/cli.ts"), "undo", str(ROOT / "examples/todo-api/openapi.yaml"), "--base-url", server_url, "--journal", path],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env={"NO_COLOR": "1", "PATH": __import__("os").environ["PATH"]},
+    )
+    assert f"#1 createTodo  DELETE /todos/{tid}" in out.stdout, out.stdout + out.stderr
+    assert get(f"{server_url}/todos/{tid}")[0] == 404
+    assert UndoableClient(bundle_path, server_url, store=FileJournalStore(path)).journal[0]["status"] == "undone"
+
+
+def test_tool_definitions(bundle_path, server_url):
+    client = UndoableClient(bundle_path, server_url)
+    tools = {t.name: t for t in tool_definitions(client)}
+    assert tools["sendReminder"].needs_approval and "IRREVERSIBLE" in tools["sendReminder"].description
+    assert tools["updateTodo"].input_schema["required"] == ["todoId", "body"]
+    assert "title" in tools["updateTodo"].input_schema["properties"]["body"]["properties"]
+    created = tools["createTodo"].execute(body={"title": "tool"})
+    assert created["journal"]["undo"].startswith("DELETE /todos/")
+    assert tools["undogen_undo"].execute()["status"] == 204

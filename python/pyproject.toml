@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "undogen"
+version = "0.1.0"
+description = "Journaled, undoable API calls for Python agents, from plans compiled by undogen (OpenAPI undo compiler)."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9"
+dependencies = []
+keywords = ["openapi", "undo", "rollback", "ai-agents", "langchain", "saga"]
+
+[project.optional-dependencies]
+langchain = ["langchain-core>=0.3"]
+openai-agents = ["openai-agents>=0.2"]
+test = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/anup2k13/undogen"
+
+[tool.setuptools]
+packages = ["undogen", "undogen.adapters"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
