@@ -45,6 +45,13 @@ async function connect(opts: { elicit?: (msg: string) => { action: 'accept' | 'd
 }
 
 describe('MCP proxy', () => {
+  it('gives the model instructions for working safely', async () => {
+    const { client } = await connect();
+    const text = client.getInstructions();
+    expect(text).toContain('undogen_checkpoint');
+    expect(text).toContain('Todo API (demo)');
+  });
+
   it('lists one tool per operation with undo-aware annotations, plus undo tools', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();

@@ -15,6 +15,17 @@ export interface McpServerOptions extends Omit<ClientOptions, 'allowIrreversible
   irreversible?: 'ask' | 'allow' | 'deny';
 }
 
+/** How a model should use these tools; MCP clients pass server instructions to the model. */
+export function instructionsFor(title: string): string {
+  return [
+    `These tools call the ${title} API. Every write is journaled with the request that undoes it.`,
+    '- Before a multi-step task, call undogen_checkpoint and keep the number. If the task goes wrong, undogen_undo_all with { to: checkpoint } rolls back only that task.',
+    "- Each tool's description says whether it can be undone. When unsure, call undogen_preview first. IRREVERSIBLE tools (sending, paying, deleting for good) need a human's approval; don't retry them after a refusal.",
+    '- undogen_undo refuses (ConflictError) when someone else changed the data since; tell the user instead of forcing it. It also refuses to orphan later writes that depend on it (cascade: true undoes those first).',
+    '- undogen_journal lists what you changed in this session.',
+  ].join('\n');
+}
+
 /**
  * An MCP server that exposes an OpenAPI-described API as tools, journals every
  * write with its inverse, and adds undo tools. Connect it to any transport,
@@ -22,7 +33,7 @@ export interface McpServerOptions extends Omit<ClientOptions, 'allowIrreversible
  */
 export async function createMcpServer(options: McpServerOptions): Promise<{ server: Server; client: UndoableClient }> {
   const mode = options.irreversible ?? 'ask';
-  const server = new Server({ name: 'undogen', version: VERSION }, { capabilities: { tools: {} } });
+  const server = new Server({ name: 'undogen', version: VERSION }, { capabilities: { tools: {} }, instructions: instructionsFor(options.spec.title) });
 
   const approve = async (op: Operation, plan: InversePlan, _input: unknown, ctx: IrreversibleContext): Promise<boolean> => {
     if (mode === 'deny') return false;
