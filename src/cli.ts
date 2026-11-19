@@ -15,6 +15,7 @@ ${c.bold('undogen')} ${c.dim(VERSION)} — compile undo operations from an OpenA
 
 ${c.bold('Usage')}
   undogen analyze <spec> [--json] [--overrides <file>]
+  undogen init    <spec> [--base-url <url>] [--out <file>] [--force]
   undogen verify  <spec> --base-url <url> [options]
   undogen mcp     <spec> --base-url <url> [--journal <file>] [--header <k:v>] [--allow-irreversible]
   undogen journal <file>
@@ -26,6 +27,11 @@ ${c.bold('Usage')}
 
 ${c.bold('analyze')}   Derive an inverse for every write operation (no network calls).
   --json                 Print the compiled plans as JSON
+
+${c.bold('init')}      Generate a fixtures file for verify: example bodies, prepare steps.
+  --base-url <url>       Also probe a sandbox to check and refine the fixtures
+  --out <file>           Where to write them (default: undogen.fixtures.json)
+  --force                Overwrite an existing file
 
 ${c.bold('verify')}    Run each operation and its inverse against a test server, diff the state.
   --base-url <url>       Server to test against. Use a sandbox — verify creates and deletes data.
@@ -75,6 +81,7 @@ async function main(argv: string[]) {
       all: { type: 'boolean' },
       force: { type: 'boolean' },
       'allow-irreversible': { type: 'boolean' },
+      out: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
@@ -135,6 +142,34 @@ async function main(argv: string[]) {
 
   if (command === 'analyze') {
     console.log(values.json ? JSON.stringify(analysis, null, 2) : formatAnalysis(analysis));
+    return;
+  }
+
+  if (command === 'init') {
+    const out = values.out ?? 'undogen.fixtures.json';
+    if (!values.force) {
+      const exists = await readFile(out).then(() => true, () => false);
+      if (exists) throw new Error(`${out} already exists. Use --force to overwrite, or --out to pick another file.`);
+    }
+    const { generateFixtures } = await import('./init.js');
+    console.log(`\n${c.bold('undogen init')}  ${c.dim('·')}  ${spec.title} ${c.dim(spec.version)}${values['base-url'] ? `  ${c.dim('·')}  probing ${values['base-url']}` : ''}\n`);
+    const result = await generateFixtures({
+      spec,
+      plans: analysis.plans,
+      baseUrl: values['base-url'],
+      headers,
+      onProgress: (m) => console.log(c.dim(`  · ${m}`)),
+    });
+    await writeFile(out, JSON.stringify(result.fixtures, null, 2) + '\n');
+    const n = Object.keys(result.fixtures).length;
+    console.log(`  ${c.green('✓')} wrote ${n} fixture${n === 1 ? '' : 's'} to ${out}`);
+    if (result.report) console.log(formatSummary(result.report).trimEnd());
+    for (const t of result.todo) console.log(`  ${c.yellow('!')} ${t.operationId}: ${t.reason}`);
+    console.log(
+      result.report
+        ? `\n  Next: ${c.bold(`undogen verify ${target} --base-url ${values['base-url']} --fixtures ${out}`)}\n`
+        : `\n  Next: review ${out}, then run ${c.bold(`undogen init ${target} --base-url <sandbox> --force`)} to check it against a server.\n`,
+    );
     return;
   }
 

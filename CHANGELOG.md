@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **`undogen init`** generates a fixtures file: example bodies for create operations, and `prepare` steps for actions that need their counterpart first. With `--base-url` it probes a sandbox, adds missing setup steps, and lists what still needs a human.
+- **New `inconclusive` verify outcome** for operations that changed nothing visible, so their undo was never exercised. These were previously reported as failures, which wrongly blamed the API. The detail suggests the prepare step to add.
 - **Swagger 2.0 support**: `in: body` and `formData` parameters, `#/definitions` refs, response schemas, and `basePath`.
 - **Base paths**: Swagger `basePath`, or the path of OpenAPI 3 `servers[0].url`, is applied automatically, without being doubled when the base URL already includes it. Journals store full paths, so undo from a journal still works without the spec.
 - **Form-encoded bodies** (`application/x-www-form-urlencoded`) in calls, inverses and verification.

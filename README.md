@@ -76,6 +76,14 @@ No network calls are made. Add `--json` for machine-readable plans.
 
 ### 2. Prove the inverses against a sandbox
 
+Start by generating a fixtures file:
+
+```bash
+npx undogen init openapi.yaml --base-url https://sandbox.example.com
+```
+
+`init` writes `undogen.fixtures.json` with example bodies for every create operation, and setup steps for actions that only make sense after their counterpart (archive before unarchive). With `--base-url` it also runs the verifier against the sandbox and repairs what it finds: an operation that turns out to change nothing gets a setup step, and anything that still needs a human is listed. Then run:
+
 ```bash
 npx undogen verify openapi.yaml --base-url https://sandbox.example.com \
   --header "authorization: Bearer $TOKEN" \
@@ -89,6 +97,7 @@ For each write operation, `verify`:
 - **generates request bodies that actually change state**, so a no-op can't pass as verified;
 - **snapshots every readable route**, runs the operation and its inverse, snapshots again, and diffs;
 - **follows identity changes** for compensable inverses: when a deleted record is re-created under a new id, it compares by content;
+- **flags operations that changed nothing** as *inconclusive* rather than passing them, because an undo that was never exercised proves nothing;
 - **never executes** operations classified as irreversible.
 
 The exit code is `1` when any inverse fails, so it works as a CI gate. `--report` writes `report.json`, `report.md`, and a [shields.io endpoint badge](https://shields.io/badges/endpoint-badge) (`badge.json`).

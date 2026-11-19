@@ -19,6 +19,8 @@ export interface Fixture {
   prepare?: FixtureStep[];
   /** Skip this operation; a string gives the reason. */
   skip?: boolean | string;
+  /** Free-form note (undogen init writes hints here). Ignored by verify. */
+  note?: string;
 }
 
 export type Fixtures = Record<string, Fixture>;
@@ -39,7 +41,16 @@ export interface VerifyOptions {
   onResult?: (result: OperationResult) => void;
 }
 
-export type Outcome = 'verified' | 'failed' | 'gated' | 'skipped' | 'error';
+/**
+ * - verified:     state after undo equals state before the operation
+ * - failed:       the operation changed state and the undo did not restore it
+ * - inconclusive: the operation changed nothing visible, so the undo was not really exercised
+ *                 (typically needs a `prepare` step, e.g. archive before testing unarchive)
+ * - gated:        irreversible/unknown, never executed
+ * - skipped:      skipped by fixture
+ * - error:        setup or the operation itself failed (usually needs a fixture)
+ */
+export type Outcome = 'verified' | 'failed' | 'inconclusive' | 'gated' | 'skipped' | 'error';
 
 export type { StateDiff } from './diff.js';
 
@@ -189,6 +200,8 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
         record('error', `operation returned HTTP ${res.status} ${short(res.data)} — add a fixture`);
         continue;
       }
+      const mid = await snapshot(pool);
+      const hadEffect = diffStates(before, mid, { ignore }).length > 0;
       if (!res.entry || (!res.entry.inverse && plan.strategy !== 'no-side-effects')) {
         record('failed', `could not build the inverse: ${res.entry?.inverseError ?? 'unknown reason'}`);
         continue;
@@ -215,7 +228,17 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
         ignore,
         identityKeys: identityChanged ? new Set(['id', ...allParamNames]) : undefined,
       });
-      if (diffs.length === 0) {
+      const counterpart = res.entry.inverse?.operationId;
+      const hint = counterpart && counterpart !== op.id ? ` (try "prepare": [{ "operationId": "${counterpart}" }])` : '';
+      if (!hadEffect && plan.strategy !== 'no-side-effects') {
+        record(
+          'inconclusive',
+          diffs.length
+            ? `the operation changed nothing here, but its inverse did: add a prepare step${hint}`
+            : `the operation changed nothing visible, so the undo was not exercised: add a prepare step${hint}`,
+          diffs,
+        );
+      } else if (diffs.length === 0) {
         record('verified', identityChanged ? 'state restored (resource re-created under a new id)' : 'state restored exactly');
       } else {
         record('failed', `${diffs.length} difference(s) remain after undo`, diffs);
@@ -225,7 +248,7 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
     }
   }
 
-  const summary = { verified: 0, failed: 0, gated: 0, skipped: 0, error: 0, total: results.length };
+  const summary = { verified: 0, failed: 0, inconclusive: 0, gated: 0, skipped: 0, error: 0, total: results.length };
   for (const r of results) summary[r.outcome]++;
   return {
     tool: { name: 'undogen', version: VERSION },

@@ -30,3 +30,4 @@ export { formatAnalysis, formatJournal, toMarkdown, toBadge } from './report.js'
 export { VERSION } from './version.js';
 export type * from './types.js';
 export { createMcpServer, serveStdio, type McpOptions } from './mcp.js';
+export { generateFixtures, type InitOptions, type InitResult } from './init.js';
