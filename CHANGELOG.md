@@ -12,7 +12,7 @@
 
 ### Runtime
 - CLI output piped into a command that closes early (`| head`) no longer crashes with EPIPE.
-- Journal files are created readable by their owner only (0600). Agent tools accept only the header parameters an operation declares, so a tool call cannot replace the configured credentials.
+- Journal files are created readable by their owner only (0600); `journalDetail: 'minimal'` stores only what undo needs (conflict-check values as salted hashes). Agent tools accept only the header parameters an operation declares, so a tool call cannot replace the configured credentials.
 - Persistent journals (`JournalStore`, `FileJournalStore`, `UndoableClient.open()`), undo by seq, `undogen undo` and `undogen journal`.
 - `FileJournalStore.compact()` and `undogen journal --compact` shrink a journal to the latest version of each entry.
 - Checkpoints: `checkpoint()` / `undoTo(checkpoint)` (Python: `checkpoint()` / `undo_to()`), the `undogen_checkpoint` tool with `undogen_undo_all { to }`, and `undogen undo --after <seq>`, to roll back one task of a longer session.

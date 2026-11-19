@@ -266,6 +266,12 @@ export interface ClientOptions {
   timeoutMs?: number;
   /** When compiling plans here: also re-create child collections when undoing a delete. */
   restoreChildren?: boolean;
+  /**
+   * What the store keeps. 'full' (default): everything, for auditing. 'minimal': only what undo
+   * needs (the resolved inverse, conflict-check values, ids, captured children); request and
+   * response bodies and the captured state are dropped. The in-memory journal is always full.
+   */
+  journalDetail?: 'full' | 'minimal';
 }
 
 export interface UndoOptions {
@@ -459,7 +465,7 @@ export class UndoableClient {
       }
     }
     this.journal.push(entry);
-    await this.store?.save(entry);
+    await this.persist(entry);
     return { ...response, entry };
   }
 
@@ -509,7 +515,7 @@ export class UndoableClient {
     if (!target.inverse) {
       target.undoError = `cannot be undone: ${target.inverseError}`;
       target.status = 'failed';
-      await this.store?.save(target);
+      await this.persist(target);
       throw new UndoError(`Entry #${target.seq} (${target.operationId}) cannot be undone: ${target.inverseError}`, target);
     }
 
@@ -522,7 +528,7 @@ export class UndoableClient {
       const current = await this.request('get', checkPath, { query: target.check.query });
       if (target.check.mode === 'diff') {
         // Paired action / toggle: the fields (or status) the call changed must still be as it left them.
-        const conflicts = compareExpected(target.check.expected, stateOf(current));
+        const conflicts = compareExpected(target.check.expected, stateOf(current), '', target.session);
         if (conflicts.length) return this.conflict(target, conflicts, current);
       } else {
         if (current.status === 404 || current.status === 410) {
@@ -535,7 +541,7 @@ export class UndoableClient {
         if (current.status >= 300) {
           throw new UndoError(`Undo of #${target.seq}: could not read current state (GET ${checkPath} -> HTTP ${current.status})`, target, current);
         }
-        const conflicts = compareExpected(target.check.expected, current.data);
+        const conflicts = compareExpected(target.check.expected, current.data, '', target.session);
         if (conflicts.length) return this.conflict(target, conflicts, current);
       }
       const etag = current.headers['etag'];
@@ -562,7 +568,7 @@ export class UndoableClient {
     if (res.status >= 400 && !(inverse.method === 'delete' && (res.status === 404 || res.status === 410))) {
       target.status = 'failed';
       target.undoError = `${inverse.method.toUpperCase()} ${inverse.path} -> HTTP ${res.status}`;
-      await this.store?.save(target);
+      await this.persist(target);
       throw new UndoError(`Undo of #${target.seq} (${target.operationId}) failed: ${target.undoError}`, target, res);
     }
 
@@ -689,6 +695,22 @@ export class UndoableClient {
     return cur;
   }
 
+  /** Save an entry to the store, without bodies the undo doesn't need when journalDetail is 'minimal'. */
+  private async persist(entry: JournalEntry) {
+    if (!this.store) return;
+    if (this.options.journalDetail !== 'minimal') return this.store.save(entry);
+    const slim: JournalEntry = {
+      ...entry,
+      // Conflict checks only compare values: keep hashes, not the values.
+      check: entry.check ? { ...entry.check, expected: hashValues(entry.check.expected, entry.session) } : undefined,
+      request: { ...entry.request, body: undefined },
+      response: { status: entry.response.status, data: undefined, headers: {} },
+      before: undefined,
+      undoResponse: entry.undoResponse ? { status: entry.undoResponse.status, data: undefined, headers: {} } : undefined,
+    };
+    return this.store.save(slim);
+  }
+
   private backoff(attempt: number) {
     return (this.options.retryDelayMs ?? 250) * 2 ** attempt;
   }
@@ -697,14 +719,14 @@ export class UndoableClient {
     target.status = 'undone';
     target.undone = true;
     target.undoError = undefined;
-    await this.store?.save(target);
+    await this.persist(target);
     return res;
   }
 
   private async conflict(target: JournalEntry, conflicts: Conflict[], res: HttpResult): Promise<never> {
     target.status = 'conflict';
     target.undoError = 'state changed since the call';
-    await this.store?.save(target);
+    await this.persist(target);
     throw new ConflictError(target, conflicts, res);
   }
 
@@ -1027,21 +1049,37 @@ function expectedState(request: unknown, response: unknown, onlyEchoed: boolean)
   return out;
 }
 
-function compareExpected(expected: Record<string, unknown>, current: unknown, prefix = ''): Conflict[] {
+const HASHED = '$undogenSha256';
+
+/** Replace expected values by salted hashes (journalDetail 'minimal'): enough to compare, not to read. */
+function hashValues(expected: Record<string, unknown>, salt: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(expected)) {
+    out[k] = isPlainObject(v) && !(HASHED in v) ? hashValues(v, salt) : { [HASHED]: createHash('sha256').update(salt + stableStringify(v)).digest('hex') };
+  }
+  return out;
+}
+
+function compareExpected(expected: Record<string, unknown>, current: unknown, prefix = '', salt = ''): Conflict[] {
   const cur = isPlainObject(current) ? current : {};
   const nested = envelopeKeys(expected, cur);
   const out: Conflict[] = [];
   for (const [field, value] of Object.entries(expected)) {
     const actual = looseGet(cur, field).value;
-    if (nested.has(field)) out.push(...compareExpected(value as Record<string, unknown>, actual, `${prefix}${field}.`));
-    else if (stableStringify(actual) !== stableStringify(value)) out.push({ field: prefix + field, expected: value, actual });
+    if (isPlainObject(value) && HASHED in value) {
+      const h = createHash('sha256').update(salt + stableStringify(actual)).digest('hex');
+      if (h !== value[HASHED]) out.push({ field: prefix + field, expected: '(hidden: journalDetail is minimal)', actual });
+    } else if (nested.has(field) || (isPlainObject(value) && Object.values(value).some((x) => isPlainObject(x) && HASHED in x))) {
+      out.push(...compareExpected(value as Record<string, unknown>, actual, `${prefix}${field}.`, salt));
+    } else if (stableStringify(actual) !== stableStringify(value)) out.push({ field: prefix + field, expected: value, actual });
   }
   return out;
 }
 
 export function stableStringify(v: unknown): string {
   return JSON.stringify(v, (_, x) =>
-    x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => a.localeCompare(b))) : x,
+    // Code-point order (like Python's sort_keys), so hashes and fingerprints agree across runtimes.
+    x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : x,
   ) ?? 'undefined';
 }
 

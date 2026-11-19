@@ -266,3 +266,25 @@ def test_fields_body_template():
     body = {"from": "fields", "fields": {"channel": {"from": "response", "key": "channel"}, "ts": {"from": "response", "key": "ts"}, "as_user": {"from": "request", "key": "as_user"}}}
     sources = {"response": {"channel": "C1", "ts": "1.2"}, "request": {"text": "hi"}}
     assert _resolve_body(body, sources) == {"channel": "C1", "ts": "1.2"}
+
+
+def test_minimal_journal(bundle_path, server_url, tmp_path):
+    path = str(tmp_path / "m.jsonl")
+    client = UndoableClient(bundle_path, server_url, store=FileJournalStore(path), journal_detail="minimal")
+    tid = client.call("createTodo", body={"title": "private: salary"})["data"]["id"]
+    assert "salary" not in open(path).read()
+    assert UndoableClient(bundle_path, server_url, store=FileJournalStore(path)).undo_all()["failed"] == []
+    assert get(f"{server_url}/todos/{tid}")[0] == 404
+
+
+def test_minimal_journal_is_undone_by_the_typescript_cli(bundle_path, server_url, tmp_path):
+    # Hashed conflict-check values must match across runtimes, including mixed-case keys.
+    path = str(tmp_path / "cross.jsonl")
+    client = UndoableClient(bundle_path, server_url, store=FileJournalStore(path), journal_detail="minimal")
+    tid = client.call("createTodo", body={"title": "Ünïcode & MixedCase"})["data"]["id"]
+    out = subprocess.run(
+        [str(TSX), str(ROOT / "src/cli.ts"), "undo", str(ROOT / "examples/todo-api/openapi.yaml"), "--base-url", server_url, "--journal", path],
+        cwd=ROOT, capture_output=True, text=True, env={"NO_COLOR": "1", "PATH": __import__("os").environ["PATH"]},
+    )
+    assert f"#1 createTodo  DELETE /todos/{tid}" in out.stdout, out.stdout + out.stderr
+    assert get(f"{server_url}/todos/{tid}")[0] == 404

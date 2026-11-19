@@ -162,6 +162,8 @@ npx undogen undo openapi.yaml --base-url https://api.example.com --journal .undo
 
 Query parameters, form and multipart bodies, header functions and a `beforeRequest` hook (for request signing) are supported.
 
+Journals hold request and response bodies, so files are created owner-only. With `journalDetail: 'minimal'` (Python: `journal_detail="minimal"`) the store keeps only what undo needs: the undo request itself (which, for an update, contains the old values it writes back), ids, and salted hashes in place of the conflict-check values.
+
 ### 4. Put undo in front of any API, for any MCP client
 
 ```bash

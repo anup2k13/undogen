@@ -231,6 +231,7 @@ class UndoableClient:
         retries: int = 2,
         retry_delay: float = 0.25,
         timeout: float = 30.0,
+        journal_detail: str = "full",
     ) -> None:
         if isinstance(bundle, str):
             bundle = Bundle.load(bundle)
@@ -249,6 +250,7 @@ class UndoableClient:
         self.retries = retries
         self.retry_delay = retry_delay
         self.timeout = timeout
+        self.journal_detail = journal_detail
         self.journal: List[dict] = []
         self._id_map: Dict[str, Dict[str, Scalar]] = {}
         for entry in self.store.load():
@@ -412,7 +414,7 @@ class UndoableClient:
                     entry["created"] = {"param": name, "value": inverse["params"][name]}
                     break
         self.journal.append(entry)
-        self.store.save(entry)
+        self._persist(entry)
         return {**response, "entry": entry}
 
     def dependents_of(self, entry: dict) -> List[dict]:
@@ -462,7 +464,7 @@ class UndoableClient:
         if not target.get("inverse"):
             target["status"] = "failed"
             target["undoError"] = f"cannot be undone: {target.get('inverseError')}"
-            self.store.save(target)
+            self._persist(target)
             raise UndoError(f"Entry #{target['seq']} ({target['operationId']}) cannot be undone: {target.get('inverseError')}", target)
 
         inverse = self._remap_request(target["inverse"])
@@ -472,7 +474,7 @@ class UndoableClient:
             check_path = fill_path(check["pathTemplate"], self._remap_params(check["params"]))
             current = self.request("get", check_path, query=check.get("query"))
             if check.get("mode") == "diff":
-                conflicts = _compare(check["expected"], _state_of(current))
+                conflicts = _compare(check["expected"], _state_of(current), "", target["session"])
                 if conflicts:
                     return self._conflict(target, conflicts, current)
             else:
@@ -483,7 +485,7 @@ class UndoableClient:
                     return self._conflict(target, [{"field": "(resource)", "expected": "exists", "actual": f"HTTP {current['status']}"}], current)
                 if current["status"] >= 300:
                     raise UndoError(f"Undo of #{target['seq']}: could not read current state (GET {check_path} -> HTTP {current['status']})", target, current)
-                conflicts = _compare(check["expected"], current["data"])
+                conflicts = _compare(check["expected"], current["data"], "", target["session"])
                 if conflicts:
                     return self._conflict(target, conflicts, current)
             etag = current["headers"].get("etag")
@@ -509,7 +511,7 @@ class UndoableClient:
         if res["status"] >= 400 and not (inverse["method"] == "delete" and res["status"] in (404, 410)):
             target["status"] = "failed"
             target["undoError"] = f"{inverse['method'].upper()} {inverse['path']} -> HTTP {res['status']}"
-            self.store.save(target)
+            self._persist(target)
             raise UndoError(f"Undo of #{target['seq']} ({target['operationId']}) failed: {target['undoError']}", target, res)
 
         identity = target.get("identity")
@@ -605,17 +607,30 @@ class UndoableClient:
 
     # -- internals ------------------------------------------------------------
 
+    def _persist(self, entry: dict) -> None:
+        """Save to the store; with journal_detail='minimal', without the bodies undo doesn't need."""
+        if self.journal_detail != "minimal":
+            self.store.save(entry)
+            return
+        slim = {**entry, "request": {**entry["request"], "body": None}, "response": {"status": entry["response"]["status"], "data": None, "headers": {}}}
+        if entry.get("check"):
+            slim["check"] = {**entry["check"], "expected": _hash_values(entry["check"]["expected"], entry["session"])}
+        slim.pop("before", None)
+        if entry.get("undoResponse"):
+            slim["undoResponse"] = {"status": entry["undoResponse"]["status"], "data": None, "headers": {}}
+        self.store.save(slim)
+
     def _finish(self, target: dict, res: dict) -> dict:
         target["status"] = "undone"
         target["undone"] = True
         target.pop("undoError", None)
-        self.store.save(target)
+        self._persist(target)
         return res
 
     def _conflict(self, target: dict, conflicts: List[dict], res: dict):
         target["status"] = "conflict"
         target["undoError"] = "state changed since the call"
-        self.store.save(target)
+        self._persist(target)
         raise ConflictError(target, conflicts, res)
 
     def _record_id(self, entry: dict, param: str, old: Scalar, new: Scalar) -> None:
@@ -871,14 +886,35 @@ def _changed_state(before: dict, after: dict) -> dict:
     return {k: b.get(k) for k in {*a, *b} - VOLATILE_FIELDS if _stable(a.get(k)) != _stable(b.get(k))}
 
 
-def _compare(expected: dict, current: Any, prefix: str = "") -> List[dict]:
+HASHED = "$undogenSha256"
+
+
+def _stable_js(v: Any) -> str:
+    """JSON like the TypeScript stableStringify (sorted keys, no spaces), so hashes match across runtimes."""
+    return json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _hash_values(expected: dict, salt: str) -> dict:
+    out = {}
+    for k, v in expected.items():
+        if isinstance(v, dict) and HASHED not in v:
+            out[k] = _hash_values(v, salt)
+        else:
+            out[k] = {HASHED: hashlib.sha256((salt + _stable_js(v)).encode()).hexdigest()}
+    return out
+
+
+def _compare(expected: dict, current: Any, prefix: str = "", salt: str = "") -> List[dict]:
     cur = current if isinstance(current, dict) else {}
     nested = _envelope_keys(expected, cur)
     out = []
     for k, v in expected.items():
         actual = loose_get(cur, k)[1]
-        if k in nested:
-            out.extend(_compare(v, actual, f"{prefix}{k}."))
+        if isinstance(v, dict) and HASHED in v:
+            if hashlib.sha256((salt + _stable_js(actual)).encode()).hexdigest() != v[HASHED]:
+                out.append({"field": prefix + k, "expected": "(hidden: journal_detail is minimal)", "actual": actual})
+        elif k in nested or (isinstance(v, dict) and any(isinstance(x, dict) and HASHED in x for x in v.values())):
+            out.extend(_compare(v, actual, f"{prefix}{k}.", salt))
         elif _stable(actual) != _stable(v):
             out.append({"field": prefix + k, "expected": v, "actual": actual})
     return out

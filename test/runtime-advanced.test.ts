@@ -759,3 +759,25 @@ describe('RPC create/delete with body arguments (Slack style)', () => {
     }
   });
 });
+
+describe("journalDetail: 'minimal'", () => {
+  it('persists only what undo needs, and undo (with its conflict check) still works from it', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const path = join(dir, 'minimal.jsonl');
+    const opts = { spec, baseUrl: server.url, store: new FileJournalStore(path), journalDetail: 'minimal' as const };
+    const agent = await UndoableClient.open(opts);
+    const id = idOf(await agent.call('createTodo', { body: { title: 'private: salary review' } }));
+    // A create is undone by a bodiless DELETE: nothing of its data needs to be kept.
+    expect(await readFile(path, 'utf8')).not.toContain('salary');
+    expect(agent.journal[0]!.request.body).toEqual({ title: 'private: salary review' }); // memory stays full
+
+    // The conflict check still works from hashes.
+    await newClient().call('updateTodo', { params: { todoId: id }, body: { title: 'edited by someone else' } });
+    const later = await UndoableClient.open(opts);
+    const err = await later.undo(1).catch((e) => e);
+    expect(err).toBeInstanceOf(ConflictError);
+    expect(err.conflicts).toEqual([{ field: 'title', expected: '(hidden: journalDetail is minimal)', actual: 'edited by someone else' }]);
+    await later.undo(1, { force: true });
+    expect((await later.call('getTodo', { params: { todoId: id } })).status).toBe(404);
+  });
+});
