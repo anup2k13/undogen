@@ -207,6 +207,53 @@ This works with any MCP client (Cursor, VS Code, Codex, and others):
 - **Conflicts come back as tool errors**, with the exact fields someone else changed, so the agent can ask before forcing.
 - **The journal outlives the session**: `undogen undo --journal agent-run.jsonl --all` rolls back from your terminal.
 
+### 5. Add undo to any existing MCP server
+
+No OpenAPI spec? `undogen wrap` sits in front of any stdio MCP server and adds journaling and undo from the outside. It infers inverses from tool names and input schemas:
+
+```bash
+npx undogen wrap --plan -- npx -y your-mcp-server     # see what undogen infers, then exit
+```
+
+```
+  list_notes    read-only    none
+  create_note   reversible   delete-created          ↺ delete_note
+  update_note   reversible   restore-snapshot        ↺ update_note
+  delete_note   compensable  recreate-from-snapshot  ↺ create_note
+  send_note     irreversible none                    "send" describes an effect that cannot be called back
+  pin_note      unknown      none                    No inverse tool could be inferred; declare one in the config
+  create_issue  compensable  soft-delete             ↺ update_issue
+```
+
+To use it, point your MCP client at the wrapper instead of the server:
+
+```json
+{
+  "mcpServers": {
+    "notes": {
+      "command": "npx",
+      "args": ["-y", "undogen", "wrap", "--journal", "./agent-run.jsonl", "--", "npx", "-y", "your-mcp-server"]
+    }
+  }
+}
+```
+
+It works much like the OpenAPI mode:
+
+- **Inverses are found by name.** Pairs like `create_x`/`delete_x` and `update_x`/`get_x` are matched, and `create_x` with an `update_x` whose `state` enum includes `closed` becomes a soft delete.
+- **Identity values are looked up in results.** For example, `issue_number` is found in `{ "number": 7 }`, and ids are found inside nested objects like `{ "note": { "id": … } }`.
+- **Every write result tells the agent how it will be undone**, e.g. `[undogen] journaled as #1; undogen_undo will run delete_note {"id":"n1"}`.
+- **Conflict detection** refuses to undo when the data changed after the agent's write.
+- **Irreversible and unknown tools are passed through**, but marked `⚠ CANNOT BE UNDONE` with `destructiveHint`. Pass `--hide-irreversible` to drop them entirely.
+- **A config file declares what names can't reveal:**
+
+```json
+{ "tools": { "pin_note": { "inverse": "update_note", "args": { "id": "request.id", "pinned": { "literal": false } } },
+             "publish_post": { "reversibility": "irreversible", "reason": "Readers may already have seen it" } } }
+```
+
+Try it with the bundled example server: `npx undogen wrap --plan -- npx tsx examples/notes-mcp/server.ts`.
+
 ## How the compiler works
 
 | Pattern in the spec | Strategy | Inverse |
@@ -289,7 +336,7 @@ When the compiler isn't sure, it stays cautious: an operation it can't classify 
 
 ## Roadmap
 
-- Wrap existing MCP servers (not just OpenAPI APIs) with journaling and undo
+- Undo for wrapped MCP servers from the terminal (`undogen undo` currently replays HTTP journals only)
 - Learning bindings from verification runs (turning `unknown` into `verified` automatically)
 - External `$ref`s, GraphQL mutations
 

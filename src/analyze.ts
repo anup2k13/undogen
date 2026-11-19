@@ -42,7 +42,7 @@ const ACTION_PAIRS: Array<[string, string]> = [
 ];
 
 /** Verbs whose effects leave the system boundary or cannot be called back. */
-const IRREVERSIBLE_VERBS = new Set([
+export const IRREVERSIBLE_VERBS = new Set([
   'send', 'email', 'mail', 'notify', 'sms', 'broadcast', 'charge', 'pay', 'payout',
   'transfer', 'refund', 'purge', 'wipe', 'shred', 'deliver', 'dispatch', 'execute', 'remind',
   'cancel', 'merge', 'revoke', 'rerun', 'rerequest', 'ping', 'redeliver', 'dismiss', 'trigger',
@@ -60,10 +60,10 @@ const SIDE_EFFECT_FREE_VERBS = new Set([
 ]);
 
 /** Values of a state/status field that mean "this is gone" for APIs without DELETE. */
-const SOFT_DELETE_STATES = ['closed', 'archived', 'cancelled', 'canceled', 'inactive', 'deleted', 'disabled', 'revoked'];
+export const SOFT_DELETE_STATES = ['closed', 'archived', 'cancelled', 'canceled', 'inactive', 'deleted', 'disabled', 'revoked'];
 
 /** Crude singularisation so "dispatches"/"pings" match "dispatch"/"ping". */
-const stems = (t: string) => [t, t.replace(/es$/, ''), t.replace(/s$/, '')];
+export const stems = (t: string) => [t, t.replace(/es$/, ''), t.replace(/s$/, '')];
 
 const MUTATING: HttpMethod[] = ['post', 'put', 'patch', 'delete'];
 

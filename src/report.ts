@@ -1,4 +1,5 @@
 import type { JournalEntry } from './runtime.js';
+import type { ToolPlan } from './wrap.js';
 import type { Analysis, InversePlan, RequestTemplate, Reversibility } from './types.js';
 import type { Outcome, VerifyReport } from './verify.js';
 
@@ -153,11 +154,24 @@ export function formatJournal(entries: JournalEntry[], file: string): string {
         ? c.green('undoable')
         : c.red('no undo');
     lines.push(
-      `  ${c.dim(`#${String(e.seq).padEnd(4)}`)}${pad(e.operationId, idW)}${pad(e.request.method.toUpperCase(), 7)}${pad(e.request.path, 34)}${CLASS_COLOR[e.plan.reversibility](pad(e.plan.reversibility, 13))}${state}`,
+      `  ${c.dim(`#${String(e.seq).padEnd(4)}`)}${pad(e.operationId, idW)}${pad(e.request.path.startsWith('mcp:') ? 'TOOL' : e.request.method.toUpperCase(), 7)}${pad(e.request.path.replace(/^mcp:/, ''), 34)}${CLASS_COLOR[e.plan.reversibility](pad(e.plan.reversibility, 13))}${state}`,
     );
-    if (e.inverse && !e.undone) lines.push(c.dim(`        ↺ ${e.inverse.method.toUpperCase()} ${e.inverse.path}${e.inverse.body !== undefined ? '  ' + JSON.stringify(e.inverse.body) : ''}`));
+    if (e.inverse && !e.undone) lines.push(c.dim(`        ↺ ${e.inverse.path.startsWith('mcp:') ? e.inverse.path.slice(4) : `${e.inverse.method.toUpperCase()} ${e.inverse.path}`}${e.inverse.body !== undefined ? '  ' + JSON.stringify(e.inverse.body) : ''}`));
     if (!e.inverse && e.inverseError && !e.undone) lines.push(c.dim(`        · ${e.inverseError}`));
   }
   lines.push('');
+  return lines.join('\n');
+}
+
+export function formatToolPlans(plans: ToolPlan[], server: string): string {
+  const lines = ['', `${c.bold('undogen wrap --plan')}  ${c.dim('·')}  ${server}  ${c.dim('·')}  ${plans.length} tools`, ''];
+  const w = Math.max(12, ...plans.map((p) => p.tool.length)) + 2;
+  const color = (r: ToolPlan['reversibility']) => (r === 'read-only' ? c.dim : CLASS_COLOR[r]);
+  for (const p of plans) {
+    lines.push(`  ${pad(p.tool, w)}${color(p.reversibility)(pad(p.reversibility, 13))}${pad(p.strategy, 24)}${c.dim(p.inverse ? `↺ ${p.inverse.tool}` : p.reversibility === 'read-only' ? '' : p.reasons[0] ?? '')}`);
+  }
+  const count = (r: string) => plans.filter((p) => p.reversibility === r).length;
+  const writes = plans.length - count('read-only');
+  lines.push('', `  ${count('read-only')} read-only · ${writes} writes: ${c.green(`${count('reversible')} reversible`)} · ${c.cyan(`${count('compensable')} compensable`)} · ${c.red(`${count('irreversible')} irreversible`)} · ${c.yellow(`${count('unknown')} unknown`)}`, '');
   return lines.join('\n');
 }

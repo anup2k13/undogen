@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **`undogen wrap -- <mcp server command>`** adds journaling and undo to any existing stdio MCP server, with no spec needed. Inverses are inferred from tool names and input schemas: create/delete, update with get, delete re-created via create, and soft-delete via a state enum. A config file declares the rest. `--plan` shows what is inferred, and `--hide-irreversible` drops tools that can't be undone. Undo results, conflict detection and the journal file work as in `undogen mcp`.
+- `examples/notes-mcp`: a small ordinary MCP server for trying `wrap`.
 - **`undogen init`** generates a fixtures file: example bodies for create operations, and `prepare` steps for actions that need their counterpart first. With `--base-url` it probes a sandbox, adds missing setup steps, and lists what still needs a human.
 - **New `inconclusive` verify outcome** for operations that changed nothing visible, so their undo was never exercised. These were previously reported as failures, which wrongly blamed the API. The detail suggests the prepare step to add.
 - **Swagger 2.0 support**: `in: body` and `formData` parameters, `#/definitions` refs, response schemas, and `basePath`.

@@ -31,3 +31,4 @@ export { VERSION } from './version.js';
 export type * from './types.js';
 export { createMcpServer, serveStdio, type McpOptions } from './mcp.js';
 export { generateFixtures, type InitOptions, type InitResult } from './init.js';
+export { createWrapServer, planTools, inspectServer, wrapStdio, type WrapConfig, type WrapOptions, type ToolPlan, type ToolDeclaration } from './wrap.js';

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { analyze } from './analyze.js';
 import { readJournal } from './journal.js';
-import { c, formatAnalysis, formatJournal, formatResultLine, formatSummary, toBadge, toMarkdown } from './report.js';
+import { c, formatAnalysis, formatJournal, formatResultLine, formatSummary, formatToolPlans, toBadge, toMarkdown } from './report.js';
 import { UndoableClient, UndoConflictError } from './runtime.js';
 import { loadSpec } from './spec.js';
 import { VERSION } from './version.js';
@@ -18,6 +18,7 @@ ${c.bold('Usage')}
   undogen init    <spec> [--base-url <url>] [--out <file>] [--force]
   undogen verify  <spec> --base-url <url> [options]
   undogen mcp     <spec> --base-url <url> [--journal <file>] [--header <k:v>] [--allow-irreversible]
+  undogen wrap    [--config <file>] [--journal <file>] [--hide-irreversible] [--plan] -- <mcp server command...>
   undogen journal <file>
   undogen undo    --journal <file> --base-url <url> [--seq <n> | --all] [--force] [--header <k:v>]
 
@@ -43,6 +44,11 @@ ${c.bold('verify')}    Run each operation and its inverse against a test server,
   Exit code is 1 when any inverse fails verification.
 
 ${c.bold('mcp')}       Serve the API as MCP tools over stdio, with every write journaled and undoable.
+
+${c.bold('wrap')}      Put journaling and undo in front of any existing MCP server (stdio).
+  --config <file>        JSON { "tools": { name: { inverse, args, reversibility } } } for what names don't reveal
+  --hide-irreversible    Don't expose tools that cannot be undone
+  --plan                 Print what undogen infers for each tool, then exit
 
 ${c.bold('journal')}   Show what a journal recorded: each write, its inverse, and whether it was undone.
 
@@ -82,6 +88,9 @@ async function main(argv: string[]) {
       force: { type: 'boolean' },
       'allow-irreversible': { type: 'boolean' },
       out: { type: 'string' },
+      config: { type: 'string' },
+      'hide-irreversible': { type: 'boolean' },
+      plan: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
@@ -94,6 +103,25 @@ async function main(argv: string[]) {
     return process.exit(command || values.help ? 0 : 1);
   }
   const headers = parseHeaders(values.header);
+
+  if (command === 'wrap') {
+    const [, upstreamCommand, ...upstreamArgs] = positionals;
+    if (!upstreamCommand) throw new Error('wrap needs the MCP server command after --, e.g. undogen wrap -- npx -y some-mcp-server');
+    const config = values.config ? JSON.parse(await readFile(values.config, 'utf8')) : undefined;
+    if (values.plan) {
+      const { inspectServer } = await import('./wrap.js');
+      const plans = await inspectServer(upstreamCommand, upstreamArgs, config);
+      console.log(formatToolPlans(plans, [upstreamCommand, ...upstreamArgs].join(' ')));
+      return;
+    }
+    const { wrapStdio } = await import('./wrap.js');
+    await wrapStdio(upstreamCommand, upstreamArgs, {
+      config,
+      journalFile: values.journal,
+      hideIrreversible: !!values['hide-irreversible'],
+    });
+    return;
+  }
 
   if (command === 'journal') {
     const file = target ?? values.journal;

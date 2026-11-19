@@ -248,6 +248,12 @@ export class UndoableClient {
     if (!target.inverse) {
       throw new UndoError(`Entry #${target.seq} (${target.operationId}) cannot be undone: ${target.inverseError}`, target);
     }
+    if (target.inverse.path.startsWith('mcp:')) {
+      throw new UndoError(
+        `Entry #${target.seq} (${target.operationId}) was recorded by \`undogen wrap\`; undo it with the undogen_undo tool of the wrapped MCP server`,
+        target,
+      );
+    }
     if (target.guard && !options.force) {
       const live = await this.request('get', target.guard.path);
       if (live.status === 404) {
