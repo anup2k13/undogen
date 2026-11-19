@@ -236,3 +236,12 @@ def test_checkpoints(bundle_path, server_url):
     gone = client.call("createTodo", body={"title": "task"})["data"]["id"]
     assert [e["operationId"] for e in client.undo_to(cp)["undone"]] == ["createTodo"]
     assert get(f"{server_url}/todos/{gone}")[0] == 404 and get(f"{server_url}/todos/{keep}")[0] == 200
+
+
+def test_journal_compaction(bundle_path, server_url, tmp_path):
+    path = str(tmp_path / "c.jsonl")
+    client = UndoableClient(bundle_path, server_url, store=FileJournalStore(path))
+    client.call("createTodo", body={"title": "x"})
+    client.undo_all()
+    assert FileJournalStore(path).compact() == {"before": 2, "after": 1}
+    assert [e["status"] for e in FileJournalStore(path).load()] == ["undone"]

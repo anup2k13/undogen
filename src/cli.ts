@@ -23,7 +23,7 @@ ${c.bold('Usage')}
   undogen verify   <spec> --base-url <url>         Run each operation and its inverse on a sandbox, diff the state
   undogen mcp      <spec> --base-url <url>         Serve the API as MCP tools with journaling and undo tools
   undogen undo     <spec> --base-url <url> --journal <file> [--seq n | --all]
-  undogen journal  --journal <file> [--json]       Show a persisted journal
+  undogen journal  --journal <file> [--json]       Show a persisted journal (--compact rewrites it smaller)
   undogen learn    <spec> --base-url <url> --out <overrides.json>   Find id bindings for unknown creates by experiment
   undogen init     <spec> [--from-report report.json]               Write starter overrides.json and fixtures.json
   undogen annotate <spec> [-o <file>]              Write x-undogen declarations and OpenAPI links into the spec
@@ -102,6 +102,7 @@ const OPTIONS = {
   'overrides-out': { type: 'string' },
   'no-links': { type: 'boolean' },
   overwrite: { type: 'boolean' },
+  compact: { type: 'boolean' },
   markdown: { type: 'boolean' },
   'fail-on': { type: 'string' },
   help: { type: 'boolean', short: 'h' },
@@ -175,6 +176,10 @@ async function main(argv: string[]) {
 
   if (command === 'journal') {
     if (!values.journal) throw new UsageError('journal needs --journal <file>');
+    if (values.compact) {
+      const { before, after } = await new FileJournalStore(values.journal).compact();
+      return console.log(`  ${values.journal}: ${before} lines -> ${after} entries`);
+    }
     const entries = await new FileJournalStore(values.journal).load();
     if (values.json) return console.log(JSON.stringify(entries, null, 2));
     if (!entries.length) return console.log('  (empty journal)');

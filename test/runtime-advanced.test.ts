@@ -618,3 +618,19 @@ describe('checkpoints', () => {
     expect(client.journal.map((e) => e.status)).toEqual(['active', 'undone']);
   });
 });
+
+describe('journal compaction', () => {
+  it('keeps only the latest version of each entry, atomically and owner-only', async () => {
+    const { stat, readFile } = await import('node:fs/promises');
+    const path = join(dir, 'compact.jsonl');
+    const client = await UndoableClient.open({ spec, baseUrl: server.url, store: new FileJournalStore(path) });
+    const id = idOf(await client.call('createTodo', { body: { title: 'x' } }));
+    await client.call('updateTodo', { params: { todoId: id }, body: { title: 'y' } });
+    await client.undoAll();
+    expect((await readFile(path, 'utf8')).trim().split('\n')).toHaveLength(4);
+    expect(await new FileJournalStore(path).compact()).toEqual({ before: 4, after: 2 });
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    const reopened = await UndoableClient.open({ spec, baseUrl: server.url, store: new FileJournalStore(path) });
+    expect(reopened.journal.map((e) => [e.seq, e.status])).toEqual([[1, 'undone'], [2, 'undone']]);
+  });
+});

@@ -13,6 +13,7 @@
 ### Runtime
 - Journal files are created readable by their owner only (0600). Agent tools accept only the header parameters an operation declares, so a tool call cannot replace the configured credentials.
 - Persistent journals (`JournalStore`, `FileJournalStore`, `UndoableClient.open()`), undo by seq, `undogen undo` and `undogen journal`.
+- `FileJournalStore.compact()` and `undogen journal --compact` shrink a journal to the latest version of each entry.
 - Checkpoints: `checkpoint()` / `undoTo(checkpoint)` (Python: `checkpoint()` / `undo_to()`), the `undogen_checkpoint` tool with `undogen_undo_all { to }`, and `undogen undo --after <seq>`, to roll back one task of a longer session.
 - Dependency-aware undo (`DependencyError`, `{ cascade: true }`), id remapping after re-creation, opt-in child re-creation (`restoreChildren`, `--restore-children`), recursive up to three levels (projects → tasks → notes).
 - `Idempotency-Key` on undo requests; retries for `429` (honouring `Retry-After`), timeouts and `5xx`; per-request timeouts; entry status (`active`, `undone`, `failed`, `conflict`).

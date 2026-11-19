@@ -126,6 +126,20 @@ class FileJournalStore:
         with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
+    def compact(self) -> dict:
+        """Rewrite the file with only the latest version of each entry, atomically (temp file + rename)."""
+        if not os.path.exists(self.path):
+            return {"before": 0, "after": 0}
+        with open(self.path, encoding="utf-8") as f:
+            before = sum(1 for line in f if line.strip())
+        entries = self.load()
+        tmp = f"{self.path}.{os.getpid()}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.writelines(json.dumps(e, separators=(",", ":")) + "\n" for e in entries)
+        os.replace(tmp, self.path)
+        return {"before": before, "after": len(entries)}
+
 
 @dataclass
 class OutgoingRequest:

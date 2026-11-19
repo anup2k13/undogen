@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { analyze } from './analyze.js';
 import type { ApiSpec, BodyTemplate, ChildPlan, HttpMethod, InversePlan, Operation, RequestTemplate, ValueRef } from './types.js';
@@ -196,6 +196,26 @@ export class FileJournalStore implements JournalStore {
     await mkdir(dirname(this.path), { recursive: true });
     // Entries hold request and response bodies: keep the file readable by its owner only.
     await appendFile(this.path, JSON.stringify(entry) + '\n', { mode: 0o600 });
+  }
+
+  /**
+   * Rewrite the file with only the latest version of each entry (every save appends one).
+   * Atomic: written to a temporary file, then renamed over the journal. Don't run it while
+   * another process is appending to the same journal.
+   */
+  async compact(): Promise<{ before: number; after: number }> {
+    let before = 0;
+    try {
+      before = (await readFile(this.path, 'utf8')).split('\n').filter((l) => l.trim()).length;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { before: 0, after: 0 };
+      throw err;
+    }
+    const entries = await this.load();
+    const tmp = `${this.path}.${process.pid}.tmp`;
+    await writeFile(tmp, entries.map((e) => JSON.stringify(e) + '\n').join(''), { mode: 0o600 });
+    await rename(tmp, this.path);
+    return { before, after: entries.length };
   }
 }
 

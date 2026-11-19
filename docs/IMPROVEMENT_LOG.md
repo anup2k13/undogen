@@ -6,7 +6,6 @@ committed, and pushed; this file records what was done and what is next.
 ## Backlog (highest value first)
 
 - [ ] Checkpoints: `checkpoint()` / `undoTo(checkpoint)` in both runtimes, `undogen_checkpoint` + `undogen_undo_all { to }` tools, `undogen undo --to`
-- [ ] Journal compaction: `FileJournalStore.compact()` keeps the latest version of each entry
 - [ ] `undogen lint`: concrete spec changes that would make more operations undoable (for API owners)
 
 ## Done
@@ -28,3 +27,4 @@ committed, and pushed; this file records what was done and what is next.
 - **Python async adapters** (19 Nov): the OpenAI Agents adapter called the synchronous client inside its async handler, freezing the agent's event loop for the length of every API call; it now runs the call in a thread (`asyncio.to_thread`). The LangChain tools get an explicit coroutine too. The test fails on the old adapter and passes on the new one.
 - **HTML report** (19 Nov): `--report` also writes `report.html`: one file, no external assets, every value escaped, light and dark, failed diffs expanded. Rendered in Chromium at 1200px and 390px: the first phone render crushed the table into fragments, so on narrow screens each result is now a labelled card and diff tables scroll inside their own box (measured: no horizontal overflow at either width).
 - **Checkpoints** (19 Nov, TS + Python + MCP + CLI): `checkpoint()` / `undoTo(cp)`, `undogen_checkpoint` + `undogen_undo_all { to }`, `undogen undo --after <seq>`: roll back one task of a longer agent session and keep what came before.
+- **Journal compaction** (19 Nov, TS + Python + CLI): `FileJournalStore.compact()` / `undogen journal --compact` rewrites the journal with only the latest version of each entry (every status change appends one), atomically and owner-only.
