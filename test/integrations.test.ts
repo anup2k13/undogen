@@ -249,3 +249,23 @@ describe('init', () => {
     expect(fixtures.unarchiveTodo).toMatchObject({ prepare: [{ operationId: 'archiveTodo' }] });
   });
 });
+
+describe('tools: header parameters', () => {
+  it('exposes header parameters and sends them', async () => {
+    const s = parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'x', version: '1' },
+      paths: { '/things': { get: { operationId: 'listThings', parameters: [{ name: 'X-Tenant', in: 'header', required: true, schema: { type: 'string' } }], responses: {} } } },
+    });
+    const seen: Record<string, string>[] = [];
+    const f: typeof fetch = async (_u, init) => {
+      seen.push(init!.headers as Record<string, string>);
+      return new Response('[]', { status: 200 });
+    };
+    const client = new UndoableClient({ spec: s, baseUrl: 'http://x', fetch: f });
+    const [tool] = toolDefinitions(client, s.operations, { undoTools: false });
+    expect(tool!.inputSchema).toMatchObject({ required: ['headers'], properties: { headers: { required: ['X-Tenant'] } } });
+    await tool!.execute({ headers: { 'X-Tenant': 'acme' } });
+    expect(seen[0]!['X-Tenant']).toBe('acme');
+  });
+});

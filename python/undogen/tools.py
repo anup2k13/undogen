@@ -83,6 +83,14 @@ def _input_schema(op: dict) -> Dict[str, Any]:
         }
         if any(q.get("required") for q in op["queryParams"]):
             required.append("query")
+    if op.get("headerParams"):
+        props["headers"] = {
+            "type": "object",
+            "properties": {h["name"]: h.get("schema") or {"type": "string"} for h in op["headerParams"]},
+            "required": [h["name"] for h in op["headerParams"] if h.get("required")],
+        }
+        if any(h.get("required") for h in op["headerParams"]):
+            required.append("headers")
     if op["method"] != "get" and op.get("hasBody"):
         props["body"] = op.get("requestSchema") or {"type": "object"}
         required.append("body")
@@ -108,7 +116,8 @@ def tool_definitions(
 
         def execute(_op: dict = op, approved: bool = False, **args: Any) -> dict:
             params = {p: args[p] for p in _op["pathParams"] if p in args}
-            res = client.call(_op["id"], params=params, body=args.get("body"), query=args.get("query"), approved=approved)
+            headers = {k: str(v) for k, v in (args.get("headers") or {}).items()} or None
+            res = client.call(_op["id"], params=params, body=args.get("body"), query=args.get("query"), headers=headers, approved=approved)
             out = {"status": res["status"], "data": res["data"]}
             if res.get("entry"):
                 out["journal"] = describe_entry(res["entry"])

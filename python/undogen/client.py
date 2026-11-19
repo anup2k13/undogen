@@ -391,6 +391,7 @@ class UndoableClient:
             if e["seq"] > entry["seq"]
             and e["status"] != "undone"
             and e["plan"]["strategy"] != "no-side-effects"
+            and e.get("inverse") is not None
             and str((e["request"].get("params") or {}).get(param)) in ids
         ]
 
@@ -455,7 +456,8 @@ class UndoableClient:
             body=inverse.get("body"),
             content_type=inverse.get("contentType"),
             headers=headers,
-            idempotent=True,
+            # A POST retried after a timeout/5xx could create the resource twice if the API ignores the key.
+            idempotent=inverse["method"] != "post",
         )
         target["undoResponse"] = res
         if res["status"] == 412:

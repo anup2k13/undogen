@@ -344,3 +344,46 @@ describe('Twilio-style APIs', () => {
     }
   });
 });
+
+describe('review fixes', () => {
+  it('does not let an irreversible call that can never be undone block undoing what it used', async () => {
+    const client = newClient({ allowIrreversible: true });
+    const id = idOf(await client.call('createTodo', { body: { title: 'reminded' } }));
+    await client.call('sendReminder', { params: { todoId: id } });
+    const { undone, failed } = await client.undoAll();
+    expect(failed.map((f) => f.entry.operationId)).toEqual(['sendReminder']);
+    expect(undone.map((e) => e.operationId)).toEqual(['createTodo']);
+    expect((await client.call('getTodo', { params: { todoId: id } })).status).toBe(404);
+  });
+
+  it('loads an existing journal even when constructed directly, so sequence numbers never collide', async () => {
+    const path = join(dir, 'constructed.jsonl');
+    const first = new UndoableClient({ spec, baseUrl: server.url, store: new FileJournalStore(path) });
+    await first.call('createTodo', { body: { title: 'one' } });
+    const second = new UndoableClient({ spec, baseUrl: server.url, store: new FileJournalStore(path) });
+    const res = await second.call('createTodo', { body: { title: 'two' } });
+    expect(res.entry!.seq).toBe(2);
+    expect(second.journal.map((e) => e.seq)).toEqual([1, 2]);
+    expect((await new FileJournalStore(path).load()).map((e) => (e.request.body as { title: string }).title)).toEqual(['one', 'two']);
+  });
+
+  it('does not retry a POST undo after a 5xx (it could create the resource twice)', async () => {
+    const calls: string[] = [];
+    let deleted = false;
+    const f: typeof fetch = async (input, init) => {
+      const method = init!.method!;
+      calls.push(method);
+      if (method === 'POST' && deleted) return new Response('{}', { status: 503 });
+      return fetch(input, init).then((r) => {
+        if (method === 'DELETE') deleted = true;
+        return r;
+      });
+    };
+    const setup = newClient();
+    const id = idOf(await setup.call('createTodo', { body: { title: 'x' } }));
+    const client = newClient({ fetch: f, retryDelayMs: 1 });
+    await client.call('deleteTodo', { params: { todoId: id } });
+    await expect(client.undo()).rejects.toThrow(/HTTP 503/);
+    expect(calls.filter((m) => m === 'POST')).toHaveLength(1);
+  });
+});

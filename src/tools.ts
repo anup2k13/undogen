@@ -89,6 +89,15 @@ function inputSchemaFor(op: Operation): ToolDefinition['inputSchema'] {
     };
     if (op.queryParams.some((q) => q.required)) required.push('query');
   }
+  if (op.headerParams.length) {
+    properties.headers = {
+      type: 'object',
+      description: 'Header parameters of this operation',
+      properties: Object.fromEntries(op.headerParams.map((h) => [h.name, h.schema ?? { type: 'string' }])),
+      required: op.headerParams.filter((h) => h.required).map((h) => h.name),
+    };
+    if (op.headerParams.some((h) => h.required)) required.push('headers');
+  }
   if (op.method !== 'get' && (op.requestSchema || op.requestExample !== undefined)) {
     properties.body = cleanSchema(op.requestSchema);
     required.push('body');
@@ -142,6 +151,7 @@ export function toolDefinitions(client: UndoableClient, operations: Operation[],
           await client.call(op.id, {
             params,
             query: args.query as Record<string, string | number | boolean> | undefined,
+            headers: args.headers ? Object.fromEntries(Object.entries(args.headers as Record<string, unknown>).map(([k, v]) => [k, String(v)])) : undefined,
             body: args.body,
           }),
         );

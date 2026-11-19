@@ -229,6 +229,7 @@ export function toBundle(spec: ApiSpec, analysis: Analysis, version: string): ob
       summary: o.summary,
       pathParams: o.pathParams,
       queryParams: o.queryParams.map((q) => ({ name: q.name, required: q.required, schema: q.schema })),
+      headerParams: o.headerParams.map((h) => ({ name: h.name, required: h.required, schema: h.schema })),
       requestContentType: o.requestContentType,
       hasBody: o.requestSchema !== undefined || o.requestExample !== undefined,
       requestSchema: o.requestSchema ? JSON.parse(JSON.stringify(o.requestSchema, (k, v) => (k === 'x-undogen-variants' ? undefined : v))) : undefined,

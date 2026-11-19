@@ -122,3 +122,13 @@ def test_tool_definitions(bundle_path, server_url):
     created = tools["createTodo"].execute(body={"title": "tool"})
     assert created["journal"]["undo"].startswith("DELETE /todos/")
     assert tools["undogen_undo"].execute()["status"] == 204
+
+
+def test_irreversible_entries_do_not_block_rollback(bundle_path, server_url):
+    client = UndoableClient(bundle_path, server_url, allow_irreversible=True)
+    tid = client.call("createTodo", body={"title": "reminded"})["data"]["id"]
+    client.call("sendReminder", params={"todoId": tid})
+    result = client.undo_all()
+    assert [f["entry"]["operationId"] for f in result["failed"]] == ["sendReminder"]
+    assert [e["operationId"] for e in result["undone"]] == ["createTodo"]
+    assert get(f"{server_url}/todos/{tid}")[0] == 404

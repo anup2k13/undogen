@@ -257,6 +257,7 @@ export class UndoableClient {
   /** param -> old id -> new id, for resources re-created by undo. */
   private readonly idMap = new Map<string, Map<string, Scalar>>();
   private seq = 0;
+  private loading?: Promise<void>;
 
   constructor(private readonly options: ClientOptions) {
     this.ops = new Map(options.spec.operations.map((o) => [o.id, o]));
@@ -270,14 +271,29 @@ export class UndoableClient {
   /** Create a client and load the journal from `options.store`, to resume or undo an earlier session. */
   static async open(options: ClientOptions): Promise<UndoableClient> {
     const client = new UndoableClient(options);
-    for (const entry of (await options.store?.load()) ?? []) {
-      client.journal.push(entry);
-      client.seq = Math.max(client.seq, entry.seq);
-      for (const [param, map] of Object.entries(entry.idMap ?? {})) {
-        for (const [oldId, newId] of Object.entries(map)) client.rememberId(param, oldId, newId);
-      }
-    }
+    await client.ready();
     return client;
+  }
+
+  /**
+   * Load the journal from the store (once). `call` and `undo` wait for it, so a client
+   * constructed directly on an existing journal never reuses its sequence numbers.
+   */
+  ready(): Promise<void> {
+    this.loading ??= (async () => {
+      const entries = (await this.store?.load()) ?? [];
+      const known = new Set(this.journal.map((e) => e.seq));
+      for (const entry of entries) {
+        if (known.has(entry.seq)) continue;
+        this.journal.push(entry);
+        this.seq = Math.max(this.seq, entry.seq);
+        for (const [param, map] of Object.entries(entry.idMap ?? {})) {
+          for (const [oldId, newId] of Object.entries(map)) this.rememberId(param, oldId, newId);
+        }
+      }
+      this.journal.sort((a, b) => a.seq - b.seq);
+    })();
+    return this.loading;
   }
 
   planFor(operationId: string): InversePlan | undefined {
@@ -292,6 +308,7 @@ export class UndoableClient {
   async call(operationId: string, input: CallInput = {}): Promise<HttpResult & { entry?: JournalEntry }> {
     const op = this.ops.get(operationId);
     if (!op) throw new Error(`Unknown operation: ${operationId}`);
+    await this.ready();
     const params = input.params ?? {};
 
     if (op.method === 'get') {
@@ -397,7 +414,11 @@ export class UndoableClient {
     return { ...response, entry };
   }
 
-  /** Later entries (not yet undone) that use the resource `entry` created. */
+  /**
+   * Later entries (not yet undone) that use the resource `entry` created. Entries that
+   * can never be undone (irreversible calls, no inverse) don't count: undoing them first
+   * is impossible, so they must not block the rest of a rollback.
+   */
   dependentsOf(entry: JournalEntry): JournalEntry[] {
     if (!entry.created) return [];
     const { param, value } = entry.created;
@@ -407,6 +428,7 @@ export class UndoableClient {
         e.seq > entry.seq &&
         e.status !== 'undone' &&
         e.plan.strategy !== 'no-side-effects' &&
+        e.inverse !== null &&
         e.request.params?.[param] !== undefined &&
         ids.has(String(e.request.params[param])),
     );
@@ -414,6 +436,7 @@ export class UndoableClient {
 
   /** Undo one entry (or seq). Default: the most recent entry not yet undone. */
   async undo(entryOrSeq?: JournalEntry | number, opts: UndoOptions = {}): Promise<HttpResult> {
+    await this.ready();
     const target =
       typeof entryOrSeq === 'number'
         ? this.journal.find((e) => e.seq === entryOrSeq)
@@ -469,7 +492,9 @@ export class UndoableClient {
       body: inverse.body,
       contentType: inverse.contentType,
       headers,
-      idempotent: true,
+      // Retrying a POST after a timeout or 5xx could create the resource twice if the API
+      // ignores the idempotency key; restoring writes (PUT/PATCH/DELETE) are safe to repeat.
+      idempotent: inverse.method !== 'post',
     });
     target.undoResponse = res;
     if (res.status === 412) {
@@ -494,6 +519,7 @@ export class UndoableClient {
 
   /** Undo everything in reverse order (a saga rollback). Continues past failures and reports them. */
   async undoAll(opts: Omit<UndoOptions, 'cascade'> = {}): Promise<{ undone: JournalEntry[]; failed: Array<{ entry: JournalEntry; error: Error }> }> {
+    await this.ready();
     const undone: JournalEntry[] = [];
     const failed: Array<{ entry: JournalEntry; error: Error }> = [];
     for (const entry of [...this.journal].reverse()) {
