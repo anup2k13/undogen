@@ -1,0 +1,6 @@
+node_modules/
+dist/
+coverage/
+undogen-report/
+*.log
+.DS_Store
