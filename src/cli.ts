@@ -63,6 +63,7 @@ ${c.bold('diff')}
 
 ${c.bold('undo')}
   --seq <n>              Undo this entry (default: the most recent one)    --all   Undo everything, newest first
+  --after <n>            Undo everything after entry n (a checkpoint), newest first
   --force                Undo even if someone changed the data since       --cascade   Undo dependent entries first
 
 Exit codes: 0 ok, 1 an inverse failed verification (or an undo failed), 2 usage or setup error.
@@ -91,6 +92,7 @@ const OPTIONS = {
   irreversible: { type: 'string' },
   'no-reads': { type: 'boolean' },
   seq: { type: 'string' },
+  after: { type: 'string' },
   all: { type: 'boolean' },
   force: { type: 'boolean' },
   cascade: { type: 'boolean' },
@@ -303,8 +305,10 @@ async function main(argv: string[]) {
       if (!existsSync(values.journal)) throw new UsageError(`No journal at ${values.journal}`);
       const client = await UndoableClient.open({ spec, baseUrl: needBaseUrl(values), plans: analysis.plans, headers, store: new FileJournalStore(values.journal) });
       const opts = { force: values.force, cascade: values.cascade };
-      if (values.all) {
-        const { undone, failed } = await client.undoAll(opts);
+      if (values.all || values.after) {
+        const after = values.after !== undefined ? Number(values.after) : undefined;
+        if (after !== undefined && !Number.isInteger(after)) throw new UsageError('--after must be a number');
+        const { undone, failed } = await client.undoAll({ ...opts, after });
         for (const e of undone) console.log(c.green(`  ↺ #${e.seq} ${e.operationId}  ${describeEntry(e).undo}`));
         for (const f of failed) console.log(c.red(`  ✗ #${f.entry.seq} ${f.entry.operationId}: ${f.error.message}`));
         if (failed.length) process.exitCode = 1;

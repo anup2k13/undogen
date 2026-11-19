@@ -510,11 +510,21 @@ class UndoableClient:
             self._restore_children(target)
         return self._finish(target, res)
 
-    def undo_all(self, *, force: bool = False) -> dict:
-        """Undo everything, newest first. Continues past failures and reports them."""
+    def checkpoint(self) -> int:
+        """Mark the current point in the journal; undo_to(checkpoint) rolls back everything done since."""
+        return self._seq
+
+    def undo_to(self, checkpoint: int, *, force: bool = False) -> dict:
+        """Undo every entry made after `checkpoint`, newest first."""
+        return self.undo_all(force=force, after=checkpoint)
+
+    def undo_all(self, *, force: bool = False, after: Optional[int] = None) -> dict:
+        """Undo everything (or everything after a checkpoint), newest first. Continues past failures and reports them."""
         undone, failed = [], []
         for entry in reversed(list(self.journal)):
             if entry["status"] == "undone":
+                continue
+            if after is not None and entry["seq"] <= after:
                 continue
             try:
                 self.undo(entry, force=force)

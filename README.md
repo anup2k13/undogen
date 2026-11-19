@@ -135,6 +135,9 @@ await client.call('updateTodo', { params: { todoId: 't1' }, body: { done: true }
 client.journal;          // every write, its captured "before" state, and the resolved inverse request
 await client.undo();     // undo the most recent write
 await client.undoAll();  // saga-style rollback of the whole session, newest first
+
+const cp = await client.checkpoint();   // before a task...
+await client.undoTo(cp);                // ...roll back only what the task did
 ```
 
 Undo is careful about the world having moved on:
@@ -162,7 +165,7 @@ npx undogen mcp openapi.yaml --base-url https://sandbox.example.com \
   --header "authorization: Bearer $TOKEN" --journal .undogen/journal.jsonl
 ```
 
-This serves every operation as an MCP tool, plus `undogen_undo`, `undogen_undo_all`, `undogen_journal`, and `undogen_preview` (ask what undo would do *before* acting). Tool descriptions tell the agent up front what can be undone, and MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`) come from the compiled plans. Irreversible calls are put to the human through MCP elicitation; when the client can't ask, they're refused (`--irreversible allow|deny` changes that). Use `--only "issues/*,pulls/get"` to expose a subset of a large API.
+This serves every operation as an MCP tool, plus `undogen_undo`, `undogen_undo_all`, `undogen_journal`, `undogen_checkpoint` (mark the start of a task, then `undogen_undo_all { to }` rolls back just that task), and `undogen_preview` (ask what undo would do *before* acting). Tool descriptions tell the agent up front what can be undone, and MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`) come from the compiled plans. Irreversible calls are put to the human through MCP elicitation; when the client can't ask, they're refused (`--irreversible allow|deny` changes that). Use `--only "issues/*,pulls/get"` to expose a subset of a large API.
 
 For Claude Desktop or any client that launches stdio servers:
 

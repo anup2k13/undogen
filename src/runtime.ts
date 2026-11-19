@@ -557,14 +557,32 @@ export class UndoableClient {
   }
 
   /** Undo everything in reverse order (a saga rollback). Continues past failures and reports them. */
-  async undoAll(opts: Omit<UndoOptions, 'cascade'> = {}): Promise<{ undone: JournalEntry[]; failed: Array<{ entry: JournalEntry; error: Error }> }> {
+  /**
+   * Mark the current point in the journal. Later, `undoTo(checkpoint)` rolls back
+   * everything done since (e.g. one task of a longer agent session).
+   */
+  async checkpoint(): Promise<number> {
+    await this.ready();
+    return this.seq;
+  }
+
+  /** Undo every entry made after `checkpoint`, newest first. */
+  undoTo(checkpoint: number, opts: Omit<UndoOptions, 'cascade'> = {}) {
+    return this.undoAll({ ...opts, after: checkpoint });
+  }
+
+  async undoAll(
+    opts: Omit<UndoOptions, 'cascade'> & { /** Only entries after this checkpoint (seq). */ after?: number } = {},
+  ): Promise<{ undone: JournalEntry[]; failed: Array<{ entry: JournalEntry; error: Error }> }> {
     await this.ready();
     const undone: JournalEntry[] = [];
     const failed: Array<{ entry: JournalEntry; error: Error }> = [];
+    const { after, ...undoOpts } = opts;
     for (const entry of [...this.journal].reverse()) {
       if (entry.status === 'undone') continue;
+      if (after !== undefined && entry.seq <= after) continue;
       try {
-        await this.undo(entry, opts);
+        await this.undo(entry, undoOpts);
         undone.push(entry);
       } catch (error) {
         failed.push({ entry, error: error as Error });

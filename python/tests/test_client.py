@@ -227,3 +227,12 @@ def test_paired_action_conflict(bundle_path, server_url):
     with pytest.raises(ConflictError) as err:
         agent.undo(archived["entry"])
     assert err.value.conflicts == [{"field": "archived", "expected": True, "actual": False}]
+
+
+def test_checkpoints(bundle_path, server_url):
+    client = UndoableClient(bundle_path, server_url)
+    keep = client.call("createTodo", body={"title": "before"})["data"]["id"]
+    cp = client.checkpoint()
+    gone = client.call("createTodo", body={"title": "task"})["data"]["id"]
+    assert [e["operationId"] for e in client.undo_to(cp)["undone"]] == ["createTodo"]
+    assert get(f"{server_url}/todos/{gone}")[0] == 404 and get(f"{server_url}/todos/{keep}")[0] == 200

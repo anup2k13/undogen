@@ -591,3 +591,30 @@ describe('conflict checks for paired actions and toggles', () => {
     }
   });
 });
+
+describe('checkpoints', () => {
+  it('undoes only what was done after a checkpoint', async () => {
+    const client = newClient();
+    const keep = idOf(await client.call('createTodo', { body: { title: 'before the task' } }));
+    const cp = await client.checkpoint();
+    const t = idOf(await client.call('createTodo', { body: { title: 'task' } }));
+    await client.call('updateTodo', { params: { todoId: keep }, body: { title: 'touched by the task' } });
+    const { undone, failed } = await client.undoTo(cp);
+    expect(failed).toEqual([]);
+    expect(undone.map((e) => e.operationId)).toEqual(['updateTodo', 'createTodo']);
+    expect((await client.call('getTodo', { params: { todoId: t } })).status).toBe(404);
+    expect((await client.call('getTodo', { params: { todoId: keep } })).data).toMatchObject({ title: 'before the task' });
+  });
+
+  it('works through the tools: checkpoint, then undo_all { to }', async () => {
+    const { toolDefinitions } = await import('../src/tools.js');
+    const client = newClient();
+    const tools = Object.fromEntries(toolDefinitions(client, spec.operations).map((t) => [t.name, t]));
+    await tools.createTodo!.execute({ body: { title: 'kept' } });
+    const { checkpoint } = (await tools.undogen_checkpoint!.execute({})) as { checkpoint: number };
+    await tools.createTodo!.execute({ body: { title: 'rolled back' } });
+    const res = (await tools.undogen_undo_all!.execute({ to: checkpoint })) as { undone: unknown[] };
+    expect(res.undone).toHaveLength(1);
+    expect(client.journal.map((e) => e.status)).toEqual(['active', 'undone']);
+  });
+});

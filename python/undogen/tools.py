@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 from .client import UndoableClient, UndogenError
 
-UNDO_TOOLS = ("undogen_undo", "undogen_undo_all", "undogen_journal", "undogen_preview")
+UNDO_TOOLS = ("undogen_undo", "undogen_undo_all", "undogen_journal", "undogen_preview", "undogen_checkpoint")
 
 
 def describe_template(t: Optional[dict]) -> Optional[str]:
@@ -177,8 +177,8 @@ def tool_definitions(
         res = client.undo(entry if entry is not None else seq, force=force, cascade=cascade)
         return {"status": res["status"], **({"journal": describe_entry(entry)} if entry else {})}
 
-    def undo_all(force: bool = False, **_: Any) -> dict:
-        r = client.undo_all(force=force)
+    def undo_all(force: bool = False, to: Optional[int] = None, **_: Any) -> dict:
+        r = client.undo_all(force=force, after=to)
         return {
             "undone": [describe_entry(e) for e in r["undone"]],
             "failed": [{**describe_entry(f["entry"]), "error": str(f["error"])} for f in r["failed"]],
@@ -233,10 +233,30 @@ def tool_definitions(
         ),
         ToolDefinition(
             name="undogen_undo_all",
-            description="Roll back every write in this session, newest first. Reports what could not be undone.",
-            input_schema={"type": "object", "properties": {"force": {"type": "boolean"}}, "required": []},
+            description=(
+                "Roll back every write in this session, newest first, or only those made after a checkpoint "
+                "from undogen_checkpoint. Reports what could not be undone."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "to": {"type": "integer", "description": "Checkpoint from undogen_checkpoint: undo only what was done after it"},
+                    "force": {"type": "boolean"},
+                },
+                "required": [],
+            },
             annotations={"title": "Undo all writes", "destructiveHint": True, "openWorldHint": True},
             execute=undo_all,
+        ),
+        ToolDefinition(
+            name="undogen_checkpoint",
+            description=(
+                "Mark this point before starting a task. If the task goes wrong, undogen_undo_all with "
+                "{ to: checkpoint } rolls back only what was done since."
+            ),
+            input_schema={"type": "object", "properties": {}, "required": []},
+            annotations={"title": "Checkpoint", "readOnlyHint": True},
+            execute=lambda **_: {"checkpoint": client.checkpoint()},
         ),
         ToolDefinition(
             name="undogen_preview",

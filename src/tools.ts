@@ -155,7 +155,7 @@ function result(res: HttpResult & { entry?: JournalEntry }) {
 
 /** One tool per API operation, plus undo and journal tools, all backed by an UndoableClient. */
 export function toolDefinitions(client: UndoableClient, operations: Operation[], options: ToolOptions = {}): ToolDefinition[] {
-  const taken = new Set<string>(['undogen_undo', 'undogen_undo_all', 'undogen_journal', 'undogen_preview']);
+  const taken = new Set<string>(['undogen_undo', 'undogen_undo_all', 'undogen_journal', 'undogen_preview', 'undogen_checkpoint']);
   const tools: ToolDefinition[] = [];
   for (const op of operations) {
     if (op.method === 'get' && options.includeReads === false) continue;
@@ -215,12 +215,30 @@ export function toolDefinitions(client: UndoableClient, operations: Operation[],
     },
     {
       name: 'undogen_undo_all',
-      description: 'Roll back every write in this session, newest first (a saga rollback). Reports what could not be undone.',
-      inputSchema: { type: 'object', properties: { force: { type: 'boolean' } } },
+      description:
+        'Roll back every write in this session, newest first (a saga rollback), or only those made after a checkpoint from undogen_checkpoint. Reports what could not be undone.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          to: { type: 'integer', description: 'Checkpoint from undogen_checkpoint: undo only what was done after it' },
+          force: { type: 'boolean' },
+        },
+      },
       annotations: { title: 'Undo all writes', destructiveHint: true, idempotentHint: true, openWorldHint: true },
       async execute(args) {
-        const { undone, failed } = await client.undoAll({ force: args.force === true });
+        const after = typeof args.to === 'number' ? args.to : undefined;
+        const { undone, failed } = await client.undoAll({ force: args.force === true, after });
         return { undone: undone.map(describeEntry), failed: failed.map((f) => ({ ...describeEntry(f.entry), error: f.error.message })) };
+      },
+    },
+    {
+      name: 'undogen_checkpoint',
+      description:
+        'Mark this point before starting a task. If the task goes wrong, undogen_undo_all with { to: checkpoint } rolls back only what was done since.',
+      inputSchema: { type: 'object', properties: {} },
+      annotations: { title: 'Checkpoint', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+      async execute() {
+        return { checkpoint: await client.checkpoint() };
       },
     },
     {

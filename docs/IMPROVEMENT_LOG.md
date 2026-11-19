@@ -5,6 +5,10 @@ committed, and pushed; this file records what was done and what is next.
 
 ## Backlog (highest value first)
 
+- [ ] Checkpoints: `checkpoint()` / `undoTo(checkpoint)` in both runtimes, `undogen_checkpoint` + `undogen_undo_all { to }` tools, `undogen undo --to`
+- [ ] Journal compaction: `FileJournalStore.compact()` keeps the latest version of each entry
+- [ ] `undogen lint`: concrete spec changes that would make more operations undoable (for API owners)
+
 ## Done
 
 - **Self-review fixes** (19 Nov): an irreversible call (e.g. a reminder about a todo) no longer blocks undoing what it used; a client constructed directly on an existing journal file loads it first instead of reusing sequence numbers (which silently overwrote entries); POST undos are no longer retried after a timeout/5xx (could re-create twice when the API ignores idempotency keys); header parameters are exposed in agent tools (TS + Python).
@@ -23,3 +27,4 @@ committed, and pushed; this file records what was done and what is next.
 - **Conflict checks for paired actions and toggles** (19 Nov, TS + Python): the runtime reads the item (or the toggled resource) before and after the call; the fields or status it changed must still be as it left them before undoing. A toggle that changed nothing (star an already-starred repo) is undone by doing nothing; previously the undo would have un-starred it. Writing the tests exposed a pre-existing bug: a `PUT` that created a singleton (GET 404 before) could not be undone ("No captured state"); it now falls back to the `DELETE` on the same route. Also caught a bug in my own first edit (the old field check still ran after the diff check) before commit.
 - **Python async adapters** (19 Nov): the OpenAI Agents adapter called the synchronous client inside its async handler, freezing the agent's event loop for the length of every API call; it now runs the call in a thread (`asyncio.to_thread`). The LangChain tools get an explicit coroutine too. The test fails on the old adapter and passes on the new one.
 - **HTML report** (19 Nov): `--report` also writes `report.html`: one file, no external assets, every value escaped, light and dark, failed diffs expanded. Rendered in Chromium at 1200px and 390px: the first phone render crushed the table into fragments, so on narrow screens each result is now a labelled card and diff tables scroll inside their own box (measured: no horizontal overflow at either width).
+- **Checkpoints** (19 Nov, TS + Python + MCP + CLI): `checkpoint()` / `undoTo(cp)`, `undogen_checkpoint` + `undogen_undo_all { to }`, `undogen undo --after <seq>`: roll back one task of a longer agent session and keep what came before.
