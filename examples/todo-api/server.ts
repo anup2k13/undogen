@@ -9,7 +9,10 @@ interface Comment { id: string; todoId: string; text: string; createdAt: string 
  * In-memory Todo API used by the demo and the tests.
  * It contains two deliberately planted reversibility bugs (marked BUG below).
  */
-export async function startTodoServer(port = 0): Promise<{ url: string; close: () => Promise<void>; sentReminders: string[] }> {
+export async function startTodoServer(
+  port = 0,
+  options: { prefix?: string } = {},
+): Promise<{ url: string; close: () => Promise<void>; sentReminders: string[] }> {
   const todos = new Map<string, Todo>();
   const comments = new Map<string, Comment>();
   const sentReminders: string[] = [];
@@ -19,6 +22,13 @@ export async function startTodoServer(port = 0): Promise<{ url: string; close: (
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://localhost');
+      if (options.prefix) {
+        if (!url.pathname.startsWith(options.prefix + '/')) {
+          res.writeHead(404, { 'content-type': 'application/json' });
+          return res.end(JSON.stringify({ error: `not under ${options.prefix}` }));
+        }
+        url.pathname = url.pathname.slice(options.prefix.length);
+      }
       const parts = url.pathname.split('/').filter(Boolean);
       const method = req.method ?? 'GET';
       const body = await readJson(req);
@@ -127,7 +137,9 @@ async function readJson(req: IncomingMessage): Promise<any> {
   for await (const chunk of req) chunks.push(chunk as Buffer);
   if (!chunks.length) return {};
   try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const text = Buffer.concat(chunks).toString('utf8');
+    if (/form-urlencoded/.test(req.headers['content-type'] ?? '')) return Object.fromEntries(new URLSearchParams(text));
+    return JSON.parse(text);
   } catch {
     return {};
   }

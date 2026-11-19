@@ -252,3 +252,44 @@ describe('release metadata', () => {
     expect(VERSION).toBe(pkg.version);
   });
 });
+
+describe('analyze: safety of classifications', () => {
+  const ok = { '200': { description: '' } };
+  const spec = parseSpec({
+    swagger: '2.0',
+    info: { title: 'mixed', version: '1' },
+    paths: {
+      '/repos/{o}/{r}/actions/runs/{id}/pending_deployments': {
+        post: { operationId: 'actions/review-pending-deployments-for-run', responses: ok },
+      },
+      '/apis/authorization.k8s.io/v1/selfsubjectaccessreviews': {
+        post: { operationId: 'createAuthorizationV1SelfSubjectAccessReview', responses: ok },
+      },
+      '/api/v1/namespaces/{namespace}/pods': {
+        post: { operationId: 'createCoreV1NamespacedPod', responses: ok },
+        delete: { operationId: 'deleteCoreV1CollectionNamespacedPod', responses: ok },
+      },
+      '/api/v1/namespaces/{namespace}/pods/{name}': {
+        get: { operationId: 'readCoreV1NamespacedPod', responses: ok },
+        delete: { operationId: 'deleteCoreV1NamespacedPod', responses: ok },
+      },
+      '/api/v1/namespaces/{namespace}/pods/{name}/exec': {
+        post: { operationId: 'connectCoreV1PostNamespacedPodExec', responses: ok },
+      },
+    },
+  });
+  const byId = Object.fromEntries(analyze(spec).plans.map((p) => [p.operationId, p]));
+
+  it('never treats an approval called "review" as side-effect-free', () => {
+    expect(byId['actions/review-pending-deployments-for-run']!.strategy).not.toBe('no-side-effects');
+  });
+
+  it('treats Kubernetes access reviews as pure questions', () => {
+    expect(byId.createAuthorizationV1SelfSubjectAccessReview!.strategy).toBe('no-side-effects');
+  });
+
+  it('gates bulk collection deletes and exec as irreversible', () => {
+    expect(byId.deleteCoreV1CollectionNamespacedPod!.reversibility).toBe('irreversible');
+    expect(byId.connectCoreV1PostNamespacedPodExec!.reversibility).toBe('irreversible');
+  });
+});

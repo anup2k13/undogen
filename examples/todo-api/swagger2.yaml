@@ -1,0 +1,119 @@
+swagger: '2.0'
+info:
+  title: Todo API (demo, Swagger 2.0)
+  version: 1.0.0
+  description: |
+    The demo Todo API described in Swagger 2.0, served under basePath /v1.
+    Comments are created with form-encoded bodies (formData parameters).
+basePath: /v1
+consumes: [application/json]
+produces: [application/json]
+parameters:
+  todoId: { name: todoId, in: path, required: true, type: string }
+  commentId: { name: commentId, in: path, required: true, type: string }
+paths:
+  /todos:
+    get:
+      operationId: listTodos
+      responses:
+        '200': { description: All todos, schema: { type: array, items: { $ref: '#/definitions/Todo' } } }
+    post:
+      operationId: createTodo
+      parameters:
+        - { name: todo, in: body, required: true, schema: { $ref: '#/definitions/TodoInput' } }
+      responses:
+        '201': { description: Created, schema: { $ref: '#/definitions/Todo' } }
+  /todos/{todoId}:
+    parameters: [{ $ref: '#/parameters/todoId' }]
+    get:
+      operationId: getTodo
+      responses:
+        '200': { description: A todo, schema: { $ref: '#/definitions/Todo' } }
+    put:
+      operationId: replaceTodo
+      parameters:
+        - { name: todo, in: body, required: true, schema: { $ref: '#/definitions/TodoInput' } }
+      responses:
+        '200': { description: Replaced, schema: { $ref: '#/definitions/Todo' } }
+    patch:
+      operationId: updateTodo
+      parameters:
+        - name: patch
+          in: body
+          required: true
+          schema:
+            type: object
+            properties:
+              title: { type: string }
+              done: { type: boolean }
+      responses:
+        '200': { description: Updated, schema: { $ref: '#/definitions/Todo' } }
+    delete:
+      operationId: deleteTodo
+      responses:
+        '204': { description: Deleted }
+  /todos/{todoId}/archive:
+    parameters: [{ $ref: '#/parameters/todoId' }]
+    post:
+      operationId: archiveTodo
+      responses:
+        '200': { description: Archived, schema: { $ref: '#/definitions/Todo' } }
+  /todos/{todoId}/unarchive:
+    parameters: [{ $ref: '#/parameters/todoId' }]
+    post:
+      operationId: unarchiveTodo
+      responses:
+        '200': { description: Unarchived, schema: { $ref: '#/definitions/Todo' } }
+  /todos/{todoId}/send-reminder:
+    parameters: [{ $ref: '#/parameters/todoId' }]
+    post:
+      operationId: sendReminder
+      summary: Email the owner a reminder
+      responses:
+        '202': { description: Reminder queued }
+  /todos/{todoId}/comments:
+    parameters: [{ $ref: '#/parameters/todoId' }]
+    get:
+      operationId: listComments
+      responses:
+        '200': { description: Comments, schema: { type: array, items: { $ref: '#/definitions/Comment' } } }
+    post:
+      operationId: createComment
+      consumes: [application/x-www-form-urlencoded]
+      parameters:
+        - { name: text, in: formData, required: true, type: string, x-example: Looks good to me }
+      responses:
+        '201': { description: Created, schema: { $ref: '#/definitions/Comment' } }
+  /todos/{todoId}/comments/{commentId}:
+    parameters: [{ $ref: '#/parameters/todoId' }, { $ref: '#/parameters/commentId' }]
+    get:
+      operationId: getComment
+      responses:
+        '200': { description: A comment, schema: { $ref: '#/definitions/Comment' } }
+    delete:
+      operationId: deleteComment
+      responses:
+        '204': { description: Deleted }
+definitions:
+  TodoInput:
+    type: object
+    required: [title]
+    properties:
+      title: { type: string, example: Write the README }
+      done: { type: boolean }
+  Todo:
+    type: object
+    properties:
+      id: { type: string, readOnly: true }
+      title: { type: string }
+      done: { type: boolean }
+      archived: { type: boolean, readOnly: true }
+      createdAt: { type: string, format: date-time, readOnly: true }
+      updatedAt: { type: string, format: date-time, readOnly: true }
+  Comment:
+    type: object
+    properties:
+      id: { type: string, readOnly: true }
+      todoId: { type: string, readOnly: true }
+      text: { type: string }
+      createdAt: { type: string, format: date-time, readOnly: true }

@@ -46,11 +46,17 @@ const IRREVERSIBLE_VERBS = new Set([
   'send', 'email', 'mail', 'notify', 'sms', 'broadcast', 'charge', 'pay', 'payout',
   'transfer', 'refund', 'purge', 'wipe', 'shred', 'deliver', 'dispatch', 'execute', 'remind',
   'cancel', 'merge', 'revoke', 'rerun', 'rerequest', 'ping', 'redeliver', 'dismiss', 'trigger',
+  // Kubernetes-style subresources: run code, move traffic, evict, bind, mint credentials, finalize.
+  'exec', 'portforward', 'proxy', 'eviction', 'evict', 'binding', 'token', 'finalize',
 ]);
 
 /** Verbs for POSTs that compute something and change nothing. */
 const SIDE_EFFECT_FREE_VERBS = new Set([
   'render', 'preview', 'search', 'query', 'validate', 'lint', 'estimate', 'simulate', 'compare', 'diff',
+  // Kubernetes access reviews only answer a question. A bare "review" is NOT here: on other APIs it
+  // approves deployments or grants access.
+  'selfsubjectreview', 'tokenreview', 'subjectaccessreview', 'selfsubjectaccessreview',
+  'localsubjectaccessreview', 'selfsubjectrulesreview',
 ]);
 
 /** Values of a state/status field that mean "this is gone" for APIs without DELETE. */
@@ -302,6 +308,14 @@ export function planOperation(op: Operation, index: Index, override?: Declaratio
   if (pure) {
     return plan(op, 'reversible', 'no-side-effects', 0.7, {
       reasons: [`"${pure}" computes a result without changing state`],
+    });
+  }
+
+  // 1b. DELETE on a whole collection: a bulk delete of unknown size.
+  if (op.method === 'delete' && isCollection) {
+    return plan(op, 'irreversible', 'none', 0.8, {
+      reasons: ['Deletes every matching item in the collection at once'],
+      caveats: ['Delete items one by one through the item route to get an undo for each'],
     });
   }
 

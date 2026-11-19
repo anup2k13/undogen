@@ -94,7 +94,7 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
   const create = async (creator: Operation, pool: Record<string, string | number>): Promise<string | number> => {
     const plan = planById.get(creator.id)!;
     const body = fixtures[creator.id]?.body ?? synthesize(creator.requestSchema, creator.requestExample);
-    const res = await raw.request('post', fillPath(creator.path, pool), { body });
+    const res = await raw.request('post', raw.basePath + fillPath(creator.path, pool), { body, format: creator.requestFormat });
     if (res.status >= 300) {
       throw new SetupError(`setup: ${creator.id} returned HTTP ${res.status} ${short(res.data)} — add a fixture body`);
     }
@@ -121,7 +121,7 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
     const state = new Map<string, { status: number; data: unknown }>();
     for (const g of getters) {
       if (!g.pathParams.every((p) => pool[p] !== undefined)) continue;
-      const res = await raw.request('get', fillPath(g.path, pool));
+      const res = await raw.request('get', raw.basePath + fillPath(g.path, pool));
       state.set(`GET ${g.path}`, { status: res.status, data: res.data });
     }
     return state;
@@ -171,7 +171,10 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
       for (const step of fixture.prepare ?? []) {
         const stepOp = opById.get(step.operationId);
         if (!stepOp) throw new SetupError(`fixture: unknown operation ${step.operationId}`);
-        const res = await raw.request(stepOp.method, fillPath(stepOp.path, { ...pool, ...step.params }), { body: step.body });
+        const res = await raw.request(stepOp.method, raw.basePath + fillPath(stepOp.path, { ...pool, ...step.params }), {
+          body: step.body,
+          format: stepOp.requestFormat,
+        });
         if (res.status >= 400) throw new SetupError(`fixture step ${step.operationId} returned HTTP ${res.status}`);
       }
 

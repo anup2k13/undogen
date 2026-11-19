@@ -3,7 +3,7 @@
 [![CI](https://github.com/anup2k13/undogen/actions/workflows/ci.yml/badge.svg)](https://github.com/anup2k13/undogen/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**Compile undo operations from any OpenAPI spec, then prove they actually work.**
+**Compile undo operations from any OpenAPI or Swagger spec, then prove they actually work.**
 
 ![undogen verify catching a cascading delete and a hidden side effect in a demo API](docs/demo.gif)
 
@@ -240,39 +240,49 @@ For specs you don't control, use an overrides file (`--overrides overrides.json`
 
 Bindings take values from `params.*`, `response.*`, `before.*`, or `request.*`. Bodies can be `"before"`, `"request"`, or `{ "literal": … }`.
 
-## Real-world check: the GitHub REST API
+## Real-world check: GitHub and Kubernetes
 
-On GitHub's official OpenAPI description (1,281 operations), `undogen analyze` runs in about 3.5 seconds:
+`undogen analyze` on two of the largest public API descriptions, with no hand-written code beyond three GitHub overrides:
 
-| | Write operations |
-|---|---|
-| Reversible | 302 |
-| Compensable | 46 |
-| Irreversible (gated) | 131 |
-| Unknown (declare via overrides) | 135 |
-| **Total** | **614** |
+| Write operations | GitHub REST (OpenAPI 3) | Kubernetes (Swagger 2.0) |
+|---|---:|---:|
+| Reversible | 299 | 388 |
+| Compensable | 46 | 92 |
+| Irreversible (gated) | 146 | 102 |
+| Unknown (declare via overrides) | 123 | 4 |
+| **Total** | **614** | **586** |
+| **Automatic undo** | **56%** | **82%** |
+| Analysis time | ~3.5 s | ~1.4 s |
 
-That means **57% of GitHub's write API gets an undo with zero hand-written code**, and the rest is either correctly gated or explicitly flagged. Some examples:
+Some examples:
 
-- `issues/create` gets a soft delete: `PATCH …/issues/{response.number}` with `{"state":"closed"}`.
-- `issues/create-comment` follows GitHub's flat route to `DELETE …/issues/comments/{response.id}`.
-- `actions/set-github-actions-permissions-organization` takes a snapshot first and restores it afterwards.
-- `issues/lock` is undone by `DELETE …/lock` (a toggle).
-- `actions/cancel-workflow-run` and `repos/create-dispatch-event` are classified irreversible.
+- **GitHub**
+  - `issues/create` gets a soft delete: `PATCH …/issues/{response.number}` with `{"state":"closed"}`.
+  - `issues/create-comment` follows GitHub's flat route to `DELETE …/issues/comments/{response.id}`.
+  - `actions/set-github-actions-permissions-organization` takes a snapshot first and restores it afterwards.
+  - `issues/lock` is undone by `DELETE …/lock` (a toggle).
+  - `actions/cancel-workflow-run` and `repos/create-dispatch-event` are classified irreversible.
+- **Kubernetes**
+  - `createCoreV1NamespacedPod` is undone by `DELETE …/pods/{response.metadata.name}`. The compiler finds the name inside `metadata` on its own.
+  - `patchAppsV1NamespacedDeployment` takes a snapshot and restores exactly the fields that were patched.
+  - Bulk `deleteCollection…`, `exec`, `eviction` and `binding` are gated as irreversible.
+  - Read-only access reviews are recognised as side-effect-free.
 
-The compiled plans are hypotheses. `verify` is what turns them into facts.
+Restore and re-create bodies drop server-managed fields (`resourceVersion`, `uid`, `creationTimestamp`, …). Sending those back would make the server reject the undo as stale.
+
+When the compiler isn't sure, it stays cautious: an operation it can't classify is gated, never assumed safe. Even so, the compiled plans are hypotheses. `verify` is what turns them into facts.
 
 ## Limits
 
 - Inverses are **compensations**, not distributed transactions. Webhooks that already fired, emails a server sent as a side effect, and things people saw in the meantime are outside any API's reach. undogen's job is to make that boundary explicit.
 - Verification can only see state that the API exposes through `GET` routes.
-- OpenAPI 3.x with local `$ref`s. Swagger 2.0 and external refs aren't supported yet.
+- OpenAPI 3.x and Swagger 2.0 with local `$ref`s. External refs aren't supported yet.
 
 ## Roadmap
 
 - Wrap existing MCP servers (not just OpenAPI APIs) with journaling and undo
 - Learning bindings from verification runs (turning `unknown` into `verified` automatically)
-- Swagger 2.0, external `$ref`s, GraphQL mutations
+- External `$ref`s, GraphQL mutations
 
 ## Development
 

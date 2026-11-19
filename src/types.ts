@@ -26,6 +26,8 @@ export interface Operation {
   requestExample?: unknown;
   /** requestBody.required in the spec. */
   requestRequired?: boolean;
+  /** How the request body is encoded. Default 'json'. */
+  requestFormat?: 'json' | 'form';
   responseSchema?: Schema;
   /** Vendor extensions (x-*) declared on the operation. */
   extensions: Record<string, unknown>;
@@ -34,6 +36,8 @@ export interface Operation {
 export interface ApiSpec {
   title: string;
   version: string;
+  /** Path prefix for every route: Swagger 2.0 basePath, or the path of OpenAPI 3 servers[0].url. */
+  basePath?: string;
   operations: Operation[];
 }
 

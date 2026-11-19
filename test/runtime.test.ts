@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { IrreversibleOperationError, loadSpec, UndoableClient, UndoConflictError, UndoError, type ApiSpec } from '../src/index.js';
+import { IrreversibleOperationError, loadSpec, parseSpec, UndoableClient, UndoConflictError, UndoError, type ApiSpec } from '../src/index.js';
 import { startTodoServer } from '../examples/todo-api/server.js';
 
 let server: Awaited<ReturnType<typeof startTodoServer>>;
@@ -125,5 +125,33 @@ describe('UndoableClient', () => {
       await human().request('patch', `/todos/${id}`, { body: {} }); // only bumps updatedAt
       await expect(agent.undo(patched.entry)).resolves.toMatchObject({ status: 200 });
     });
+  });
+});
+
+describe('restore bodies', () => {
+  it('strip server-managed fields so restores are not rejected as stale', async () => {
+    const k8s = parseSpec({
+      swagger: '2.0',
+      info: { title: 'k8s-ish', version: '1' },
+      paths: {
+        '/configmaps': {
+          post: { operationId: 'create', parameters: [{ in: 'body', name: 'b', schema: { type: 'object', properties: { metadata: { type: 'object' }, data: { type: 'object' } } } }], responses: { '201': { description: '' } } },
+        },
+        '/configmaps/{name}': {
+          get: { operationId: 'read', responses: { '200': { description: '' } } },
+          delete: { operationId: 'remove', responses: { '200': { description: '' } } },
+        },
+      },
+    });
+    const stored = { metadata: { name: 'cm', uid: 'u-1', resourceVersion: '42', creationTimestamp: 'then', labels: { a: '1' } }, data: { k: 'v' } };
+    const calls: Array<{ method: string; url: string; body?: string }> = [];
+    const fakeFetch = (async (url: URL, init: RequestInit) => {
+      calls.push({ method: String(init.method), url: String(url), body: init.body as string | undefined });
+      if (init.method === 'GET') return new Response(JSON.stringify(stored), { status: 200 });
+      return new Response('{}', { status: 200 });
+    }) as unknown as typeof fetch;
+    const client = new UndoableClient({ spec: k8s, baseUrl: 'http://k8s.local', fetch: fakeFetch });
+    const res = await client.call('remove', { params: { name: 'cm' } });
+    expect(JSON.parse(JSON.stringify(res.entry!.inverse!.body))).toEqual({ metadata: { name: 'cm', labels: { a: '1' } }, data: { k: 'v' } });
   });
 });

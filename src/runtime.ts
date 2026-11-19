@@ -18,8 +18,11 @@ export interface HttpResult {
 export interface ResolvedRequest {
   operationId: string;
   method: HttpMethod;
+  /** Full path, including any basePath. */
   path: string;
   body?: unknown;
+  /** Set when the body must be sent form-encoded. */
+  format?: 'form';
 }
 
 export interface JournalEntry {
@@ -111,6 +114,8 @@ export interface ClientOptions {
  */
 export class UndoableClient {
   readonly journal: JournalEntry[] = [];
+  /** Prefix added to every route (the spec's basePath, unless baseUrl already ends with it). */
+  readonly basePath: string;
   private readonly ops: Map<string, Operation>;
   private readonly plans: Map<string, InversePlan>;
   private readonly fetchImpl: typeof fetch;
@@ -121,6 +126,13 @@ export class UndoableClient {
     const plans = options.plans ?? (options.spec ? analyze(options.spec).plans : []);
     this.plans = new Map(plans.map((p) => [p.operationId, p]));
     this.fetchImpl = options.fetch ?? fetch;
+    const base = (options.spec?.basePath ?? '').replace(/\/+$/, '');
+    const urlPath = new URL(options.baseUrl).pathname.replace(/\/+$/, '');
+    this.basePath = base && !urlPath.endsWith(base) ? base : '';
+  }
+
+  private formatOf(operationId: string): 'form' | undefined {
+    return this.ops.get(operationId)?.requestFormat === 'form' ? 'form' : undefined;
   }
 
   /** Create a client and load any entries already recorded in `options.journalFile`. */
@@ -144,7 +156,7 @@ export class UndoableClient {
     if (!op) throw new Error(`Unknown operation: ${operationId}`);
     const params = input.params ?? {};
 
-    if (op.method === 'get') return this.request(op.method, fillPath(op.path, params), { query: input.query });
+    if (op.method === 'get') return this.request(op.method, this.basePath + fillPath(op.path, params), { query: input.query });
 
     const plan = this.plans.get(operationId);
     if (!plan) throw new Error(`No undo plan for ${operationId}`);
@@ -159,15 +171,16 @@ export class UndoableClient {
     let before: unknown;
     let captured = false;
     if (plan.capture) {
-      const snap = await this.request('get', resolvePath(plan.capture, { params }));
+      const snap = await this.request('get', this.basePath + resolvePath(plan.capture, { params }));
       if (snap.status === 404) before = null;
       else if (snap.status < 300) before = snap.data ?? {};
       else throw new Error(`Capture before ${operationId} failed: HTTP ${snap.status}`);
       captured = true;
     }
 
-    const path = fillPath(op.path, params);
-    const response = await this.request(op.method, path, { query: input.query, body: input.body });
+    const path = this.basePath + fillPath(op.path, params);
+    const format = this.formatOf(op.id);
+    const response = await this.request(op.method, path, { query: input.query, body: input.body, format });
     if (response.status >= 400) return response; // nothing happened, nothing to undo
 
     const sources: Sources = { params, response: response.data, before, request: input.body };
@@ -179,8 +192,9 @@ export class UndoableClient {
         inverse = {
           operationId: template.operationId,
           method: template.method,
-          path: resolvePath(template, sources),
+          path: this.basePath + resolvePath(template, sources),
           body: resolveBody(template.body, sources),
+          ...(this.formatOf(template.operationId) ? { format: 'form' as const } : {}),
         };
       } catch (err) {
         inverseError = (err as Error).message;
@@ -193,7 +207,7 @@ export class UndoableClient {
     let guard: JournalEntry['guard'];
     if (plan.guard && inverse) {
       try {
-        const guardPath = resolvePath(plan.guard, sources);
+        const guardPath = this.basePath + resolvePath(plan.guard, sources);
         const after = await this.request('get', guardPath);
         if (after.status < 300) guard = { path: guardPath, after: after.data ?? {} };
       } catch {
@@ -205,7 +219,7 @@ export class UndoableClient {
       seq: ++this.seq,
       at: new Date().toISOString(),
       operationId,
-      request: { operationId, method: op.method, path, body: input.body },
+      request: { operationId, method: op.method, path, body: input.body, ...(format ? { format } : {}) },
       response,
       before: captured ? before : undefined,
       plan: { reversibility: plan.reversibility, strategy: plan.strategy, confidence: plan.confidence },
@@ -247,7 +261,7 @@ export class UndoableClient {
       const diffs = diffValues(target.guard.after, live.data ?? {}, { ignore }, `GET ${target.guard.path}`);
       if (diffs.length) throw new UndoConflictError(target, diffs);
     }
-    const res = await this.request(target.inverse.method, target.inverse.path, { body: target.inverse.body });
+    const res = await this.request(target.inverse.method, target.inverse.path, { body: target.inverse.body, format: target.inverse.format });
     target.undoResponse = res;
     if (res.status >= 400 && !(target.inverse.method === 'delete' && res.status === 404)) {
       throw new UndoError(
@@ -294,13 +308,20 @@ export class UndoableClient {
   async request(
     method: HttpMethod,
     path: string,
-    opts: { query?: CallInput['query']; body?: unknown } = {},
+    opts: { query?: CallInput['query']; body?: unknown; format?: 'json' | 'form' } = {},
   ): Promise<HttpResult> {
     const url = new URL(this.options.baseUrl.replace(/\/$/, '') + path);
     for (const [k, v] of Object.entries(opts.query ?? {})) url.searchParams.set(k, String(v));
     const headers: Record<string, string> = { accept: 'application/json', ...this.options.headers };
     let body: string | undefined;
-    if (opts.body !== undefined) {
+    if (opts.body !== undefined && opts.format === 'form') {
+      headers['content-type'] = 'application/x-www-form-urlencoded';
+      const form = new URLSearchParams();
+      for (const [k, v] of Object.entries((opts.body ?? {}) as Record<string, unknown>)) {
+        if (v !== undefined && v !== null) form.set(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+      }
+      body = form.toString();
+    } else if (opts.body !== undefined) {
       headers['content-type'] = 'application/json';
       body = JSON.stringify(opts.body);
     }
@@ -367,6 +388,25 @@ function pick(obj: unknown, keys: string[]): Record<string, unknown> {
   return out;
 }
 
+/**
+ * Fields the server owns. Sending them back from a snapshot makes restores fail
+ * (a stale resourceVersion is a 409 in Kubernetes; a uid on create is rejected).
+ */
+export const SERVER_MANAGED_FIELDS = new Set([
+  'resourceVersion', 'uid', 'creationTimestamp', 'deletionTimestamp', 'deletionGracePeriodSeconds',
+  'generation', 'managedFields', 'selfLink', '_rev', 'etag', 'ETag',
+]);
+
+function stripServerManaged(value: unknown, depth = 0): unknown {
+  if (depth > 32 || !value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((v) => stripServerManaged(v, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (!SERVER_MANAGED_FIELDS.has(k)) out[k] = stripServerManaged(v, depth + 1);
+  }
+  return out;
+}
+
 function resolveBody(body: BodyTemplate | undefined, sources: Sources): unknown {
   if (!body) return undefined;
   switch (body.from) {
@@ -376,11 +416,11 @@ function resolveBody(body: BodyTemplate | undefined, sources: Sources): unknown 
       return body.value;
     case 'before':
       if (sources.before == null) throw new Error('No captured state to restore from');
-      return body.fields === '*' ? sources.before : pick(sources.before, body.fields);
+      return stripServerManaged(body.fields === '*' ? sources.before : pick(sources.before, body.fields));
     case 'before-request-keys': {
       if (sources.before == null) throw new Error('No captured state to restore from');
       const keys = sources.request && typeof sources.request === 'object' ? Object.keys(sources.request) : [];
-      return pick(sources.before, keys);
+      return stripServerManaged(pick(sources.before, keys));
     }
   }
 }
