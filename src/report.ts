@@ -1,7 +1,7 @@
 import type { Analysis, InversePlan, RequestTemplate, Reversibility } from './types.js';
 import type { Outcome, VerifyReport } from './verify.js';
 
-const useColor = !process.env.NO_COLOR && process.stdout.isTTY;
+const useColor = !process.env.NO_COLOR && (!!process.env.FORCE_COLOR || process.stdout.isTTY);
 const paint = (code: number) => (s: string) => (useColor ? `\x1b[${code}m${s}\x1b[0m` : s);
 export const c = {
   bold: paint(1),

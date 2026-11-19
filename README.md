@@ -1,6 +1,11 @@
 # undogen
 
+[![CI](https://github.com/anup2k13/undogen/actions/workflows/ci.yml/badge.svg)](https://github.com/anup2k13/undogen/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 **Compile undo operations from any OpenAPI spec, then prove they actually work.**
+
+![undogen verify catching a cascading delete and a hidden side effect in a demo API](docs/demo.gif)
 
 AI agents now call real APIs: they open issues, change settings, and delete records. Most "undo for agents" tools ask you to write an inverse for each tool by hand, and nobody checks that those inverses work. An undo button that silently does the wrong thing is worse than having none.
 
@@ -191,6 +196,14 @@ The compiled plans are hypotheses. `verify` is what turns them into facts.
 - Persistent journals and multi-process rollback
 - Concurrency checks: detect when an undo would overwrite someone else's change made after the agent's
 - Swagger 2.0, external `$ref`s, GraphQL mutations
+
+## Development
+
+```bash
+npm test                                          # unit + end-to-end tests against the demo API
+npm run demo                                      # full walkthrough in the terminal
+npm run build && python3 scripts/render_demo_gif.py   # regenerate docs/demo.gif from real CLI output (needs Pillow)
+```
 
 ## License
 
