@@ -338,7 +338,7 @@ npx tsx scripts/benchmark.ts --out docs/benchmarks.md   # analyze public API des
 npm run build && python3 scripts/render_demo_gif.py     # regenerate docs/demo.gif from real CLI output (needs Pillow)
 ```
 
-Requires Node.js 20 or newer. See [CHANGELOG.md](CHANGELOG.md).
+Requires Node.js 20 or newer. See [CONTRIBUTING.md](CONTRIBUTING.md) (including how analyzer changes are checked against real APIs with `scripts/plan-diff.ts`), [SECURITY.md](SECURITY.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
