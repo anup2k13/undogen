@@ -365,3 +365,20 @@ def test_minimal_journal_keeps_body_dependencies(bundle_path, server_url, tmp_pa
 
     refs = _body_refs({"boardId": "obj_1abc", "n": 1, "nested": {"x": ["tag_9999"]}}, "s1")
     assert set(refs) == {_ref_hash("obj_1abc", "s1"), _ref_hash("tag_9999", "s1")}
+
+
+def test_path_parameters_cannot_climb(bundle_path, server_url):
+    from undogen import UndogenError
+    from undogen.client import fill_path
+
+    for bad in ("..", ".", ""):
+        with pytest.raises(UndogenError):
+            fill_path("/todos/{todoId}", {"todoId": bad})
+    assert fill_path("/todos/{todoId}", {"todoId": "a..b"}) == "/todos/a..b"
+
+
+def test_configured_headers_win(bundle_path, server_url):
+    sent = []
+    client = UndoableClient(bundle_path, server_url, headers={"authorization": "Bearer configured"}, before_request=lambda r: sent.append(dict(r.headers)))
+    client.request("get", "/todos", headers={"Authorization": "Bearer attacker"})
+    assert sent[0] == {"accept": "application/json", "authorization": "Bearer configured"}

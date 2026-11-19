@@ -12,10 +12,19 @@ export interface ParseOptions {
   baseUri?: string;
   /** Already-loaded documents referenced by external $refs, keyed by absolute URI (no fragment). */
   documents?: Map<string, unknown>;
+  /** External $refs that were not loaded, with the reason (reported as warnings). */
+  refused?: Map<string, string>;
 }
 
 export interface LoadOptions {
   fetch?: typeof fetch;
+  /**
+   * Follow external $refs anywhere. By default a spec loaded from a URL may only reference
+   * documents on its own origin: never local files (file:) or other hosts such as cloud
+   * metadata endpoints, since their contents can end up in request bodies verify sends.
+   * A spec loaded from a local file may reference other files and URLs.
+   */
+  trustRefs?: boolean;
 }
 
 /**
@@ -25,10 +34,23 @@ export interface LoadOptions {
 export async function loadSpec(source: string, options: LoadOptions = {}): Promise<ApiSpec> {
   const baseUri = /^https?:\/\//i.test(source) ? source : pathToFileURL(resolvePath(source)).href;
   const documents = new Map<string, unknown>();
+  const refused = new Map<string, string>();
   const root = await fetchDocument(baseUri, options);
   documents.set(stripHash(baseUri), root);
-  await loadExternalRefs(root, baseUri, documents, options);
-  return parseSpec(root as object, { baseUri, documents });
+  await loadExternalRefs(root, baseUri, documents, options, refused);
+  return parseSpec(root as object, { baseUri, documents, refused });
+}
+
+/** Why a document referenced from a spec rooted at `rootUri` may not be loaded, or undefined if it may. */
+export function refusedRef(uri: string, rootUri: string, trust = false): string | undefined {
+  if (trust) return undefined;
+  const target = new URL(uri);
+  const root = new URL(rootUri);
+  if (!['file:', 'http:', 'https:'].includes(target.protocol)) return `scheme ${target.protocol} is not supported`;
+  if (root.protocol === 'file:') return undefined; // a local spec is the user's own: its refs are trusted
+  if (target.protocol === 'file:') return 'a spec loaded from a URL may not read local files';
+  if (target.origin !== root.origin) return `a spec from ${root.origin} may only reference documents on the same origin (use --trust-refs to allow ${target.origin})`;
+  return undefined;
 }
 
 async function fetchDocument(uri: string, options: LoadOptions): Promise<unknown> {
@@ -73,7 +95,13 @@ async function fetchText(uri: string, options: LoadOptions, attempts = 4): Promi
 }
 
 /** Load every document reachable through external $refs, with one global limit on concurrent fetches. */
-async function loadExternalRefs(root: unknown, rootUri: string, documents: Map<string, unknown>, options: LoadOptions): Promise<void> {
+async function loadExternalRefs(
+  root: unknown,
+  rootUri: string,
+  documents: Map<string, unknown>,
+  options: LoadOptions,
+  refused: Map<string, string>,
+): Promise<void> {
   const LIMIT = 8;
   const queue: string[] = [];
   const discover = (node: unknown, base: string) => {
@@ -85,7 +113,9 @@ async function loadExternalRefs(root: unknown, rootUri: string, documents: Map<s
           const uri = stripHash(new URL(v, base).href);
           if (!documents.has(uri)) {
             documents.set(uri, null); // reserve, so each file is fetched once
-            queue.push(uri);
+            const reason = refusedRef(uri, rootUri, options.trustRefs);
+            if (reason) refused.set(uri, reason);
+            else queue.push(uri);
           }
         } else walk(v);
       }
@@ -168,7 +198,8 @@ export function parseSpec(input: string | object, options: ParseOptions = {}): A
       }
       const target = documents.get(docUri);
       if (target == null) {
-        warnings.add(`External $ref ${ref} could not be resolved (use loadSpec with a file path or URL)`);
+        const reason = options.refused?.get(docUri);
+        warnings.add(reason ? `External $ref ${ref} was not loaded: ${reason}` : `External $ref ${ref} could not be resolved (use loadSpec with a file path or URL)`);
         return {};
       }
       stack.add(key);
@@ -292,9 +323,12 @@ function mergeParams(pathLevel: any[] | undefined, opLevel: any[] | undefined): 
   return [...out.values()];
 }
 
+/** Header parameters OpenAPI says to ignore (they're set by the client or by security schemes), plus cookies. */
+const RESERVED_HEADERS = new Set(['accept', 'content-type', 'authorization', 'cookie']);
+
 function toParameters(params: any[], where: 'query' | 'header'): Parameter[] {
   return params
-    .filter((p) => p.in === where)
+    .filter((p) => p.in === where && !(where === 'header' && RESERVED_HEADERS.has(String(p.name).toLowerCase())))
     .map((p) => ({ name: p.name, in: where, required: !!p.required, schema: p.schema ?? (p.type ? { type: p.type, enum: p.enum, default: p.default } : undefined) }));
 }
 

@@ -240,7 +240,11 @@ def fill_path(path: str, params: Dict[str, Any]) -> str:
             name = path[i + 1 : j]
             if params.get(name) is None:
                 raise UndogenError(f'Missing path parameter "{name}" for {path}')
-            out.append(urllib.parse.quote(str(params[name]), safe=""))
+            value = str(params[name])
+            # "." and ".." would be collapsed by URL normalization (in proxies and servers), reaching another route.
+            if value in ("", ".", ".."):
+                raise UndogenError(f'Path parameter "{name}" for {path} must not be {repr(value) if value else "empty"}')
+            out.append(urllib.parse.quote(value, safe=""))
             i = j + 1
         else:
             out.append(path[i])
@@ -617,7 +621,12 @@ class UndoableClient:
         if query:
             url += "?" + urllib.parse.urlencode({k: _query_value(v) for k, v in query.items()})
         base = self.headers() if callable(self.headers) else (self.headers or {})
-        all_headers = {"accept": "application/json", **base, **(headers or {})}
+        # Configured headers (credentials) always win over per-call ones, whatever their case.
+        merged: Dict[str, Any] = {}
+        for layer in ({"accept": "application/json"}, headers or {}, base):
+            for k, v in layer.items():
+                merged[k.lower()] = (k, v)
+        all_headers = dict(merged.values())
         data, ct = _encode_body(body, content_type)
         if ct:
             all_headers["content-type"] = ct

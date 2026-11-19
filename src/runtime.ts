@@ -638,7 +638,8 @@ export class UndoableClient {
     const url = new URL(this.options.baseUrl.replace(/\/$/, '') + path);
     for (const [k, v] of Object.entries(opts.query ?? {})) url.searchParams.set(k, String(v));
     const base = typeof this.options.headers === 'function' ? await this.options.headers() : this.options.headers;
-    const headers: Record<string, string> = { accept: 'application/json', ...base, ...opts.headers };
+    // Configured headers (credentials) always win over per-call ones, whatever their case.
+    const headers = mergeHeaders({ accept: 'application/json' }, opts.headers, base);
     const encoded = encodeBody(opts.body, opts.contentType);
     if (encoded.contentType) headers['content-type'] = encoded.contentType;
     const outgoing: OutgoingRequest = { method: method.toUpperCase(), url, headers, body: encoded.body };
@@ -860,7 +861,11 @@ export function fillPath(path: string, params: Record<string, unknown>): string 
   return path.replace(/\{([^}]+)\}/g, (_, name: string) => {
     const v = params[name];
     if (v === undefined || v === null) throw new Error(`Missing path parameter "${name}" for ${path}`);
-    return encodeURIComponent(String(v));
+    const s = String(v);
+    // "." and ".." survive encodeURIComponent and are collapsed by URL parsing (and by many servers),
+    // which would send the request to a different route than the operation that was approved.
+    if (s === '' || s === '.' || s === '..') throw new Error(`Path parameter "${name}" for ${path} must not be ${s ? `"${s}"` : 'empty'}`);
+    return encodeURIComponent(s);
   });
 }
 
@@ -953,6 +958,13 @@ function bodyRefsOf(body: unknown, salt: string): string[] | undefined {
   };
   walk(body, 0);
   return out.size ? [...out] : undefined;
+}
+
+/** Merge header maps, later ones winning, matching names case-insensitively. */
+function mergeHeaders(...layers: Array<Record<string, string> | undefined>): Record<string, string> {
+  const out = new Map<string, [string, string]>();
+  for (const layer of layers) for (const [k, v] of Object.entries(layer ?? {})) out.set(k.toLowerCase(), [k, v]);
+  return Object.fromEntries([...out.values()]);
 }
 
 /** Whether any string value in a request body (a few levels deep) is one of `ids`. */

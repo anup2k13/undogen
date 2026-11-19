@@ -90,7 +90,7 @@ describe('MCP proxy', () => {
     expect((await call('sendReminder', { todoId: id })).isError).toBe(false);
     await call('sendReminder', { todoId: id });
     expect(asked).toHaveLength(2);
-    expect(asked[0]).toMatch(/sendReminder .* irreversible/);
+    expect(asked[0]).toMatch(/sendReminder: POST \/todos\/t\d+\/send-reminder\. It is irreversible/);
     expect(asked[1]).toMatch(/identical call already ran as #2/);
   });
 

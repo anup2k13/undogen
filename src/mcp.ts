@@ -1,6 +1,6 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { IrreversibleOperationError, UndoableClient, UndoError, type ClientOptions, type IrreversibleContext } from './runtime.js';
+import { fillPath, IrreversibleOperationError, UndoableClient, UndoError, type CallInput, type ClientOptions, type IrreversibleContext } from './runtime.js';
 import { toolDefinitions, type ToolOptions } from './tools.js';
 import type { InversePlan, Operation } from './types.js';
 import { VERSION } from './version.js';
@@ -13,6 +13,25 @@ export interface McpServerOptions extends Omit<ClientOptions, 'allowIrreversible
    * - 'deny': always refuse
    */
   irreversible?: 'ask' | 'allow' | 'deny';
+}
+
+const SECRET_KEY = /token|secret|password|passwd|api[-_]?key|authorization|cookie|session|credential|private[-_]?key/i;
+
+/** The concrete request, as the human approving it should see it: resolved path, query, and the body (secrets masked, truncated). */
+export function describeCall(op: Operation, input: CallInput): string {
+  let path: string;
+  try {
+    path = fillPath(op.path, input.params ?? {});
+  } catch (err) {
+    path = `${op.path} (${(err as Error).message})`;
+  }
+  const query = input.query && Object.keys(input.query).length ? `?${new URLSearchParams(Object.entries(input.query).map(([k, v]) => [k, String(v)]))}` : '';
+  let body = '';
+  if (input.body !== undefined) {
+    const masked = JSON.stringify(input.body, (k, v) => (k && SECRET_KEY.test(k) && v !== null && typeof v !== 'object' ? '‹hidden›' : v));
+    body = ` with body ${masked && masked.length > 400 ? `${masked.slice(0, 400)}…` : masked}`;
+  }
+  return `${op.method.toUpperCase()} ${path}${query}${body}`;
 }
 
 /** How a model should use these tools; MCP clients pass server instructions to the model. */
@@ -35,7 +54,7 @@ export async function createMcpServer(options: McpServerOptions): Promise<{ serv
   const mode = options.irreversible ?? 'ask';
   const server = new Server({ name: 'undogen', version: VERSION }, { capabilities: { tools: {} }, instructions: instructionsFor(options.spec.title) });
 
-  const approve = async (op: Operation, plan: InversePlan, _input: unknown, ctx: IrreversibleContext): Promise<boolean> => {
+  const approve = async (op: Operation, plan: InversePlan, input: CallInput, ctx: IrreversibleContext): Promise<boolean> => {
     if (mode === 'deny') return false;
     if (mode === 'allow' && !ctx.replayOf) return true;
     if (!server.getClientCapabilities()?.elicitation) return false;
@@ -43,7 +62,7 @@ export async function createMcpServer(options: McpServerOptions): Promise<{ serv
     const replay = ctx.replayOf ? ` An identical call already ran as #${ctx.replayOf.seq} at ${ctx.replayOf.at}; this would do it again.` : '';
     const res = await server.elicitInput({
       mode: 'form',
-      message: `The agent wants to call ${op.id} (${op.method.toUpperCase()} ${op.path}). It is ${plan.reversibility}: ${reason}.${replay} Allow it?`,
+      message: `The agent wants to call ${op.id}: ${describeCall(op, input)}. It is ${plan.reversibility}: ${reason}.${replay} Allow it?`,
       requestedSchema: {
         type: 'object',
         properties: { approve: { type: 'boolean', title: 'Allow this call', description: 'It cannot be undone' } },

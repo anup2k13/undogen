@@ -55,3 +55,8 @@ committed, and pushed; this file records what was done and what is next.
   - Python ignored `Retry-After` when the header was lowercase, and didn't parse HTTP dates.
   - `--concurrency x` made every snapshot empty (NaN workers), which could hide failed inverses; flags are validated and the worker count guarded.
   - Pagination: `/v1` matched links under `/v10`.
+- **Pre-merge security review** (19 Nov): four findings, all fixed with tests, the two confirmed by proof of concept re-run afterwards:
+  - Path traversal: `removeMember({userId: '..'})` sent `DELETE /projects/p1/` (the irreversible deleteProject) with no approval, even with only removeMember exposed, because URL parsing collapses `..`. Path parameters `.`, `..` and empty are now refused (TS + Python).
+  - External `$ref`s: a spec served from a URL could `$ref` `file:///…` or cloud metadata, and the contents became request bodies that `verify` POSTed. Remote specs now only follow same-origin refs (`--trust-refs` to opt out); refused refs are warnings.
+  - Reserved header parameters (`Authorization`, `Cookie`, `Accept`, `Content-Type`) are no longer taken from specs, and configured headers win case-insensitively (TS + Python).
+  - MCP approval prompts show the resolved request, query and masked body instead of the path template.

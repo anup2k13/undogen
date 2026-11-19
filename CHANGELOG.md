@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Safety
+- Path parameters `.`, `..` and empty are refused, so a tool call can't reach a different route than the approved operation (found in a security review; reproduced as `DELETE …/members/..` deleting the parent project without approval).
+- A spec loaded from a URL only follows `$ref`s on its own origin, never local files or other hosts (`--trust-refs` to allow); reserved header parameters (`Authorization`, `Cookie`, …) are ignored and configured headers always win; MCP approval prompts show the concrete request.
 - **Conflict detection.** Before undoing, the client re-reads the state a call produced and refuses (`ConflictError`) if someone changed a field the agent wrote; `If-Match` is sent when the API provides ETags. `{ force: true }` overrides. Paired actions and toggles are checked by reading the state before and after the call: the fields it changed must still be as it left them, and a toggle that changed nothing is undone by doing nothing.
 - A `PUT` that created a singleton (its `GET` was 404 before) is undone with the `DELETE` on the same route; it used to fail with "No captured state".
 - **Verify can no longer pass a no-op.** A snapshot between the operation and its undo must show a change; otherwise the result is `inconclusive`. Previously an operation that changed nothing was reported as `verified`.

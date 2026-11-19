@@ -40,6 +40,8 @@ ${c.bold('Common options')}
   --restore-children     When undoing a delete re-creates a resource, re-create its child collections too
   --header <k:v>         Extra request header (repeatable), e.g. "authorization: Bearer $TOKEN"
   --only <id,id*,...>    Only these operationIds (a trailing * matches a prefix)
+  --trust-refs           Let a spec loaded from a URL follow $refs to other hosts and local files
+                         (by default only its own origin: their contents can end up in requests)
 
 ${c.bold('verify')}
   --fixtures <file>      Per-operation params, bodies, prepare steps, skips
@@ -113,6 +115,7 @@ const OPTIONS = {
   'overrides-out': { type: 'string' },
   'no-links': { type: 'boolean' },
   overwrite: { type: 'boolean' },
+  'trust-refs': { type: 'boolean' },
   compact: { type: 'boolean' },
   markdown: { type: 'boolean' },
   html: { type: 'string' },
@@ -224,7 +227,8 @@ async function main(argv: string[]) {
       return analyze(spec, { overrides: own, restoreChildren: values['restore-children'] });
     };
     const { diffAnalyses, diffToMarkdown } = await import('./diff.js');
-    const d = diffAnalyses(analyzeLenient(await loadSpec(oldPath)), analyzeLenient(await loadSpec(newPath)));
+    const load = { trustRefs: values['trust-refs'] };
+    const d = diffAnalyses(analyzeLenient(await loadSpec(oldPath, load)), analyzeLenient(await loadSpec(newPath, load)));
     if (values.json) console.log(JSON.stringify(d, null, 2));
     else if (values.markdown) console.log(diffToMarkdown(d));
     else printDiff(d);
@@ -238,7 +242,7 @@ async function main(argv: string[]) {
   }
 
   if (!specPath) throw new UsageError(`${command} needs a <spec>. Try --help.`);
-  const spec = await loadSpec(specPath);
+  const spec = await loadSpec(specPath, { trustRefs: values['trust-refs'] });
   const overrides = values.overrides ? await readJson<Record<string, Declaration>>(values.overrides) : undefined;
   const analysis = analyze(spec, { overrides, restoreChildren: values['restore-children'] });
   const headers = headersOf(values);
