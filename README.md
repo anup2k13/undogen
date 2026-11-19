@@ -152,6 +152,20 @@ Undo is careful about the world having moved on:
 - **Retries are safe.** Undo requests carry an `Idempotency-Key`; rate limits (`429`, `Retry-After`), timeouts and `5xx` are retried where repeating is safe.
 - **No accidental replays.** An identical irreversible call (same operation and arguments) is refused a second time with `ReplayBlockedError`, even when irreversible calls are allowed. That protects against an agent restored from a checkpoint repeating a payment or an email. An approval function sees `replayOf` and can allow it explicitly.
 
+For type-checked calls, generate interfaces from the spec and wrap the client:
+
+```bash
+npx undogen types openapi.yaml -o src/api-types.ts
+```
+
+```ts
+import { typed } from 'undogen';
+import type { Operations } from './api-types.js';
+
+const api = typed<Operations>(client);
+const todo = await api.call('createTodo', { body: { title: 'Ship it' } }); // body and todo.data are typed
+```
+
 Each entry stores the *concrete* inverse request, resolved at call time. The journal is plain JSON Lines: audit it, or undo from another process:
 
 ```bash

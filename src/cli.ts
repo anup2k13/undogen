@@ -29,6 +29,7 @@ ${c.bold('Usage')}
   undogen annotate <spec> [-o <file>]              Write x-undogen declarations and OpenAPI links into the spec
   undogen arazzo   <spec> [-o <file>]              Export undo workflows as an Arazzo 1.0 document
   undogen compile  <spec> [-o <file>]              Export operations + plans as JSON (for the Python client)
+  undogen types    <spec> [-o <file>]              TypeScript interfaces for typed<Operations>(client)
   undogen diff     <old-spec> <new-spec>           Compare reversibility between two versions of an API
   undogen lint     <spec>                          What to change in the API so more of it can be undone
 
@@ -436,6 +437,14 @@ async function main(argv: string[]) {
       const errors = findings.filter((f) => f.severity === 'error').length;
       const warnings = findings.filter((f) => f.severity === 'warning').length;
       if ((failOn === 'error' && errors) || (failOn === 'warning' && errors + warnings)) process.exitCode = 1;
+      return;
+    }
+
+    case 'types': {
+      const { generateTypes } = await import('./typegen.js');
+      const text = generateTypes(spec);
+      if (values.out) await write(values.out, text);
+      else process.stdout.write(text);
       return;
     }
 

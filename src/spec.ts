@@ -122,6 +122,9 @@ async function loadExternalRefs(root: unknown, rootUri: string, documents: Map<s
 
 const stripHash = (uri: string) => uri.split('#')[0]!;
 
+/** The component name each resolved $ref came from (e.g. "simple-user"), for naming generated types. */
+export const refNames = new WeakMap<object, string>();
+
 /** Parse an OpenAPI 3.x / Swagger 2.0 document from text (JSON or YAML) or an already-parsed object. */
 export function parseSpec(input: string | object, options: ParseOptions = {}): ApiSpec {
   const doc = (typeof input === 'string' ? parseText(input) : input) as Record<string, any>;
@@ -172,6 +175,8 @@ export function parseSpec(input: string | object, options: ParseOptions = {}): A
       const resolved = deref(resolvePointer(target, fragment, ref), docUri);
       stack.delete(key);
       memo.set(key, resolved);
+      const name = fragment.split('/').filter(Boolean).at(-1);
+      if (name && resolved && typeof resolved === 'object' && !refNames.has(resolved)) refNames.set(resolved, decodeURIComponent(name));
       return resolved;
     }
     const out: Record<string, unknown> = {};
@@ -336,6 +341,8 @@ export function normalizeSchema(schema: Schema | undefined, depth = 0): Schema |
   const cached = byDepth.get(depth);
   if (cached) return cached;
   const result = normalizeUncached(schema, depth);
+  const name = refNames.get(schema);
+  if (name && !refNames.has(result)) refNames.set(result, name);
   byDepth.set(depth, result);
   return result;
 }
