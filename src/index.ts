@@ -43,4 +43,5 @@ export { annotate, toArazzo, toBundle, toDeclaration, toLink, type AnnotateOptio
 export { learn, candidateIds, type LearnAttempt, type LearnOptions, type LearnResult } from './learn.js';
 export { initFiles, type InitResult } from './init.js';
 export { toolDefinitions, toolName, describeEntry, type ToolAnnotations, type ToolDefinition, type ToolOptions } from './tools.js';
+export { diffAnalyses, diffToMarkdown, type AnalysisDiff, type ChangeKind, type PlanChange } from './diff.js';
 // The MCP server lives at 'undogen/mcp' so the core library does not load the MCP SDK.

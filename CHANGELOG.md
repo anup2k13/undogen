@@ -20,6 +20,7 @@
 - `--junit`, `--sarif`, `--redact` (secret-looking keys are always masked), `--strict`.
 
 ### Integrations
+- `undogen diff <old> <new>`: reversibility changes between two versions of a spec (regressions, new gated writes, removed and changed inverses), with Markdown output for pull requests and `--fail-on`.
 - `undogen mcp`: MCP server with undo-aware tool annotations, undo/journal tools and approval through elicitation.
 - `toolDefinitions()` for any agent framework.
 - Python client (`python/`) with LangChain and OpenAI Agents SDK adapters, sharing the journal format.

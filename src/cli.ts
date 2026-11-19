@@ -29,6 +29,7 @@ ${c.bold('Usage')}
   undogen annotate <spec> [-o <file>]              Write x-undogen declarations and OpenAPI links into the spec
   undogen arazzo   <spec> [-o <file>]              Export undo workflows as an Arazzo 1.0 document
   undogen compile  <spec> [-o <file>]              Export operations + plans as JSON (for the Python client)
+  undogen diff     <old-spec> <new-spec>           Compare reversibility between two versions of an API
 
   <spec> is an OpenAPI 3.x or Swagger 2.0 file (JSON or YAML) or URL. External $refs are followed.
 
@@ -53,6 +54,10 @@ ${c.bold('mcp')}
   --journal <file>       Persist the journal (undo after restarts; blocks replays of irreversible calls)
   --irreversible <mode>  ask (default: ask the human via MCP elicitation), allow, or deny
   --no-reads             Don't expose GET operations as tools
+
+${c.bold('diff')}
+  --markdown             Print a Markdown summary (for pull request comments)
+  --fail-on <what>       Exit 1 on: regressed (default), gated (also new irreversible/unknown writes), any, never
 
 ${c.bold('undo')}
   --seq <n>              Undo this entry (default: the most recent one)    --all   Undo everything, newest first
@@ -91,6 +96,8 @@ const OPTIONS = {
   'overrides-out': { type: 'string' },
   'no-links': { type: 'boolean' },
   overwrite: { type: 'boolean' },
+  markdown: { type: 'boolean' },
+  'fail-on': { type: 'string' },
   help: { type: 'boolean', short: 'h' },
   version: { type: 'boolean', short: 'v' },
 } as const;
@@ -117,6 +124,27 @@ function printWarnings(spec: ApiSpec) {
   console.error(c.yellow(`  ⚠ ${spec.warnings.length} spec warning(s):`));
   for (const w of spec.warnings.slice(0, 5)) console.error(c.dim(`    ${w}`));
   if (spec.warnings.length > 5) console.error(c.dim(`    … ${spec.warnings.length - 5} more (see analyze --json)`));
+}
+
+function printDiff(d: import('./diff.js').AnalysisDiff) {
+  const s = d.summary;
+  console.log(`\n${c.bold('undogen diff')}  ${c.dim('·')}  ${d.from.title} ${c.dim(d.from.version)} → ${c.dim(d.to.version)}\n`);
+  const arrow = (x: { reversibility: string; inverse?: string }) => `${x.reversibility}${x.inverse ? c.dim(` (${x.inverse})`) : ''}`;
+  for (const ch of d.changed) {
+    const icon = ch.kind === 'regressed' ? c.red('▼') : ch.kind === 'improved' ? c.green('▲') : c.yellow('~');
+    console.log(`  ${icon} ${ch.operationId.padEnd(32)} ${ch.method.padEnd(7)}${ch.path}`);
+    console.log(`      ${arrow(ch.from)}  →  ${arrow(ch.to)}`);
+    if (ch.kind !== 'improved') console.log(c.dim(`      ${ch.reason}`));
+  }
+  for (const p of d.added) {
+    const gated = p.reversibility === 'irreversible' || p.reversibility === 'unknown';
+    console.log(`  ${gated ? c.magenta('+') : c.green('+')} ${p.operationId.padEnd(32)} ${p.method.toUpperCase().padEnd(7)}${p.path}  ${c.dim(p.reversibility)}`);
+  }
+  for (const p of d.removed) console.log(c.dim(`  - ${p.operationId.padEnd(32)} ${p.method.toUpperCase().padEnd(7)}${p.path}`));
+  if (!d.changed.length && !d.added.length && !d.removed.length) console.log(c.dim('  No changes to write operations.'));
+  console.log(
+    `\n  ${c.red(`${s.regressed} regressed`)} · ${c.green(`${s.improved} improved`)} · ${c.yellow(`${s.inverseChanged} inverse changed`)} · ${s.added} added (${s.addedGated} gated) · ${s.removed} removed\n`,
+  );
 }
 
 async function write(file: string, text: string) {
@@ -150,6 +178,32 @@ async function main(argv: string[]) {
       console.log(color(`  #${String(d.seq).padEnd(4)} ${d.status.padEnd(9)} ${d.operationId.padEnd(28)} ${d.request.padEnd(40)} ↺ ${d.undo ?? '(none)'}`));
       if (e.undoError) console.log(c.dim(`        ${e.undoError}`));
     }
+    return;
+  }
+
+  if (command === 'diff') {
+    const [, oldPath, newPath] = positionals;
+    if (!oldPath || !newPath) throw new UsageError('diff needs <old-spec> <new-spec>');
+    const failOn = values['fail-on'] ?? 'regressed';
+    if (!['regressed', 'gated', 'any', 'never'].includes(failOn)) throw new UsageError('--fail-on must be regressed, gated, any or never');
+    const overridesFor = values.overrides ? await readJson<Record<string, Declaration>>(values.overrides) : undefined;
+    const analyzeLenient = (spec: ApiSpec) => {
+      // An overrides file written for one version may mention operations the other lacks.
+      const ids = new Set(spec.operations.map((o) => o.id));
+      const own = overridesFor && Object.fromEntries(Object.entries(overridesFor).filter(([id]) => ids.has(id)));
+      return analyze(spec, { overrides: own, restoreChildren: values['restore-children'] });
+    };
+    const { diffAnalyses, diffToMarkdown } = await import('./diff.js');
+    const d = diffAnalyses(analyzeLenient(await loadSpec(oldPath)), analyzeLenient(await loadSpec(newPath)));
+    if (values.json) console.log(JSON.stringify(d, null, 2));
+    else if (values.markdown) console.log(diffToMarkdown(d));
+    else printDiff(d);
+    const s = d.summary;
+    const fail =
+      failOn === 'regressed' ? s.regressed > 0 :
+      failOn === 'gated' ? s.regressed + s.addedGated > 0 :
+      failOn === 'any' ? s.regressed + s.improved + s.inverseChanged + s.added + s.removed > 0 : false;
+    if (fail) process.exitCode = 1;
     return;
   }
 

@@ -204,6 +204,26 @@ The Python client implements the same conflict checks, dependency handling, id r
 
 The action writes the Markdown report to the job summary and exposes `verified`, `failed`, `report-dir` and `sarif-file` outputs.
 
+`verify` needs a sandbox. `diff` needs nothing but two versions of the spec, so it can run on every pull request that touches the API description and catch a change that makes writes harder to undo (a removed `DELETE`, a renamed counterpart):
+
+```yaml
+- run: git show origin/main:openapi.yaml > /tmp/base.yaml
+- run: npx undogen diff /tmp/base.yaml openapi.yaml --markdown >> "$GITHUB_STEP_SUMMARY"   # exits 1 on regressions
+```
+
+```
+$ undogen diff v1.yaml v2.yaml
+  ▼ createComment                    POST   /todos/{todoId}/comments
+      reversible (DELETE /todos/{todoId}/comments/{commentId})  →  irreversible
+      Creates a resource but the API has no DELETE /todos/{todoId}/comments/{commentId}
+  + notifyWatchers                   POST   /todos/{todoId}/notify  irreversible
+  - deleteComment                    DELETE /todos/{todoId}/comments/{commentId}
+
+  1 regressed · 0 improved · 0 inverse changed · 1 added (1 gated) · 1 removed
+```
+
+`--fail-on gated` also fails when new write operations can't be undone; `--fail-on never` only reports.
+
 ## How the compiler works
 
 | Pattern in the spec | Strategy | Inverse |
