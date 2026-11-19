@@ -132,3 +132,11 @@ def test_irreversible_entries_do_not_block_rollback(bundle_path, server_url):
     assert [f["entry"]["operationId"] for f in result["failed"]] == ["sendReminder"]
     assert [e["operationId"] for e in result["undone"]] == ["createTodo"]
     assert get(f"{server_url}/todos/{tid}")[0] == 404
+
+
+def test_preview_tool(bundle_path, server_url):
+    tools = {t.name: t for t in tool_definitions(UndoableClient(bundle_path, server_url))}
+    p = tools["undogen_preview"].execute(tool="updateTodo")
+    assert p["undo"] == "PATCH /todos/{todoId} (body: the captured values of the fields sent)"
+    assert p["capture"] == "GET /todos/{todoId}" and p["needsApproval"] is False
+    assert tools["undogen_preview"].execute(tool="sendReminder")["needsApproval"] is True

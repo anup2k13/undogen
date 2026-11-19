@@ -1,5 +1,19 @@
 import type { HttpResult, JournalEntry, UndoableClient, UndoOptions } from './runtime.js';
-import type { InversePlan, Operation, Schema } from './types.js';
+import type { InversePlan, Operation, RequestTemplate, Schema } from './types.js';
+
+/** "DELETE /todos/{todoId} (todoId ← response.id)" */
+function describeTemplate(t: RequestTemplate): string {
+  const binds = Object.entries(t.bindings)
+    .filter(([, r]) => r.from !== 'params')
+    .map(([k, r]) => `${k} ← ${r.from === 'location' ? 'Location header' : `${r.from}.${r.key}`}`);
+  const body =
+    t.body?.from === 'before' ? 'body: the captured state' :
+    t.body?.from === 'before-request-keys' ? 'body: the captured values of the fields sent' :
+    t.body?.from === 'request' ? 'body: the same request body' :
+    t.body?.from === 'literal' ? `body: ${JSON.stringify(t.body.value)}` : '';
+  const extra = [...binds, body].filter(Boolean).join('; ');
+  return `${t.method.toUpperCase()} ${t.path}${extra ? ` (${extra})` : ''}`;
+}
 
 /** Hints about a tool's behaviour, in the shape MCP tool annotations use. */
 export interface ToolAnnotations {
@@ -125,7 +139,7 @@ function result(res: HttpResult & { entry?: JournalEntry }) {
 
 /** One tool per API operation, plus undo and journal tools, all backed by an UndoableClient. */
 export function toolDefinitions(client: UndoableClient, operations: Operation[], options: ToolOptions = {}): ToolDefinition[] {
-  const taken = new Set<string>(['undogen_undo', 'undogen_undo_all', 'undogen_journal']);
+  const taken = new Set<string>(['undogen_undo', 'undogen_undo_all', 'undogen_journal', 'undogen_preview']);
   const tools: ToolDefinition[] = [];
   for (const op of operations) {
     if (op.method === 'get' && options.includeReads === false) continue;
@@ -191,6 +205,40 @@ export function toolDefinitions(client: UndoableClient, operations: Operation[],
       async execute(args) {
         const { undone, failed } = await client.undoAll({ force: args.force === true });
         return { undone: undone.map(describeEntry), failed: failed.map((f) => ({ ...describeEntry(f.entry), error: f.error.message })) };
+      },
+    },
+    {
+      name: 'undogen_preview',
+      description:
+        'Before calling a tool, ask whether its effect can be undone and how: reversibility, the undo request, what is captured first, and caveats. Makes no API calls.',
+      inputSchema: {
+        type: 'object',
+        properties: { tool: { type: 'string', description: 'Tool name or operationId to preview' } },
+        required: ['tool'],
+      },
+      annotations: { title: 'Preview undo', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+      async execute(args) {
+        const wanted = String(args.tool ?? '');
+        const t = tools.find((x) => x.name === wanted || x.operationId === wanted);
+        const op = t?.operationId ? client.operation(t.operationId) : client.operation(wanted);
+        if (!op) throw new Error(`Unknown tool or operation "${wanted}"`);
+        if (op.method === 'get') return { tool: t?.name ?? op.id, reversibility: 'read-only', undo: 'nothing to undo' };
+        const plan = client.planFor(op.id);
+        if (!plan) throw new Error(`No undo plan for ${op.id}`);
+        const describe = (r: RequestTemplate | undefined) => (r ? describeTemplate(r) : undefined);
+        return {
+          tool: t?.name ?? op.id,
+          operation: `${op.method.toUpperCase()} ${op.path}`,
+          reversibility: plan.reversibility,
+          strategy: plan.strategy,
+          confidence: plan.confidence,
+          needsApproval: plan.reversibility === 'irreversible' || plan.reversibility === 'unknown',
+          capture: describe(plan.capture),
+          undo: describe(plan.inverse) ?? (plan.strategy === 'no-side-effects' ? 'nothing to undo' : null),
+          ...(plan.inverseIfMissing ? { undoIfNew: describe(plan.inverseIfMissing) } : {}),
+          reasons: plan.reasons,
+          caveats: plan.caveats,
+        };
       },
     },
     {

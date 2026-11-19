@@ -160,7 +160,7 @@ npx undogen mcp openapi.yaml --base-url https://sandbox.example.com \
   --header "authorization: Bearer $TOKEN" --journal .undogen/journal.jsonl
 ```
 
-This serves every operation as an MCP tool, plus `undogen_undo`, `undogen_undo_all` and `undogen_journal`. Tool descriptions tell the agent up front what can be undone, and MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`) come from the compiled plans. Irreversible calls are put to the human through MCP elicitation; when the client can't ask, they're refused (`--irreversible allow|deny` changes that). Use `--only "issues/*,pulls/get"` to expose a subset of a large API.
+This serves every operation as an MCP tool, plus `undogen_undo`, `undogen_undo_all`, `undogen_journal`, and `undogen_preview` (ask what undo would do *before* acting). Tool descriptions tell the agent up front what can be undone, and MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`) come from the compiled plans. Irreversible calls are put to the human through MCP elicitation; when the client can't ask, they're refused (`--irreversible allow|deny` changes that). Use `--only "issues/*,pulls/get"` to expose a subset of a large API.
 
 For Claude Desktop or any client that launches stdio servers:
 

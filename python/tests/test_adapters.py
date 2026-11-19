@@ -13,7 +13,7 @@ def test_langchain_tools(bundle_path, server_url):
 
     client = UndoableClient(bundle_path, server_url)
     tools = {t.name: t for t in to_langchain_tools(client, only=["createTodo", "sendReminder"])}
-    assert set(tools) == {"createTodo", "sendReminder", "undogen_undo", "undogen_undo_all", "undogen_journal"}
+    assert set(tools) == {"createTodo", "sendReminder", "undogen_undo", "undogen_undo_all", "undogen_preview", "undogen_journal"}
     out = json.loads(tools["createTodo"].invoke({"body": {"title": "lc"}}))
     assert out["status"] == 201
     refused = json.loads(tools["sendReminder"].invoke({"todoId": out["data"]["id"]}))

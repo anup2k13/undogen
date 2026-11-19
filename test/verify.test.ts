@@ -114,7 +114,7 @@ describe('verify: pagination and parallel snapshots', () => {
         }
         const page = Number(url.searchParams.get('page') ?? 1);
         const all = [...items.values()];
-        const next = page < all.length ? { link: `</api/items?page=${page + 1}>; rel="next"` } : {};
+        const next: Record<string, string> = page < all.length ? { link: `</api/items?page=${page + 1}>; rel="next"` } : {};
         return send(200, all.slice(page - 1, page), next);
       }
       const it = items.get(parts[1]!);

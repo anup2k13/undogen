@@ -23,7 +23,7 @@
 ### Integrations
 - `undogen diff <old> <new>`: reversibility changes between two versions of a spec (regressions, new gated writes, removed and changed inverses), with Markdown output for pull requests and `--fail-on`.
 - `undogen mcp`: MCP server with undo-aware tool annotations, undo/journal tools and approval through elicitation.
-- `toolDefinitions()` for any agent framework.
+- `toolDefinitions()` for any agent framework, including `undogen_preview`: what undo would do for a tool, before calling it.
 - Python client (`python/`) with LangChain and OpenAI Agents SDK adapters, sharing the journal format.
 - `undogen learn`, `undogen init`, `undogen annotate` (x-undogen + OpenAPI links), `undogen arazzo`, `undogen compile`.
 - GitHub Action (`action.yml`) with job summary and SARIF output; release workflow with npm provenance and PyPI trusted publishing.

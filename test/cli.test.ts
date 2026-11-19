@@ -108,7 +108,7 @@ describe('cli: mcp over stdio', () => {
     await client.connect(transport);
     try {
       const { tools } = await client.listTools();
-      expect(tools.map((t) => t.name)).toEqual(['createTodo', 'getTodo', 'undogen_undo', 'undogen_undo_all', 'undogen_journal']);
+      expect(tools.map((t) => t.name)).toEqual(['createTodo', 'getTodo', 'undogen_undo', 'undogen_undo_all', 'undogen_preview', 'undogen_journal']);
       const res = await client.callTool({ name: 'createTodo', arguments: { body: { title: 'stdio' } } });
       const id = JSON.parse((res.content as Array<{ text: string }>)[0]!.text).data.id;
       await client.callTool({ name: 'undogen_undo', arguments: {} });

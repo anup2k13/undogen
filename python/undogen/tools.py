@@ -2,13 +2,34 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from .client import UndoableClient
+from .client import UndoableClient, UndogenError
 
-UNDO_TOOLS = ("undogen_undo", "undogen_undo_all", "undogen_journal")
+UNDO_TOOLS = ("undogen_undo", "undogen_undo_all", "undogen_journal", "undogen_preview")
+
+
+def describe_template(t: Optional[dict]) -> Optional[str]:
+    """'DELETE /todos/{todoId} (todoId ← response.id)'."""
+    if not t:
+        return None
+    binds = [
+        f"{k} ← {'Location header' if r['from'] == 'location' else r['from'] + '.' + r['key']}"
+        for k, r in t["bindings"].items()
+        if r["from"] != "params"
+    ]
+    body = t.get("body") or {}
+    kind = body.get("from")
+    text = {
+        "before": "body: the captured state",
+        "before-request-keys": "body: the captured values of the fields sent",
+        "request": "body: the same request body",
+    }.get(kind, f"body: {json.dumps(body.get('value'))}" if kind == "literal" else "")
+    extra = "; ".join([*binds, text] if text else binds)
+    return f"{t['method'].upper()} {t['path']}" + (f" ({extra})" if extra else "")
 
 
 @dataclass
@@ -162,6 +183,31 @@ def tool_definitions(
     def journal(**_: Any) -> dict:
         return {"entries": [describe_entry(e) for e in client.journal]}
 
+    def preview(tool: str = "", **_: Any) -> dict:
+        match = next((t for t in tools if t.name == tool or t.operation_id == tool), None)
+        op = client.bundle.operations.get(match.operation_id if match and match.operation_id else tool)
+        if op is None:
+            raise UndogenError(f'Unknown tool or operation "{tool}"')
+        name = match.name if match else op["id"]
+        if op["method"] == "get":
+            return {"tool": name, "reversibility": "read-only", "undo": "nothing to undo"}
+        plan = client.plan_for(op["id"]) or {}
+        out = {
+            "tool": name,
+            "operation": f"{op['method'].upper()} {op['path']}",
+            "reversibility": plan.get("reversibility"),
+            "strategy": plan.get("strategy"),
+            "confidence": plan.get("confidence"),
+            "needsApproval": plan.get("reversibility") in ("irreversible", "unknown"),
+            "capture": describe_template(plan.get("capture")),
+            "undo": describe_template(plan.get("inverse")) or ("nothing to undo" if plan.get("strategy") == "no-side-effects" else None),
+            "reasons": plan.get("reasons", []),
+            "caveats": plan.get("caveats", []),
+        }
+        if plan.get("inverseIfMissing"):
+            out["undoIfNew"] = describe_template(plan["inverseIfMissing"])
+        return out
+
     tools += [
         ToolDefinition(
             name="undogen_undo",
@@ -187,6 +233,20 @@ def tool_definitions(
             input_schema={"type": "object", "properties": {"force": {"type": "boolean"}}, "required": []},
             annotations={"title": "Undo all writes", "destructiveHint": True, "openWorldHint": True},
             execute=undo_all,
+        ),
+        ToolDefinition(
+            name="undogen_preview",
+            description=(
+                "Before calling a tool, ask whether its effect can be undone and how: reversibility, the undo request, "
+                "what is captured first, and caveats. Makes no API calls."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"tool": {"type": "string", "description": "Tool name or operationId to preview"}},
+                "required": ["tool"],
+            },
+            annotations={"title": "Preview undo", "readOnlyHint": True},
+            execute=preview,
         ),
         ToolDefinition(
             name="undogen_journal",

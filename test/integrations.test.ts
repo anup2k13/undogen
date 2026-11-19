@@ -269,3 +269,25 @@ describe('tools: header parameters', () => {
     expect(seen[0]!['X-Tenant']).toBe('acme');
   });
 });
+
+describe('tools: undogen_preview', () => {
+  it('explains what undo would do before the agent acts, without calling the API', async () => {
+    const calls: string[] = [];
+    const f: typeof fetch = async (u) => {
+      calls.push(String(u));
+      return new Response('{}');
+    };
+    const client = new UndoableClient({ spec, baseUrl: 'http://x', fetch: f });
+    const preview = toolDefinitions(client, spec.operations).find((t) => t.name === 'undogen_preview')!;
+    expect(await preview.execute({ tool: 'createTodo' })).toMatchObject({
+      reversibility: 'reversible',
+      needsApproval: false,
+      undo: 'DELETE /todos/{todoId} (todoId ← response.id)',
+    });
+    expect(await preview.execute({ tool: 'replaceTodo' })).toMatchObject({ capture: 'GET /todos/{todoId}', undoIfNew: 'DELETE /todos/{todoId}' });
+    expect(await preview.execute({ tool: 'sendReminder' })).toMatchObject({ reversibility: 'irreversible', needsApproval: true, undo: null });
+    expect(await preview.execute({ tool: 'getTodo' })).toMatchObject({ reversibility: 'read-only' });
+    await expect(preview.execute({ tool: 'nope' })).rejects.toThrow(/Unknown tool/);
+    expect(calls).toEqual([]);
+  });
+});
