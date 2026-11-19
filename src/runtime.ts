@@ -1,9 +1,17 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { analyze } from './analyze.js';
-import type { ApiSpec, BodyTemplate, HttpMethod, InversePlan, Operation, RequestTemplate, ValueRef } from './types.js';
+import type { ApiSpec, BodyTemplate, ChildPlan, HttpMethod, InversePlan, Operation, RequestTemplate, ValueRef } from './types.js';
+
+type Scalar = string | number;
+type QueryValue = string | number | boolean;
 
 export interface CallInput {
-  params?: Record<string, string | number>;
-  query?: Record<string, string | number | boolean>;
+  params?: Record<string, Scalar>;
+  query?: Record<string, QueryValue>;
+  /** Per-call headers (header parameters of the operation). */
+  headers?: Record<string, string>;
   body?: unknown;
 }
 
@@ -16,25 +24,63 @@ export interface HttpResult {
 export interface ResolvedRequest {
   operationId: string;
   method: HttpMethod;
+  /** The concrete path, e.g. /todos/t1. */
   path: string;
+  /** The route template, e.g. /todos/{todoId}; lets the path be rebuilt when ids change. */
+  pathTemplate?: string;
+  params?: Record<string, Scalar>;
+  query?: Record<string, QueryValue>;
   body?: unknown;
+  contentType?: string;
 }
+
+/** Children of a deleted resource, captured so the undo can re-create them. */
+export interface CapturedChildren {
+  plan: ChildPlan;
+  params: Record<string, Scalar>;
+  items: unknown[];
+}
+
+/**
+ * - active:   applied, not undone
+ * - undone:   the inverse ran successfully
+ * - failed:   the inverse could not be built, or the request failed
+ * - conflict: someone changed what this entry wrote, so the undo was refused
+ */
+export type EntryStatus = 'active' | 'undone' | 'failed' | 'conflict';
 
 export interface JournalEntry {
   seq: number;
+  /** Identifies the client session that made the call. */
+  session: string;
   at: string;
   operationId: string;
   request: ResolvedRequest;
   response: HttpResult;
   /** State captured before the call; `null` means the resource did not exist. */
   before?: unknown;
+  children?: CapturedChildren[];
   plan: Pick<InversePlan, 'reversibility' | 'strategy' | 'confidence'>;
   /** The concrete request that undoes this entry, resolved at call time. */
   inverse: ResolvedRequest | null;
   /** Why `inverse` is null, if it is. */
   inverseError?: string;
+  /** What the call left behind; re-read before undoing to detect someone else's change. */
+  check?: { pathTemplate: string; params: Record<string, Scalar>; query?: Record<string, QueryValue>; expected: Record<string, unknown> };
+  /** The resource this call created, so later calls that use it are known to depend on it. */
+  created?: { param: string; value: Scalar };
+  identity?: { param: string; responseKey: string };
+  /** Fingerprint of irreversible calls, used to refuse accidental replays. */
+  fingerprint?: string;
+  status: EntryStatus;
+  /** Same as status === 'undone'; kept for compatibility. */
   undone: boolean;
   undoResponse?: HttpResult;
+  undoError?: string;
+  undoAttempts?: number;
+  undoWarnings?: string[];
+  /** Ids that changed when this entry was undone: param -> old id -> new id. */
+  idMap?: Record<string, Record<string, Scalar>>;
 }
 
 export class IrreversibleOperationError extends Error {
@@ -47,6 +93,17 @@ export class IrreversibleOperationError extends Error {
   }
 }
 
+/** An irreversible call identical to one already made (e.g. an agent restored from a checkpoint retrying it). */
+export class ReplayBlockedError extends IrreversibleOperationError {
+  constructor(operationId: string, plan: InversePlan, public readonly previous: JournalEntry) {
+    super(operationId, plan);
+    this.message =
+      `Refusing to repeat ${operationId}: an identical irreversible call already ran as #${previous.seq} at ${previous.at}. ` +
+      'Approve it explicitly with an allowIrreversible function (it receives { replayOf }) or set allowReplays.';
+    this.name = 'ReplayBlockedError';
+  }
+}
+
 export class UndoError extends Error {
   constructor(message: string, public readonly entry: JournalEntry, public readonly response?: HttpResult) {
     super(message);
@@ -54,18 +111,136 @@ export class UndoError extends Error {
   }
 }
 
+export interface Conflict {
+  field: string;
+  expected: unknown;
+  actual: unknown;
+}
+
+/** The state an entry produced was changed by someone else; undoing would overwrite their change. */
+export class ConflictError extends UndoError {
+  constructor(entry: JournalEntry, public readonly conflicts: Conflict[], response?: HttpResult) {
+    const what = conflicts.map((c) => `${c.field}: expected ${JSON.stringify(c.expected)}, found ${JSON.stringify(c.actual)}`).join('; ');
+    super(
+      `Undo of #${entry.seq} (${entry.operationId}) refused: the state it wrote has changed since (${what}). ` +
+        'Pass { force: true } to overwrite anyway.',
+      entry,
+      response,
+    );
+    this.name = 'ConflictError';
+  }
+}
+
+/** Later entries use what this entry created; undo them first (or pass { cascade: true }). */
+export class DependencyError extends UndoError {
+  constructor(entry: JournalEntry, public readonly dependents: JournalEntry[]) {
+    super(
+      `Undo of #${entry.seq} (${entry.operationId}) would orphan later writes that use it: ` +
+        dependents.map((d) => `#${d.seq} ${d.operationId}`).join(', ') +
+        '. Undo those first, or pass { cascade: true }.',
+      entry,
+    );
+    this.name = 'DependencyError';
+  }
+}
+
+/** Where the journal lives. Implement this to keep it in a database. */
+export interface JournalStore {
+  load(): Promise<JournalEntry[]>;
+  /** Called after every change to an entry; the latest save of a seq wins. */
+  save(entry: JournalEntry): Promise<void>;
+}
+
+/** Keeps the journal in memory only (the default). */
+export class MemoryJournalStore implements JournalStore {
+  private readonly entries = new Map<number, JournalEntry>();
+  async load() {
+    return [...this.entries.values()].map(clone);
+  }
+  async save(entry: JournalEntry) {
+    this.entries.set(entry.seq, clone(entry));
+  }
+}
+
+/** An append-only JSON Lines file. Survives restarts; another process can resume and undo from it. */
+export class FileJournalStore implements JournalStore {
+  constructor(readonly path: string) {}
+  async load(): Promise<JournalEntry[]> {
+    let text: string;
+    try {
+      text = await readFile(this.path, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw err;
+    }
+    const bySeq = new Map<number, JournalEntry>();
+    for (const line of text.split('\n')) {
+      if (!line.trim()) continue;
+      const e = JSON.parse(line) as JournalEntry;
+      bySeq.set(e.seq, e);
+    }
+    return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+  }
+  async save(entry: JournalEntry) {
+    await mkdir(dirname(this.path), { recursive: true });
+    await appendFile(this.path, JSON.stringify(entry) + '\n');
+  }
+}
+
+export interface OutgoingRequest {
+  method: string;
+  url: URL;
+  headers: Record<string, string>;
+  body?: string | URLSearchParams | FormData;
+}
+
+export interface IrreversibleContext {
+  /** Set when an identical irreversible call already ran in this journal. */
+  replayOf?: JournalEntry;
+}
+
 export interface ClientOptions {
   spec: ApiSpec;
   baseUrl: string;
   /** Pre-compiled plans; compiled from `spec` when omitted. */
   plans?: InversePlan[];
-  headers?: Record<string, string>;
+  /** Static headers, or a function called before every request (e.g. to refresh a token). */
+  headers?: Record<string, string> | (() => Record<string, string> | Promise<Record<string, string>>);
+  /** Last chance to change a request before it is sent, e.g. to sign it. */
+  beforeRequest?: (req: OutgoingRequest) => void | Promise<void>;
   fetch?: typeof fetch;
   /**
    * Gate for operations that cannot be undone. `false` (default) blocks them;
    * a function lets a human or policy engine approve case by case.
    */
-  allowIrreversible?: boolean | ((op: Operation, plan: InversePlan, input: CallInput) => boolean | Promise<boolean>);
+  allowIrreversible?:
+    | boolean
+    | ((op: Operation, plan: InversePlan, input: CallInput, context: IrreversibleContext) => boolean | Promise<boolean>);
+  /** Allow an irreversible call identical to an earlier one when allowIrreversible is `true`. Default false. */
+  allowReplays?: boolean;
+  /** Where to keep the journal. Use `UndoableClient.open()` to load an existing one. */
+  store?: JournalStore;
+  /** Session id recorded on entries. Random by default. */
+  session?: string;
+  /** Re-read state before undoing and refuse if someone changed it. Default true. */
+  checkConflicts?: boolean;
+  /** Header carrying a stable key on undo requests, so retries are safe. `false` disables. Default "Idempotency-Key". */
+  idempotencyHeader?: string | false;
+  /** Retries for rate limits (429), timeouts and 5xx on requests that are safe to repeat. Default 2. */
+  retries?: number;
+  /** Base delay for exponential backoff. Default 250ms. */
+  retryDelayMs?: number;
+  /** Per-request timeout. Default 30s. */
+  timeoutMs?: number;
+  /** When compiling plans here: also re-create child collections when undoing a delete. */
+  restoreChildren?: boolean;
+}
+
+export interface UndoOptions {
+  /** Undo even if someone changed the state since (skips the conflict check). */
+  force?: boolean;
+  /** Undo later entries that depend on this one first. */
+  cascade?: boolean;
 }
 
 /**
@@ -74,20 +249,43 @@ export interface ClientOptions {
  */
 export class UndoableClient {
   readonly journal: JournalEntry[] = [];
+  readonly session: string;
   private readonly ops: Map<string, Operation>;
   private readonly plans: Map<string, InversePlan>;
   private readonly fetchImpl: typeof fetch;
+  private readonly store?: JournalStore;
+  /** param -> old id -> new id, for resources re-created by undo. */
+  private readonly idMap = new Map<string, Map<string, Scalar>>();
   private seq = 0;
 
   constructor(private readonly options: ClientOptions) {
     this.ops = new Map(options.spec.operations.map((o) => [o.id, o]));
-    const plans = options.plans ?? analyze(options.spec).plans;
+    const plans = options.plans ?? analyze(options.spec, { restoreChildren: options.restoreChildren }).plans;
     this.plans = new Map(plans.map((p) => [p.operationId, p]));
     this.fetchImpl = options.fetch ?? fetch;
+    this.store = options.store;
+    this.session = options.session ?? randomUUID().slice(0, 8);
+  }
+
+  /** Create a client and load the journal from `options.store`, to resume or undo an earlier session. */
+  static async open(options: ClientOptions): Promise<UndoableClient> {
+    const client = new UndoableClient(options);
+    for (const entry of (await options.store?.load()) ?? []) {
+      client.journal.push(entry);
+      client.seq = Math.max(client.seq, entry.seq);
+      for (const [param, map] of Object.entries(entry.idMap ?? {})) {
+        for (const [oldId, newId] of Object.entries(map)) client.rememberId(param, oldId, newId);
+      }
+    }
+    return client;
   }
 
   planFor(operationId: string): InversePlan | undefined {
     return this.plans.get(operationId);
+  }
+
+  operation(operationId: string): Operation | undefined {
+    return this.ops.get(operationId);
   }
 
   /** Call an operation by operationId. Writes are journaled with their inverse. */
@@ -96,44 +294,62 @@ export class UndoableClient {
     if (!op) throw new Error(`Unknown operation: ${operationId}`);
     const params = input.params ?? {};
 
-    if (op.method === 'get') return this.request(op.method, fillPath(op.path, params), { query: input.query });
+    if (op.method === 'get') {
+      return this.request(op.method, fillPath(op.path, params), { query: input.query, headers: input.headers });
+    }
 
     const plan = this.plans.get(operationId);
     if (!plan) throw new Error(`No undo plan for ${operationId}`);
 
+    let fingerprint: string | undefined;
     if (plan.reversibility === 'irreversible' || plan.reversibility === 'unknown') {
+      fingerprint = fingerprintOf(operationId, input);
+      const replayOf = this.journal.find((e) => e.fingerprint === fingerprint);
       const gate = this.options.allowIrreversible ?? false;
-      const approved = typeof gate === 'function' ? await gate(op, plan, input) : gate;
+      const approved = typeof gate === 'function' ? await gate(op, plan, input, { replayOf }) : gate;
       if (!approved) throw new IrreversibleOperationError(operationId, plan);
+      if (replayOf && typeof gate !== 'function' && !this.options.allowReplays) {
+        throw new ReplayBlockedError(operationId, plan, replayOf);
+      }
     }
+
+    const pre: Sources = { params, query: input.query ?? {}, request: input.body };
 
     // Capture state before the write.
     let before: unknown;
     let captured = false;
+    let children: CapturedChildren[] | undefined;
     if (plan.capture) {
-      const snap = await this.request('get', resolvePath(plan.capture, { params }));
-      if (snap.status === 404) before = null;
+      const snap = await this.request('get', resolvePath(plan.capture, pre), { query: resolveQuery(plan.capture, pre) });
+      if (snap.status === 404 || snap.status === 410) before = null;
       else if (snap.status < 300) before = snap.data ?? {};
       else throw new Error(`Capture before ${operationId} failed: HTTP ${snap.status}`);
       captured = true;
+      if (before !== null && plan.children?.length) {
+        children = [];
+        for (const child of plan.children) {
+          const res = await this.request('get', resolvePath(child.list, pre), { query: resolveQuery(child.list, pre) });
+          if (res.status < 300 && Array.isArray(res.data)) children.push({ plan: child, params: { ...params }, items: res.data });
+        }
+      }
     }
 
     const path = fillPath(op.path, params);
-    const response = await this.request(op.method, path, { query: input.query, body: input.body });
+    const response = await this.request(op.method, path, {
+      query: input.query,
+      headers: input.headers,
+      body: input.body,
+      contentType: op.requestContentType,
+    });
     if (response.status >= 400) return response; // nothing happened, nothing to undo
 
-    const sources: Sources = { params, response: response.data, before, request: input.body };
+    const sources: Sources = { ...pre, response: response.data, responseHeaders: response.headers, before };
     const template = captured && before === null && plan.inverseIfMissing ? plan.inverseIfMissing : plan.inverse;
     let inverse: ResolvedRequest | null = null;
     let inverseError: string | undefined;
     if (template) {
       try {
-        inverse = {
-          operationId: template.operationId,
-          method: template.method,
-          path: resolvePath(template, sources),
-          body: resolveBody(template.body, sources),
-        };
+        inverse = this.resolveRequest(template, sources);
       } catch (err) {
         inverseError = (err as Error).message;
       }
@@ -143,53 +359,147 @@ export class UndoableClient {
 
     const entry: JournalEntry = {
       seq: ++this.seq,
+      session: this.session,
       at: new Date().toISOString(),
       operationId,
-      request: { operationId, method: op.method, path, body: input.body },
+      request: { operationId, method: op.method, path, pathTemplate: op.path, params: { ...params }, query: input.query, body: input.body, contentType: op.requestContentType },
       response,
       before: captured ? before : undefined,
+      children,
       plan: { reversibility: plan.reversibility, strategy: plan.strategy, confidence: plan.confidence },
       inverse,
       inverseError,
+      fingerprint,
+      identity: plan.identity,
+      status: 'active',
       undone: false,
     };
+    if (inverse && plan.check && this.options.checkConflicts !== false) {
+      try {
+        entry.check = {
+          pathTemplate: plan.check.path,
+          params: resolveParams(plan.check, sources),
+          query: resolveQuery(plan.check, sources),
+          expected: expectedState(input.body, response.data, inverse.method === 'delete' || plan.strategy === 'soft-delete'),
+        };
+      } catch {
+        /* no check possible; undo proceeds unchecked */
+      }
+    }
+    if (inverse && template && (inverse.method === 'delete' || plan.strategy === 'soft-delete')) {
+      const createdBy = Object.entries(template.bindings).find(([, ref]) => ref.from === 'response' || ref.from === 'location');
+      if (createdBy && inverse.params?.[createdBy[0]] !== undefined) {
+        entry.created = { param: createdBy[0], value: inverse.params[createdBy[0]]! };
+      }
+    }
     this.journal.push(entry);
+    await this.store?.save(entry);
     return { ...response, entry };
   }
 
-  /** Undo one entry (default: the most recent one not yet undone). */
-  async undo(entry?: JournalEntry): Promise<HttpResult> {
-    const target = entry ?? [...this.journal].reverse().find((e) => !e.undone);
-    if (!target) throw new Error('Nothing to undo');
-    if (target.undone) throw new UndoError(`Entry #${target.seq} is already undone`, target);
+  /** Later entries (not yet undone) that use the resource `entry` created. */
+  dependentsOf(entry: JournalEntry): JournalEntry[] {
+    if (!entry.created) return [];
+    const { param, value } = entry.created;
+    const ids = new Set([String(value), String(this.remapId(param, value))]);
+    return this.journal.filter(
+      (e) =>
+        e.seq > entry.seq &&
+        e.status !== 'undone' &&
+        e.plan.strategy !== 'no-side-effects' &&
+        e.request.params?.[param] !== undefined &&
+        ids.has(String(e.request.params[param])),
+    );
+  }
+
+  /** Undo one entry (or seq). Default: the most recent entry not yet undone. */
+  async undo(entryOrSeq?: JournalEntry | number, opts: UndoOptions = {}): Promise<HttpResult> {
+    const target =
+      typeof entryOrSeq === 'number'
+        ? this.journal.find((e) => e.seq === entryOrSeq)
+        : entryOrSeq ?? [...this.journal].reverse().find((e) => e.status !== 'undone');
+    if (!target) throw new Error(typeof entryOrSeq === 'number' ? `No journal entry #${entryOrSeq}` : 'Nothing to undo');
+    if (target.status === 'undone') throw new UndoError(`Entry #${target.seq} is already undone`, target);
+
+    const dependents = this.dependentsOf(target);
+    if (dependents.length) {
+      if (!opts.cascade) throw new DependencyError(target, dependents);
+      for (const d of [...dependents].reverse()) if (d.status !== 'undone') await this.undo(d, opts);
+    }
+
     if (!target.inverse && target.plan.strategy === 'no-side-effects') {
-      target.undone = true;
-      return { status: 204, data: undefined, headers: {} };
+      return this.finish(target, { status: 204, data: undefined, headers: {} });
     }
     if (!target.inverse) {
+      target.undoError = `cannot be undone: ${target.inverseError}`;
+      target.status = 'failed';
+      await this.store?.save(target);
       throw new UndoError(`Entry #${target.seq} (${target.operationId}) cannot be undone: ${target.inverseError}`, target);
     }
-    const res = await this.request(target.inverse.method, target.inverse.path, { body: target.inverse.body });
-    target.undoResponse = res;
-    if (res.status >= 400 && !(target.inverse.method === 'delete' && res.status === 404)) {
-      throw new UndoError(
-        `Undo of #${target.seq} (${target.operationId}) failed: ${target.inverse.method.toUpperCase()} ${target.inverse.path} -> HTTP ${res.status}`,
-        target,
-        res,
-      );
+
+    const inverse = this.remapRequest(target.inverse);
+    const headers: Record<string, string> = {};
+
+    // Refuse to overwrite someone else's change.
+    if (target.check && !opts.force && this.options.checkConflicts !== false) {
+      const checkPath = fillPath(target.check.pathTemplate, this.remapParams(target.check.params));
+      const current = await this.request('get', checkPath, { query: target.check.query });
+      if (current.status === 404 || current.status === 410) {
+        if (inverse.method === 'delete') {
+          target.undoWarnings = [...(target.undoWarnings ?? []), 'the resource was already gone'];
+          return this.finish(target, current);
+        }
+        return this.conflict(target, [{ field: '(resource)', expected: 'exists', actual: `HTTP ${current.status}` }], current);
+      }
+      if (current.status >= 300) {
+        throw new UndoError(`Undo of #${target.seq}: could not read current state (GET ${checkPath} -> HTTP ${current.status})`, target, current);
+      }
+      const conflicts = compareExpected(target.check.expected, current.data);
+      if (conflicts.length) return this.conflict(target, conflicts, current);
+      const etag = current.headers['etag'];
+      if (etag && checkPath === inverse.path) headers['if-match'] = etag;
     }
-    target.undone = true;
-    return res;
+
+    const idemHeader = this.options.idempotencyHeader ?? 'Idempotency-Key';
+    if (idemHeader) headers[idemHeader] = `undogen-${target.session}-${target.seq}-undo`;
+
+    target.undoAttempts = (target.undoAttempts ?? 0) + 1;
+    const res = await this.request(inverse.method, inverse.path, {
+      query: inverse.query,
+      body: inverse.body,
+      contentType: inverse.contentType,
+      headers,
+      idempotent: true,
+    });
+    target.undoResponse = res;
+    if (res.status === 412) {
+      return this.conflict(target, [{ field: '(etag)', expected: headers['if-match'], actual: 'changed' }], res);
+    }
+    if (res.status >= 400 && !(inverse.method === 'delete' && (res.status === 404 || res.status === 410))) {
+      target.status = 'failed';
+      target.undoError = `${inverse.method.toUpperCase()} ${inverse.path} -> HTTP ${res.status}`;
+      await this.store?.save(target);
+      throw new UndoError(`Undo of #${target.seq} (${target.operationId}) failed: ${target.undoError}`, target, res);
+    }
+
+    // A re-created resource has a new id: remember it, so later undos address it.
+    if (target.identity && inverse.method === 'post') {
+      const oldId = target.request.params?.[target.identity.param];
+      const newId = (getPath(res.data, target.identity.responseKey) ?? getPath(res.data, 'id')) as Scalar | undefined;
+      if (oldId !== undefined && newId !== undefined) this.recordId(target, target.identity.param, oldId, newId);
+    }
+    if (target.children?.length) await this.restoreChildren(target);
+    return this.finish(target, res);
   }
 
   /** Undo everything in reverse order (a saga rollback). Continues past failures and reports them. */
-  async undoAll(): Promise<{ undone: JournalEntry[]; failed: Array<{ entry: JournalEntry; error: Error }> }> {
+  async undoAll(opts: Omit<UndoOptions, 'cascade'> = {}): Promise<{ undone: JournalEntry[]; failed: Array<{ entry: JournalEntry; error: Error }> }> {
     const undone: JournalEntry[] = [];
     const failed: Array<{ entry: JournalEntry; error: Error }> = [];
     for (const entry of [...this.journal].reverse()) {
-      if (entry.undone) continue;
+      if (entry.status === 'undone') continue;
       try {
-        await this.undo(entry);
+        await this.undo(entry, opts);
         undone.push(entry);
       } catch (error) {
         failed.push({ entry, error: error as Error });
@@ -198,39 +508,171 @@ export class UndoableClient {
     return { undone, failed };
   }
 
-  /** Low-level request against the base URL. Not journaled. */
+  /** Low-level request against the base URL. Not journaled. Retries rate limits and transient failures. */
   async request(
     method: HttpMethod,
     path: string,
-    opts: { query?: CallInput['query']; body?: unknown } = {},
+    opts: {
+      query?: Record<string, QueryValue>;
+      body?: unknown;
+      headers?: Record<string, string>;
+      contentType?: string;
+      /** Safe to retry after a timeout or 5xx. Defaults to true for GET, PUT and DELETE. */
+      idempotent?: boolean;
+    } = {},
   ): Promise<HttpResult> {
     const url = new URL(this.options.baseUrl.replace(/\/$/, '') + path);
     for (const [k, v] of Object.entries(opts.query ?? {})) url.searchParams.set(k, String(v));
-    const headers: Record<string, string> = { accept: 'application/json', ...this.options.headers };
-    let body: string | undefined;
-    if (opts.body !== undefined) {
-      headers['content-type'] = 'application/json';
-      body = JSON.stringify(opts.body);
-    }
-    const res = await this.fetchImpl(url, { method: method.toUpperCase(), headers, body });
-    const text = await res.text();
-    let data: unknown = text;
-    if (text) {
+    const base = typeof this.options.headers === 'function' ? await this.options.headers() : this.options.headers;
+    const headers: Record<string, string> = { accept: 'application/json', ...base, ...opts.headers };
+    const encoded = encodeBody(opts.body, opts.contentType);
+    if (encoded.contentType) headers['content-type'] = encoded.contentType;
+    const outgoing: OutgoingRequest = { method: method.toUpperCase(), url, headers, body: encoded.body };
+    await this.options.beforeRequest?.(outgoing);
+
+    const retries = this.options.retries ?? 2;
+    const canRetry = opts.idempotent ?? ['get', 'put', 'delete'].includes(method);
+    const timeoutMs = this.options.timeoutMs ?? 30_000;
+    for (let attempt = 0; ; attempt++) {
+      let res: Response;
       try {
-        data = JSON.parse(text);
-      } catch {
-        /* keep text */
+        res = await this.fetchImpl(outgoing.url, {
+          method: outgoing.method,
+          headers: outgoing.headers,
+          body: outgoing.body,
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+      } catch (err) {
+        if (canRetry && attempt < retries) {
+          await sleep(this.backoff(attempt));
+          continue;
+        }
+        const e = err as Error;
+        throw new Error(
+          e.name === 'TimeoutError'
+            ? `${outgoing.method} ${outgoing.url.pathname} timed out after ${timeoutMs}ms`
+            : `${outgoing.method} ${outgoing.url.pathname} failed: ${e.message}`,
+        );
       }
-    } else data = undefined;
-    const outHeaders: Record<string, string> = {};
-    res.headers.forEach((v, k) => (outHeaders[k] = v));
-    return { status: res.status, data, headers: outHeaders };
+      const transient = res.status === 429 || ((res.status === 502 || res.status === 503 || res.status === 504) && canRetry);
+      if (transient && attempt < retries) {
+        await res.body?.cancel().catch(() => {});
+        await sleep(retryAfterMs(res.headers.get('retry-after')) ?? this.backoff(attempt));
+        continue;
+      }
+      const text = await res.text();
+      let data: unknown = undefined;
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = text;
+        }
+      }
+      const outHeaders: Record<string, string> = {};
+      res.headers.forEach((v, k) => (outHeaders[k] = v));
+      return { status: res.status, data, headers: outHeaders };
+    }
+  }
+
+  /** The current id of a resource that may have been re-created by an undo. */
+  remapId(param: string, id: Scalar): Scalar {
+    let cur = id;
+    for (let i = 0; i < 32; i++) {
+      const next = this.idMap.get(param)?.get(String(cur));
+      if (next === undefined) return cur;
+      cur = next;
+    }
+    return cur;
+  }
+
+  private backoff(attempt: number) {
+    return (this.options.retryDelayMs ?? 250) * 2 ** attempt;
+  }
+
+  private async finish(target: JournalEntry, res: HttpResult): Promise<HttpResult> {
+    target.status = 'undone';
+    target.undone = true;
+    target.undoError = undefined;
+    await this.store?.save(target);
+    return res;
+  }
+
+  private async conflict(target: JournalEntry, conflicts: Conflict[], res: HttpResult): Promise<never> {
+    target.status = 'conflict';
+    target.undoError = 'state changed since the call';
+    await this.store?.save(target);
+    throw new ConflictError(target, conflicts, res);
+  }
+
+  private async restoreChildren(target: JournalEntry) {
+    const warnings: string[] = [];
+    for (const group of target.children ?? []) {
+      const params = this.remapParams(group.params);
+      for (const item of group.items) {
+        const body = resolveBody(group.plan.create.body, { params, query: {}, before: item });
+        let path: string;
+        try {
+          path = fillPath(group.plan.create.path, params);
+        } catch (err) {
+          warnings.push((err as Error).message);
+          continue;
+        }
+        const op = this.ops.get(group.plan.create.operationId);
+        const res = await this.request('post', path, { body, contentType: op?.requestContentType });
+        if (res.status >= 300) {
+          warnings.push(`re-creating a child with ${group.plan.create.operationId} failed: HTTP ${res.status}`);
+          continue;
+        }
+        const oldId = getPath(item, group.plan.idKey) as Scalar | undefined;
+        const newId = getPath(res.data, group.plan.idKey) as Scalar | undefined;
+        if (oldId !== undefined && newId !== undefined) this.recordId(target, group.plan.param, oldId, newId);
+      }
+    }
+    if (warnings.length) target.undoWarnings = [...(target.undoWarnings ?? []), ...warnings];
+  }
+
+  private recordId(entry: JournalEntry, param: string, oldId: Scalar, newId: Scalar) {
+    entry.idMap ??= {};
+    (entry.idMap[param] ??= {})[String(oldId)] = newId;
+    this.rememberId(param, String(oldId), newId);
+  }
+
+  private rememberId(param: string, oldId: string, newId: Scalar) {
+    if (!this.idMap.has(param)) this.idMap.set(param, new Map());
+    this.idMap.get(param)!.set(oldId, newId);
+  }
+
+  private remapParams(params: Record<string, Scalar>): Record<string, Scalar> {
+    return Object.fromEntries(Object.entries(params).map(([k, v]) => [k, this.remapId(k, v)]));
+  }
+
+  private remapRequest(req: ResolvedRequest): ResolvedRequest {
+    if (!req.pathTemplate || !req.params) return req;
+    const params = this.remapParams(req.params);
+    return { ...req, params, path: fillPath(req.pathTemplate, params) };
+  }
+
+  private resolveRequest(template: RequestTemplate, sources: Sources): ResolvedRequest {
+    const params = resolveParams(template, sources);
+    return {
+      operationId: template.operationId,
+      method: template.method,
+      path: fillPath(template.path, params),
+      pathTemplate: template.path,
+      params,
+      query: resolveQuery(template, sources),
+      body: resolveBody(template.body, sources),
+      contentType: this.ops.get(template.operationId)?.requestContentType,
+    };
   }
 }
 
 interface Sources {
-  params: Record<string, string | number>;
+  params: Record<string, Scalar>;
+  query: Record<string, QueryValue>;
   response?: unknown;
+  responseHeaders?: Record<string, string>;
   before?: unknown;
   request?: unknown;
 }
@@ -245,6 +687,12 @@ export function getPath(obj: unknown, dotted: string): unknown {
 }
 
 function lookup(ref: ValueRef, sources: Sources): unknown {
+  if (ref.from === 'location') {
+    const loc = sources.responseHeaders?.['location'];
+    if (!loc) return undefined;
+    const pathname = new URL(loc, 'http://x').pathname;
+    return decodeURIComponent(pathname.split('/').filter(Boolean).at(-1) ?? '') || undefined;
+  }
   return getPath(sources[ref.from], ref.key);
 }
 
@@ -256,16 +704,30 @@ export function fillPath(path: string, params: Record<string, unknown>): string 
   });
 }
 
-function resolvePath(template: RequestTemplate, sources: Sources): string {
-  const values: Record<string, unknown> = {};
+function resolveParams(template: RequestTemplate, sources: Sources): Record<string, Scalar> {
+  const values: Record<string, Scalar> = {};
   for (const [name, ref] of Object.entries(template.bindings)) {
     const v = lookup(ref, sources);
     if (v === undefined || v === null) {
-      throw new Error(`Cannot resolve {${name}} from ${ref.from}.${ref.key}`);
+      throw new Error(`Cannot resolve {${name}} from ${ref.from}${ref.key ? '.' + ref.key : ''}`);
     }
-    values[name] = v;
+    values[name] = v as Scalar;
   }
-  return fillPath(template.path, values);
+  return values;
+}
+
+function resolvePath(template: RequestTemplate, sources: Sources): string {
+  return fillPath(template.path, resolveParams(template, sources));
+}
+
+function resolveQuery(template: RequestTemplate, sources: Sources): Record<string, QueryValue> | undefined {
+  if (!template.query) return undefined;
+  const out: Record<string, QueryValue> = {};
+  for (const [name, ref] of Object.entries(template.query)) {
+    const v = lookup(ref, sources);
+    if (v !== undefined && v !== null) out[name] = v as QueryValue;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 function pick(obj: unknown, keys: string[]): Record<string, unknown> {
@@ -291,4 +753,81 @@ function resolveBody(body: BodyTemplate | undefined, sources: Sources): unknown 
       return pick(sources.before, keys);
     }
   }
+}
+
+/**
+ * What the call left behind, as far as the caller can know: the top-level keys it sent,
+ * with the values the server reported back (or the sent values when it reported nothing).
+ * For creates, only keys the server echoed back are expected.
+ */
+function expectedState(request: unknown, response: unknown, onlyEchoed: boolean): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!request || typeof request !== 'object' || Array.isArray(request)) return out;
+  const res = response && typeof response === 'object' && !Array.isArray(response) ? (response as Record<string, unknown>) : undefined;
+  for (const [k, v] of Object.entries(request)) {
+    if (res && k in res) out[k] = res[k];
+    else if (!onlyEchoed) out[k] = v;
+  }
+  return out;
+}
+
+function compareExpected(expected: Record<string, unknown>, current: unknown): Conflict[] {
+  const cur = current && typeof current === 'object' ? (current as Record<string, unknown>) : {};
+  const out: Conflict[] = [];
+  for (const [field, value] of Object.entries(expected)) {
+    if (stableStringify(cur[field]) !== stableStringify(value)) out.push({ field, expected: value, actual: cur[field] });
+  }
+  return out;
+}
+
+export function stableStringify(v: unknown): string {
+  return JSON.stringify(v, (_, x) =>
+    x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => a.localeCompare(b))) : x,
+  ) ?? 'undefined';
+}
+
+function fingerprintOf(operationId: string, input: CallInput): string {
+  const h = createHash('sha256');
+  h.update(stableStringify({ operationId, params: input.params ?? {}, query: input.query ?? {}, body: input.body ?? null }));
+  return h.digest('hex').slice(0, 32);
+}
+
+function encodeBody(body: unknown, contentType?: string): { body?: string | URLSearchParams | FormData; contentType?: string } {
+  if (body === undefined) return {};
+  const ct = contentType ?? 'application/json';
+  if (/x-www-form-urlencoded/i.test(ct)) {
+    const form = new URLSearchParams();
+    for (const [k, v] of Object.entries((body ?? {}) as Record<string, unknown>)) {
+      for (const item of Array.isArray(v) ? v : [v]) {
+        if (item !== undefined) form.append(k, typeof item === 'object' && item !== null ? JSON.stringify(item) : String(item));
+      }
+    }
+    return { body: form, contentType: 'application/x-www-form-urlencoded' };
+  }
+  if (/multipart\/form-data/i.test(ct)) {
+    const form = new FormData();
+    for (const [k, v] of Object.entries((body ?? {}) as Record<string, unknown>)) {
+      for (const item of Array.isArray(v) ? v : [v]) {
+        if (item === undefined) continue;
+        if (item instanceof Blob) form.append(k, item);
+        else form.append(k, typeof item === 'object' && item !== null ? JSON.stringify(item) : String(item));
+      }
+    }
+    return { body: form }; // fetch sets the multipart boundary
+  }
+  if (/^text\//i.test(ct)) return { body: String(body), contentType: ct };
+  return { body: JSON.stringify(body), contentType: /json/i.test(ct) ? ct : 'application/json' };
+}
+
+function retryAfterMs(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const secs = Number(header);
+  const ms = Number.isFinite(secs) ? secs * 1000 : Date.parse(header) - Date.now();
+  return Number.isFinite(ms) ? Math.min(Math.max(ms, 0), 60_000) : undefined;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function clone<T>(v: T): T {
+  return JSON.parse(JSON.stringify(v)) as T;
 }

@@ -244,3 +244,94 @@ describe('analyze: GitHub-shaped APIs', () => {
     expect(() => analyze(spec, { overrides: { nope: { reversibility: 'irreversible' } } })).toThrow(/unknown operationId "nope"/);
   });
 });
+
+describe('analyze: irreversible effects hidden in names and summaries', () => {
+  const ok = { '201': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } } } };
+  const spec = parseSpec({
+    openapi: '3.0.3',
+    info: { title: 'Billing', version: '1' },
+    paths: {
+      '/invoices': { post: { operationId: 'createAndSendInvoice', responses: ok } },
+      '/drafts': { post: { operationId: 'createDraft', summary: 'Creates a draft and emails it to the customer', responses: ok } },
+      '/notes': { post: { operationId: 'createNote', summary: 'Creates a note without notifying anyone', description: 'Watchers are notified by email.', responses: ok } },
+      '/users/{userId}/email': {
+        get: { operationId: 'getUserEmail', responses: { '200': { description: '' } } },
+        patch: { operationId: 'updateUserEmail', responses: { '200': { description: '' } } },
+      },
+      '/invoices/{invoiceId}': { delete: { operationId: 'deleteInvoice', responses: { '204': { description: '' } } } },
+      '/drafts/{draftId}': { delete: { operationId: 'deleteDraft', responses: { '204': { description: '' } } } },
+      '/notes/{noteId}': { delete: { operationId: 'deleteNote', responses: { '204': { description: '' } } } },
+    },
+  });
+  const byId = Object.fromEntries(analyze(spec).plans.map((p) => [p.operationId, p]));
+
+  it('finds a strong verb anywhere in the operationId', () => {
+    expect(byId.createAndSendInvoice!.reversibility).toBe('irreversible');
+  });
+
+  it('reads the summary', () => {
+    expect(byId.createDraft!.reversibility).toBe('irreversible');
+  });
+
+  it('respects negations in the summary and only warns about the description', () => {
+    expect(byId.createNote!.reversibility).toBe('reversible');
+    expect(byId.createNote!.caveats.join(' ')).toContain('description mentions "notified"');
+  });
+
+  it('does not treat nouns like "email" as irreversible outside the leading verb', () => {
+    expect(byId.updateUserEmail!.reversibility).toBe('reversible');
+  });
+});
+
+describe('analyze: runtime support fields', async () => {
+  const todo = await loadSpec(specPath);
+  const plain = Object.fromEntries(analyze(todo).plans.map((p) => [p.operationId, p]));
+  const withChildren = Object.fromEntries(analyze(todo, { restoreChildren: true }).plans.map((p) => [p.operationId, p]));
+
+  it('adds a check GET to snapshot restores and creates', () => {
+    expect(plain.updateTodo!.check).toMatchObject({ method: 'get', path: '/todos/{todoId}' });
+    expect(plain.createTodo!.check).toMatchObject({ method: 'get', path: '/todos/{todoId}', bindings: { todoId: { from: 'response', key: 'id' } } });
+    expect(plain.archiveTodo!.check).toBeUndefined();
+  });
+
+  it('records where a re-created resource reports its new id', () => {
+    expect(plain.deleteTodo!.identity).toEqual({ param: 'todoId', responseKey: 'id' });
+  });
+
+  it('plans child re-creation only when asked', () => {
+    expect(plain.deleteTodo!.children).toBeUndefined();
+    expect(withChildren.deleteTodo!.children).toEqual([
+      expect.objectContaining({ param: 'commentId', idKey: 'id', list: expect.objectContaining({ operationId: 'listComments' }) }),
+    ]);
+  });
+
+  it('suggests the inverse for unknown creates, for `undogen learn`', () => {
+    const spec = parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'x', version: '1' },
+      paths: {
+        '/jobs': { post: { operationId: 'createJob', responses: { '201': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { ref: { type: 'string' } } } } } } } } },
+        '/jobs/{jobId}': { delete: { operationId: 'deleteJob', responses: { '204': { description: '' } } } },
+      },
+    });
+    expect(analyze(spec).plans[0]).toMatchObject({ reversibility: 'unknown', suggestion: { inverse: 'deleteJob', param: 'jobId' } });
+  });
+
+  it('accepts "location" bindings and before-request-keys bodies in declarations', () => {
+    const spec = parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'x', version: '1' },
+      paths: {
+        '/jobs': { post: { operationId: 'createJob', 'x-undogen': { inverse: 'deleteJob', bindings: { jobId: 'location' } }, responses: { '201': { description: '' } } } },
+        '/jobs/{jobId}': {
+          get: { operationId: 'getJob', responses: { '200': { description: '' } } },
+          delete: { operationId: 'deleteJob', responses: { '204': { description: '' } } },
+          patch: { operationId: 'patchJob', 'x-undogen': { inverse: 'patchJob', body: 'before-request-keys' }, responses: { '200': { description: '' } } },
+        },
+      },
+    });
+    const byId = Object.fromEntries(analyze(spec).plans.map((p) => [p.operationId, p]));
+    expect(byId.createJob!.inverse!.bindings.jobId).toEqual({ from: 'location', key: '' });
+    expect(byId.patchJob).toMatchObject({ capture: { path: '/jobs/{jobId}' }, inverse: { body: { from: 'before-request-keys' } } });
+  });
+});

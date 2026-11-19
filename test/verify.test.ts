@@ -52,3 +52,39 @@ describe('verify against the demo Todo API', () => {
     expect(md).toContain('`$.done`');
   });
 });
+
+describe('verify: trustworthy outcomes', () => {
+  let spec: Awaited<ReturnType<typeof loadSpec>>;
+  beforeAll(async () => {
+    spec = await loadSpec(new URL('../examples/todo-api/openapi.yaml', import.meta.url).pathname);
+  });
+  const count = async () => ((await (await fetch(`${server.url}/todos`)).json()) as unknown[]).length;
+
+  it('reports an operation that changed nothing as inconclusive, not verified', async () => {
+    const r = await verify({ spec, baseUrl: server.url, only: ['updateTodo'], fixtures: { updateTodo: { body: {} } } });
+    expect(r.results[0]).toMatchObject({ outcome: 'inconclusive' });
+    expect(r.summary.inconclusive).toBe(1);
+  });
+
+  it('cleans up every resource it created', async () => {
+    const before = await count();
+    await verify({ spec, baseUrl: server.url, fixtures });
+    expect(await count()).toBe(before);
+  });
+
+  it('keeps them with cleanup: false', async () => {
+    const before = await count();
+    await verify({ spec, baseUrl: server.url, fixtures, only: ['updateTodo'], cleanup: false });
+    expect(await count()).toBe(before + 1);
+  });
+
+  it('verifies deleteTodo once children are re-created (restoreChildren)', async () => {
+    const r = await verify({ spec, baseUrl: server.url, fixtures, only: ['deleteTodo'], restoreChildren: true });
+    expect(r.results[0]).toMatchObject({ outcome: 'verified', detail: 'state restored (2 resources re-created under new ids)' });
+  });
+
+  it('still tests creates when only scoped routes are snapshotted', async () => {
+    const r = await verify({ spec, baseUrl: server.url, fixtures, only: ['createTodo', 'updateTodo'], scopedOnly: true });
+    expect(r.results.map((x) => x.outcome)).toEqual(['verified', 'verified']);
+  });
+});

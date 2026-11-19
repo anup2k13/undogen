@@ -19,7 +19,7 @@ describe('UndoableClient', () => {
     const client = newClient();
     const res = await client.call('createTodo', { body: { title: 'a' } });
     const id = (res.data as { id: string }).id;
-    expect(res.entry!.inverse).toEqual({ operationId: 'deleteTodo', method: 'delete', path: `/todos/${id}`, body: undefined });
+    expect(res.entry!.inverse).toMatchObject({ operationId: 'deleteTodo', method: 'delete', path: `/todos/${id}`, params: { todoId: id } });
     await client.undo();
     expect((await client.call('getTodo', { params: { todoId: id } })).status).toBe(404);
   });

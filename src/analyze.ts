@@ -1,5 +1,6 @@
 import type {
   Analysis,
+  ChildPlan,
   ApiSpec,
   BodyTemplate,
   Declaration,
@@ -47,6 +48,24 @@ const IRREVERSIBLE_VERBS = new Set([
   'transfer', 'refund', 'purge', 'wipe', 'shred', 'deliver', 'dispatch', 'execute', 'remind',
   'cancel', 'merge', 'revoke', 'rerun', 'rerequest', 'ping', 'redeliver', 'dismiss', 'trigger',
 ]);
+
+/**
+ * Verbs that are unambiguous wherever they appear in an operation name or summary
+ * ("createAndSendInvoice", "Creates an invoice and emails it"). Nouns like "email"
+ * or "merge" are left out here: "updateEmail" is not irreversible.
+ */
+const STRONG_IRREVERSIBLE_VERBS = new Set([
+  'send', 'sends', 'sending', 'notify', 'notifies', 'notifying', 'emails', 'emailing', 'texts', 'sms',
+  'broadcast', 'broadcasts', 'charge', 'charges', 'charging', 'pay', 'pays', 'payout', 'transfer', 'transfers',
+  'refund', 'refunds', 'purge', 'purges', 'wipe', 'wipes', 'shred', 'deliver', 'delivers', 'dispatch',
+  'dispatches', 'execute', 'executes', 'remind', 'reminds', 'redeliver', 'rerun', 'trigger', 'triggers',
+]);
+
+/** Past-tense forms that only appear in prose ("Watchers are notified"); used for description caveats. */
+const PAST_TENSE_EFFECTS = new Set(['sent', 'notified', 'emailed', 'charged', 'delivered', 'triggered', 'executed', 'dispatched', 'broadcasted', 'refunded']);
+
+/** Words that negate a following verb in a summary: "without sending", "does not notify". */
+const NEGATIONS = new Set(['not', 'no', 'without', 'never', 'dont', 'doesn', 'don', 't']);
 
 /** Verbs for POSTs that compute something and change nothing. */
 const SIDE_EFFECT_FREE_VERBS = new Set([
@@ -193,16 +212,32 @@ function counterpartsOf(action: string): string[] {
 }
 
 function parseRef(s: string): ValueRef {
+  if (s === 'location') return { from: 'location', key: '' };
   const i = s.indexOf('.');
   const from = s.slice(0, i) as ValueRef['from'];
-  if (i < 1 || !['params', 'response', 'before', 'request'].includes(from)) {
-    throw new Error(`Bad binding "${s}": expected params.x, response.x, before.x or request.x`);
+  if (i < 1 || !['params', 'query', 'response', 'before', 'request'].includes(from)) {
+    throw new Error(`Bad binding "${s}": expected params.x, query.x, response.x, before.x, request.x or location`);
   }
   return { from, key: s.slice(i + 1) };
 }
 
 /** The verb of an operationId, ignoring namespaces like "repos/create-webhook". */
 const verbOf = (op: Operation) => tokenize(op.id.split('/').pop() ?? op.id)[0] ?? '';
+
+/** Every word of the operationId (without namespace), e.g. createAndSendInvoice -> create, and, send, invoice. */
+const nameTokens = (op: Operation) => tokenize(op.id.split('/').pop() ?? op.id);
+
+/** The first strong irreversible verb in free text that is not negated ("without sending"). */
+function strongVerbIn(text: string | undefined, includePastTense = false): string | undefined {
+  if (!text) return undefined;
+  const words = tokenize(text);
+  for (let i = 0; i < words.length; i++) {
+    if (!STRONG_IRREVERSIBLE_VERBS.has(words[i]!) && !(includePastTense && PAST_TENSE_EFFECTS.has(words[i]!))) continue;
+    const window = words.slice(Math.max(0, i - 3), i);
+    if (!window.some((w) => NEGATIONS.has(w))) return words[i];
+  }
+  return undefined;
+}
 
 /** Find "GitHub-style" flat item routes: POST /repos/{o}/{r}/issues/{n}/comments -> DELETE /repos/{o}/{r}/issues/comments/{id}. */
 function flatItemDeleteOf(index: Index, opPath: string): Operation | undefined {
@@ -233,7 +268,11 @@ function deleteCreatedPlan(op: Operation, del: Operation, confidenceBoost = 0, r
           ? `Returns a list, so the created item for ${del.id} can't be identified`
           : `Response has no field that identifies {${newParam}} for ${del.id}`,
       ],
-      caveats: ['Declare bindings in an overrides file, e.g. { "inverse": "' + del.id + '", "bindings": { "' + newParam + '": "request.x" } }'],
+      caveats: [
+        'Declare bindings in an overrides file, e.g. { "inverse": "' + del.id + '", "bindings": { "' + newParam + '": "response.x" } }',
+        'Or let `undogen learn` find the binding against a sandbox',
+      ],
+      suggestion: { inverse: del.id, param: newParam },
     });
   }
   return plan(op, 'reversible', 'delete-created', (id.known ? 0.9 : 0.5) + confidenceBoost, {
@@ -249,7 +288,11 @@ function deleteCreatedPlan(op: Operation, del: Operation, confidenceBoost = 0, r
 }
 
 /** Compile the undo recipe for one mutating operation. */
-export function planOperation(op: Operation, index: Index, override?: Declaration): InversePlan {
+export function planOperation(op: Operation, index: Index, override?: Declaration, options: AnalyzeOptions = {}): InversePlan {
+  return finishPlan(basePlan(op, index, override, options), op, index);
+}
+
+function basePlan(op: Operation, index: Index, override: Declaration | undefined, options: AnalyzeOptions): InversePlan {
   // 0. Explicit declarations (overrides file, then x-undogen in the spec) always win.
   const declared = override ?? (op.extensions['x-undogen'] as Declaration | undefined);
   const source = override ? 'overrides file' : 'x-undogen';
@@ -269,14 +312,17 @@ export function planOperation(op: Operation, index: Index, override?: Declaratio
     const body: BodyTemplate | undefined =
       declared.body === 'request'
         ? { from: 'request' }
+        : declared.body === 'before-request-keys'
+          ? { from: 'before-request-keys' }
         : declared.body === 'before'
           ? { from: 'before', fields: writableFields(target.requestSchema) }
           : declared.body && typeof declared.body === 'object'
             ? { from: 'literal', value: declared.body.literal }
             : undefined;
     const getOp = index.find('get', op.path);
-    return plan(op, declared.reversibility ?? 'reversible', 'declared', 1, {
-      capture: declared.body === 'before' && getOp ? getTemplate(getOp) : undefined,
+    const needsCapture = declared.body === 'before' || declared.body === 'before-request-keys';
+    return plan(op, declared.reversibility ?? 'reversible', declared.strategy ?? 'declared', 1, {
+      capture: needsCapture && getOp ? getTemplate(getOp) : undefined,
       inverse: { operationId: target.id, method: target.method, path: target.path, bindings: bindParams(target.path, overrides), body },
       reasons: [declared.reason ?? `Inverse declared via ${source}: ${target.id}`],
     });
@@ -290,8 +336,12 @@ export function planOperation(op: Operation, index: Index, override?: Declaratio
   const isAction = !lastIsParam && !isCollection && segs.length >= 2 && isParamSeg(segs[segs.length - 2]!);
 
   // 1. Effects that leave the system cannot be undone; pure computations need no undo.
-  const verbTokens = [...(isAction || op.method === 'post' ? tokenize(last) : []), verbOf(op)].flatMap(stems);
-  const offending = verbTokens.find((t) => IRREVERSIBLE_VERBS.has(t));
+  // The last path segment names an action only for POST (POST /x/{id}/email); for PUT/PATCH it is a sub-resource.
+  const verbTokens = [...(op.method === 'post' ? tokenize(last) : []), verbOf(op)].flatMap(stems);
+  const offending =
+    verbTokens.find((t) => IRREVERSIBLE_VERBS.has(t)) ??
+    nameTokens(op).find((t) => STRONG_IRREVERSIBLE_VERBS.has(t)) ??
+    strongVerbIn(op.summary);
   if (offending) {
     return plan(op, 'irreversible', 'none', 0.8, {
       reasons: [`"${offending}" describes an effect that cannot be called back (message, money, execution, or destruction)`],
@@ -445,7 +495,11 @@ export function planOperation(op: Operation, index: Index, override?: Declaratio
       }
       const create = index.find('post', parentPath);
       if (create) {
+        const param = paramName(last);
+        const children = options.restoreChildren ? childPlansOf(index, op.path) : undefined;
         return plan(op, 'compensable', 'recreate-from-snapshot', 0.65, {
+          identity: { param, responseKey: idFieldFor(param, create.responseSchema).key },
+          children: children?.length ? children : undefined,
           capture: getTemplate(getOp),
           inverse: {
             operationId: create.id,
@@ -457,7 +511,9 @@ export function planOperation(op: Operation, index: Index, override?: Declaratio
           reasons: [`Snapshot via ${getOp.id}, re-create with ${create.id}`],
           caveats: [
             'The re-created resource gets a new identifier',
-            'Children removed by cascading deletes are not restored unless the verifier proves otherwise',
+            children?.length
+              ? `Re-creates ${children.length} child collection(s) too; children get new identifiers and the caller as author`
+              : 'Children removed by cascading deletes are not restored (see restoreChildren / --restore-children)',
           ],
         });
       }
@@ -488,9 +544,76 @@ export function planOperation(op: Operation, index: Index, override?: Declaratio
   });
 }
 
+/**
+ * Add what every plan needs regardless of strategy:
+ * - a `check` GET, so the runtime can detect that someone changed what the agent wrote
+ * - query parameters shared between the original operation and the target (api-version, ...)
+ * - a caveat when the description mentions effects that cannot be called back
+ */
+function finishPlan(p: InversePlan, op: Operation, index: Index): InversePlan {
+  if (!p.check && p.inverse) {
+    if (p.capture && (p.strategy === 'restore-snapshot' || p.inverse.body?.from === 'before-request-keys')) {
+      p.check = p.capture;
+    } else if (
+      (p.inverse.method === 'delete' || p.strategy === 'soft-delete') &&
+      ['delete-created', 'soft-delete', 'declared'].includes(p.strategy)
+    ) {
+      const getOp = index.find('get', p.inverse.path);
+      if (getOp) p.check = { operationId: getOp.id, method: 'get', path: getOp.path, bindings: p.inverse.bindings };
+    }
+  }
+  const byId = (id: string) => index.ops.find((o) => o.id === id);
+  const shared = new Set(op.queryParams?.map((q) => q.name) ?? []);
+  const addQuery = (t: RequestTemplate | undefined) => {
+    if (!t || !shared.size) return;
+    const target = byId(t.operationId);
+    const names = (target?.queryParams ?? []).map((q) => q.name).filter((n) => shared.has(n));
+    if (names.length) t.query = { ...Object.fromEntries(names.map((n) => [n, { from: 'query' as const, key: n }])), ...t.query };
+  };
+  for (const t of [p.capture, p.inverse, p.inverseIfMissing, p.check]) addQuery(t);
+  if (p.reversibility !== 'irreversible') {
+    const verb = strongVerbIn(op.description, true);
+    if (verb) p.caveats.push(`The description mentions "${verb}": side effects like that cannot be called back by any inverse`);
+  }
+  return p;
+}
+
+/** Child collections of an item route that can be listed and re-created: /todos/{todoId}/comments. */
+function childPlansOf(index: Index, itemPath: string): ChildPlan[] {
+  const out: ChildPlan[] = [];
+  for (const list of index.ops) {
+    if (list.method !== 'get') continue;
+    const segs = segmentsOf(list.path);
+    if (joinPath(segs.slice(0, -1)) !== itemPath || isParamSeg(segs.at(-1)!)) continue;
+    const create = index.find('post', list.path);
+    const childItem = itemPathOf(index, list.path);
+    if (!create || !childItem) continue;
+    const param = paramName(segmentsOf(childItem).at(-1)!);
+    out.push({
+      list: { operationId: list.id, method: 'get', path: list.path, bindings: bindParams(list.path) },
+      create: {
+        operationId: create.id,
+        method: 'post',
+        path: create.path,
+        bindings: bindParams(create.path),
+        body: { from: 'before', fields: writableFields(create.requestSchema) },
+      },
+      param,
+      idKey: idFieldFor(param, create.responseSchema).key,
+    });
+  }
+  return out;
+}
+
 export interface AnalyzeOptions {
   /** Declarations for specs you don't control, keyed by operationId. */
   overrides?: Record<string, Declaration>;
+  /**
+   * When undoing a DELETE re-creates the resource, also capture and re-create its
+   * child collections (comments of a todo, ...). Off by default: re-created children
+   * get new ids and the caller as their author.
+   */
+  restoreChildren?: boolean;
 }
 
 /** Compile undo plans for every mutating operation in the spec. */
@@ -502,7 +625,7 @@ export function analyze(spec: ApiSpec, options: AnalyzeOptions = {}): Analysis {
   }
   const plans = spec.operations
     .filter((o) => o.method !== 'get')
-    .map((o) => planOperation(o, index, options.overrides?.[o.id]));
+    .map((o) => planOperation(o, index, options.overrides?.[o.id], options));
   const summary = {
     reversible: 0,
     compensable: 0,
@@ -512,5 +635,5 @@ export function analyze(spec: ApiSpec, options: AnalyzeOptions = {}): Analysis {
     readOnly: spec.operations.length - plans.length,
   };
   for (const p of plans) summary[p.reversibility]++;
-  return { spec: { title: spec.title, version: spec.version }, plans, summary };
+  return { spec: { title: spec.title, version: spec.version }, plans, summary, warnings: spec.warnings ?? [] };
 }

@@ -5,6 +5,7 @@ import { parseArgs } from 'node:util';
 import { analyze } from './analyze.js';
 import { c, formatAnalysis, formatResultLine, formatSummary, toBadge, toMarkdown } from './report.js';
 import { loadSpec } from './spec.js';
+import { VERSION } from './version.js';
 import { DEFAULT_IGNORED_FIELDS, verify, type Fixtures } from './verify.js';
 
 const HELP = `
@@ -51,7 +52,7 @@ async function main(argv: string[]) {
     },
   });
 
-  if (values.version) return console.log('0.1.0');
+  if (values.version) return console.log(VERSION);
   const [command, specPath] = positionals;
   if (values.help || !command || !specPath) {
     console.log(HELP);

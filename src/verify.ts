@@ -1,6 +1,7 @@
 import { analyze } from './analyze.js';
 import { fillPath, getPath, UndoableClient, type CallInput, type HttpResult } from './runtime.js';
-import type { ApiSpec, InversePlan, Operation, Reversibility, Schema, Strategy } from './types.js';
+import type { ApiSpec, InversePlan, Operation, RequestTemplate, Reversibility, Schema, Strategy } from './types.js';
+import { VERSION } from './version.js';
 
 export interface FixtureStep {
   operationId: string;
@@ -34,10 +35,26 @@ export interface VerifyOptions {
   only?: string[];
   headers?: Record<string, string>;
   fetch?: typeof fetch;
+  /** Delete every resource verify created once each operation is done. Default true. */
+  cleanup?: boolean;
+  /**
+   * Only snapshot GET routes scoped to resources verify created (routes with path parameters).
+   * Use on shared sandboxes, where global lists change under you.
+   */
+  scopedOnly?: boolean;
+  /** When compiling plans here: also re-create child collections when undoing a delete. */
+  restoreChildren?: boolean;
   onResult?: (result: OperationResult) => void;
 }
 
-export type Outcome = 'verified' | 'failed' | 'gated' | 'skipped' | 'error';
+/**
+ * - verified:     the operation changed state and its inverse restored it
+ * - failed:       state differs after the undo, or the undo could not run
+ * - inconclusive: the operation changed nothing visible, so the inverse was not really tested
+ * - gated:        irreversible or unknown; never executed
+ * - skipped / error: by fixture, or setup/operation failed
+ */
+export type Outcome = 'verified' | 'failed' | 'inconclusive' | 'gated' | 'skipped' | 'error';
 
 export interface StateDiff {
   /** The GET route whose response differed, e.g. "GET /todos/{todoId}/comments". */
@@ -78,44 +95,57 @@ const SNAPSHOT_MISSING = Symbol('missing');
 
 class SetupError extends Error {}
 
+interface Created {
+  /** DELETE that removes the resource. */
+  remove: RequestTemplate;
+  params: Record<string, Scalar>;
+}
+
+type Scalar = string | number;
+
 /**
  * For every mutating operation: build realistic state, snapshot it, run the
- * operation, run its compiled inverse, snapshot again, and diff.
- * An inverse is "verified" only when the two snapshots are equivalent.
+ * operation, snapshot again (it must have changed something), run its compiled
+ * inverse, snapshot a third time, and diff. An inverse is "verified" only when
+ * the first and last snapshots are equivalent. Everything verify created is
+ * deleted afterwards.
  */
 export async function verify(options: VerifyOptions): Promise<VerifyReport> {
   const startedAt = new Date().toISOString();
   const { spec } = options;
-  const plans = options.plans ?? analyze(spec).plans;
+  const plans = options.plans ?? analyze(spec, { restoreChildren: options.restoreChildren }).plans;
   const planById = new Map(plans.map((p) => [p.operationId, p]));
   const opById = new Map(spec.operations.map((o) => [o.id, o]));
   const ignore = new Set(options.ignoreFields ?? DEFAULT_IGNORED_FIELDS);
   const fixtures = options.fixtures ?? {};
   const seedChildren = options.seedChildren ?? true;
+  const cleanup = options.cleanup ?? true;
   const allParamNames = new Set(spec.operations.flatMap((o) => o.pathParams));
+  const clientOptions = { spec, baseUrl: options.baseUrl, plans, headers: options.headers, fetch: options.fetch };
 
-  const raw = new UndoableClient({ spec, baseUrl: options.baseUrl, plans, headers: options.headers, fetch: options.fetch });
+  const raw = new UndoableClient(clientOptions);
   const results: OperationResult[] = [];
 
   const creators = spec.operations.filter((o) => o.method === 'post' && planById.get(o.id)?.strategy === 'delete-created');
-  const getters = spec.operations.filter((o) => o.method === 'get');
+  const getters = spec.operations.filter((o) => o.method === 'get' && (!options.scopedOnly || o.pathParams.length > 0));
 
-  /** Create a resource with `creator` and return the new id. */
-  const create = async (creator: Operation, pool: Record<string, string | number>): Promise<string | number> => {
+  /** Create a resource with `creator`, remember how to delete it, and return the new id. */
+  const create = async (creator: Operation, pool: Record<string, Scalar>, created: Created[]): Promise<Scalar> => {
     const plan = planById.get(creator.id)!;
     const body = fixtures[creator.id]?.body ?? synthesize(creator.requestSchema, creator.requestExample);
-    const res = await raw.request('post', fillPath(creator.path, pool), { body });
+    const res = await raw.request('post', fillPath(creator.path, pool), { body, contentType: creator.requestContentType });
     if (res.status >= 300) {
       throw new SetupError(`setup: ${creator.id} returned HTTP ${res.status} ${short(res.data)} — add a fixture body`);
     }
-    const ref = Object.values(plan.inverse!.bindings).find((b) => b.from === 'response')!;
+    const [param, ref] = Object.entries(plan.inverse!.bindings).find(([, b]) => b.from === 'response')!;
     const id = getPath(res.data, ref.key);
     if (id === undefined) throw new SetupError(`setup: ${creator.id} response has no "${ref.key}"`);
-    return id as string | number;
+    created.push({ remove: plan.inverse!, params: { ...pool, [param]: id as Scalar } });
+    return id as Scalar;
   };
 
   /** Make sure every path param of `path` refers to a real resource, creating parents first. */
-  const ensure = async (path: string, pool: Record<string, string | number>) => {
+  const ensure = async (path: string, pool: Record<string, Scalar>, created: Created[]) => {
     const segs = path.split('/').filter(Boolean);
     for (let i = 0; i < segs.length; i++) {
       const m = /^\{(.+)\}$/.exec(segs[i]!);
@@ -123,11 +153,11 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
       const collection = '/' + segs.slice(0, i).join('/');
       const creator = creators.find((c) => c.path === collection);
       if (!creator) throw new SetupError(`setup: no way to create {${m[1]}} (no POST ${collection}) — add fixture params`);
-      pool[m[1]!] = await create(creator, pool);
+      pool[m[1]!] = await create(creator, pool, created);
     }
   };
 
-  const snapshot = async (pool: Record<string, string | number>) => {
+  const snapshot = async (pool: Record<string, Scalar>) => {
     const state = new Map<string, { status: number; data: unknown }>();
     for (const g of getters) {
       if (!g.pathParams.every((p) => pool[p] !== undefined)) continue;
@@ -135,6 +165,18 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
       state.set(`GET ${g.path}`, { status: res.status, data: res.data });
     }
     return state;
+  };
+
+  /** Delete what verify created, newest first, following ids that undo changed. Failures are ignored. */
+  const removeAll = async (created: Created[], remap: (param: string, id: Scalar) => Scalar) => {
+    for (const c of [...created].reverse()) {
+      try {
+        const params = Object.fromEntries(Object.entries(c.params).map(([k, v]) => [k, remap(k, v)]));
+        await raw.request('delete', fillPath(c.remove.path, params));
+      } catch {
+        /* best effort */
+      }
+    }
   };
 
   for (const op of spec.operations) {
@@ -165,29 +207,33 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
       continue;
     }
 
+    const created: Created[] = [];
+    const client = new UndoableClient(clientOptions);
     try {
       // 1. Arrange: real resources for every path param, plus children to expose cascades.
-      const pool: Record<string, string | number> = { ...(fixture.params ?? {}) };
-      await ensure(op.path, pool);
+      const pool: Record<string, Scalar> = { ...(fixture.params ?? {}) };
+      await ensure(op.path, pool, created);
       const root = itemRootOf(op.path);
       if (seedChildren && root) {
         for (const c of creators) {
           if (!c.path.startsWith(root + '/')) continue;
           if (!c.pathParams.every((p) => pool[p] !== undefined)) continue;
           const child = childParamOf(c.path, spec);
-          if (child && pool[child] === undefined) pool[child] = await create(c, pool);
+          if (child && pool[child] === undefined) pool[child] = await create(c, pool, created);
         }
       }
       for (const step of fixture.prepare ?? []) {
         const stepOp = opById.get(step.operationId);
         if (!stepOp) throw new SetupError(`fixture: unknown operation ${step.operationId}`);
-        const res = await raw.request(stepOp.method, fillPath(stepOp.path, { ...pool, ...step.params }), { body: step.body });
+        const res = await raw.request(stepOp.method, fillPath(stepOp.path, { ...pool, ...step.params }), {
+          body: step.body,
+          contentType: stepOp.requestContentType,
+        });
         if (res.status >= 400) throw new SetupError(`fixture step ${step.operationId} returned HTTP ${res.status}`);
       }
 
-      // 2. Snapshot, act, undo, snapshot.
+      // 2. Snapshot, act, snapshot, undo, snapshot.
       const before = await snapshot(pool);
-      const client = new UndoableClient({ spec, baseUrl: options.baseUrl, plans, headers: options.headers, fetch: options.fetch });
       const current = before.get(`GET ${op.path}`)?.data;
       const body = fixture.body ?? bodyFor(op, current);
       const input: CallInput = { params: pick(pool, op.pathParams), body };
@@ -196,46 +242,65 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
         record('error', `operation returned HTTP ${res.status} ${short(res.data)} — add a fixture`);
         continue;
       }
-      if (!res.entry || (!res.entry.inverse && plan.strategy !== 'no-side-effects')) {
-        record('failed', `could not build the inverse: ${res.entry?.inverseError ?? 'unknown reason'}`);
+      const entry = res.entry!;
+      // Probe what the operation created, so creates are tested even without a list route.
+      const probe = entry.created && entry.inverse?.pathTemplate ? { template: entry.inverse.pathTemplate, params: entry.inverse.params ?? {} } : undefined;
+      const probeState = async () => (probe ? (await raw.request('get', fillPath(probe.template, probe.params))).status : undefined);
+      const mid = await snapshot(pool);
+      const midProbe = await probeState();
+      const changed = diffStates(before, mid, { ignore }).length > 0 || (midProbe !== undefined && midProbe < 300);
+
+      if (!entry.inverse && plan.strategy !== 'no-side-effects') {
+        record('failed', `could not build the inverse: ${entry.inverseError ?? 'unknown reason'}`);
         continue;
       }
       let undo: HttpResult;
       try {
-        undo = await client.undo(res.entry);
+        undo = await client.undo(entry);
       } catch (err) {
         record('failed', `inverse request failed: ${(err as Error).message}`);
         continue;
       }
+      void undo;
 
-      // Compensable inverses re-create resources under new ids: follow the new id.
-      const afterPool = { ...pool };
-      const identityChanged = plan.strategy === 'recreate-from-snapshot' && res.entry.inverse?.method === 'post';
-      if (identityChanged) {
-        const param = op.pathParams[op.pathParams.length - 1]!;
-        const newId = getPath(undo.data, param) ?? getPath(undo.data, 'id');
-        if (newId !== undefined) afterPool[param] = newId as string | number;
-      }
+      // Compensable inverses re-create resources under new ids: follow them.
+      const afterPool = Object.fromEntries(Object.entries(pool).map(([k, v]) => [k, client.remapId(k, v)]));
+      const identityChanged = Object.keys(entry.idMap ?? {}).length > 0;
       const after = await snapshot(afterPool);
 
       const diffs = diffStates(before, after, {
         ignore,
         identityKeys: identityChanged ? new Set(['id', ...allParamNames]) : undefined,
       });
-      if (diffs.length === 0) {
-        record('verified', identityChanged ? 'state restored (resource re-created under a new id)' : 'state restored exactly');
-      } else {
+      const afterProbe = await probeState();
+      if (afterProbe !== undefined && afterProbe < 300) {
+        diffs.push({ resource: `GET ${probe!.template}`, path: 'status', before: 404, after: afterProbe });
+      }
+      if (diffs.length) {
         record('failed', `${diffs.length} difference(s) remain after undo`, diffs);
+      } else if (!changed && plan.strategy !== 'no-side-effects') {
+        record('inconclusive', 'the operation changed no visible state, so its inverse was not exercised — add a fixture body');
+      } else if (identityChanged) {
+        const n = Object.values(entry.idMap ?? {}).reduce((sum, m) => sum + Object.keys(m).length, 0);
+        record('verified', n > 1 ? `state restored (${n} resources re-created under new ids)` : 'state restored (resource re-created under a new id)');
+      } else {
+        record('verified', 'state restored exactly');
       }
     } catch (err) {
       record('error', (err as Error).message);
+    } finally {
+      if (cleanup) {
+        const leftovers = client.journal.filter((e) => e.status !== 'undone' && e.created && e.inverse?.pathTemplate);
+        for (const e of leftovers) created.push({ remove: { ...planById.get(e.operationId)!.inverse!, path: e.inverse!.pathTemplate! }, params: e.inverse!.params ?? {} });
+        await removeAll(created, (k, v) => client.remapId(k, v));
+      }
     }
   }
 
-  const summary = { verified: 0, failed: 0, gated: 0, skipped: 0, error: 0, total: results.length };
+  const summary = { verified: 0, failed: 0, inconclusive: 0, gated: 0, skipped: 0, error: 0, total: results.length };
   for (const r of results) summary[r.outcome]++;
   return {
-    tool: { name: 'undogen', version: '0.1.0' },
+    tool: { name: 'undogen', version: VERSION },
     spec: { title: spec.title, version: spec.version },
     baseUrl: options.baseUrl,
     startedAt,
@@ -307,6 +372,10 @@ export function synthesize(schema: Schema | undefined, example?: unknown): unkno
   if (example !== undefined) return example;
   if (!schema) return undefined;
   if (schema.example !== undefined) return schema.example;
+  if (Array.isArray(schema.examples) && schema.examples.length) return schema.examples[0];
+  // oneOf / anyOf: build one valid variant rather than a mix of all of them.
+  const variants = schema['x-undogen-variants'] as Schema[] | undefined;
+  if (variants?.length) return synthesize(variants.find((v) => v.properties) ?? variants[0]);
   if (schema.properties) {
     const out: Record<string, unknown> = {};
     for (const [name, s] of Object.entries(schema.properties)) {
@@ -320,9 +389,10 @@ export function synthesize(schema: Schema | undefined, example?: unknown): unkno
 
 function synthesizeValue(name: string, s: Schema): unknown {
   if (s.example !== undefined) return s.example;
+  if (Array.isArray(s.examples) && s.examples.length) return s.examples[0];
   if (s.default !== undefined) return s.default;
-  if (Array.isArray(s.enum) && s.enum.length) return s.enum[0];
-  const type = Array.isArray(s.type) ? s.type[0] : s.type;
+  if (Array.isArray(s.enum) && s.enum.length) return s.enum.find((e) => e !== null) ?? s.enum[0];
+  const type = Array.isArray(s.type) ? s.type.find((t) => t !== 'null') : s.type;
   switch (type) {
     case 'string':
       if (s.format === 'email') return 'undogen@example.com';

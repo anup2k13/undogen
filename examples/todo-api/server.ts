@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { pathToFileURL } from 'node:url';
@@ -22,8 +23,8 @@ export async function startTodoServer(port = 0): Promise<{ url: string; close: (
       const parts = url.pathname.split('/').filter(Boolean);
       const method = req.method ?? 'GET';
       const body = await readJson(req);
-      const send = (status: number, data?: unknown) => {
-        res.writeHead(status, data === undefined ? {} : { 'content-type': 'application/json' });
+      const send = (status: number, data?: unknown, headers: Record<string, string> = {}) => {
+        res.writeHead(status, data === undefined ? headers : { 'content-type': 'application/json', ...headers });
         res.end(data === undefined ? undefined : JSON.stringify(data));
       };
 
@@ -43,9 +44,13 @@ export async function startTodoServer(port = 0): Promise<{ url: string; close: (
       const todo = todos.get(parts[1]!);
       if (!todo) return send(404, { error: 'todo not found' });
 
-      // /todos/{id}
+      // /todos/{id}  (supports conditional writes: ETag on GET, If-Match on PUT/PATCH)
       if (parts.length === 2) {
-        if (method === 'GET') return send(200, todo);
+        if (method === 'GET') return send(200, todo, { etag: etagOf(todo) });
+        const ifMatch = req.headers['if-match'];
+        if (ifMatch && (method === 'PUT' || method === 'PATCH') && ifMatch !== etagOf(todo)) {
+          return send(412, { error: 'precondition failed' });
+        }
         if (method === 'PUT') {
           if (typeof body?.title !== 'string') return send(400, { error: 'title is required' });
           Object.assign(todo, { title: body.title, done: !!body.done, updatedAt: now() });
@@ -120,6 +125,10 @@ export async function startTodoServer(port = 0): Promise<{ url: string; close: (
     sentReminders,
     close: () => new Promise((resolve, reject) => server.close((e) => (e ? reject(e) : resolve()))),
   };
+}
+
+function etagOf(todo: Todo): string {
+  return `"${createHash('sha1').update(JSON.stringify(todo)).digest('hex').slice(0, 16)}"`;
 }
 
 async function readJson(req: IncomingMessage): Promise<any> {

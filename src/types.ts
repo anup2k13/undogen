@@ -8,10 +8,19 @@ export interface Schema {
   items?: Schema;
   enum?: unknown[];
   example?: unknown;
+  examples?: unknown;
   default?: unknown;
   readOnly?: boolean;
   format?: string;
   [key: string]: unknown;
+}
+
+/** A non-body parameter of an operation (query, header, path or cookie). */
+export interface Parameter {
+  name: string;
+  in: 'query' | 'header' | 'path' | 'cookie';
+  required: boolean;
+  schema?: Schema;
 }
 
 /** One HTTP operation from the OpenAPI document, with $refs resolved. */
@@ -21,9 +30,16 @@ export interface Operation {
   method: HttpMethod;
   path: string;
   summary?: string;
+  description?: string;
   pathParams: string[];
+  /** Query parameters (path-level and operation-level, merged). */
+  queryParams: Parameter[];
+  /** Header parameters (path-level and operation-level, merged). */
+  headerParams: Parameter[];
   requestSchema?: Schema;
   requestExample?: unknown;
+  /** Media type of the request body, e.g. application/json or multipart/form-data. */
+  requestContentType?: string;
   responseSchema?: Schema;
   /** Vendor extensions (x-*) declared on the operation. */
   extensions: Record<string, unknown>;
@@ -33,6 +49,8 @@ export interface ApiSpec {
   title: string;
   version: string;
   operations: Operation[];
+  /** Parts of the document undogen could not fully understand. Never silently dropped. */
+  warnings: string[];
 }
 
 /**
@@ -57,7 +75,11 @@ export type Strategy =
 
 /** Where a value used by an inverse request comes from at runtime. */
 export interface ValueRef {
-  from: 'params' | 'response' | 'before' | 'request';
+  /**
+   * - params / query / request / response / before: dotted path into that object
+   * - location: the last path segment of the response's Location header (key is ignored)
+   */
+  from: 'params' | 'query' | 'response' | 'before' | 'request' | 'location';
   /** Dotted path into the source object, e.g. "id" or "data.id". */
   key: string;
 }
@@ -74,14 +96,19 @@ export type BodyTemplate =
 /**
  * How a spec author (x-undogen) or a third party (overrides file) declares
  * an operation's undo behaviour. Bindings use "source.key" strings, e.g.
- * { repo: 'response.name', owner: 'response.owner.login' }.
+ * { repo: 'response.name', owner: 'response.owner.login' }, or "location"
+ * for the id at the end of the response's Location header.
  */
 export interface Declaration {
   reversibility?: Reversibility;
   reason?: string;
   inverse?: string;
   bindings?: Record<string, string>;
-  body?: 'before' | 'request' | { literal: unknown };
+  body?: 'before' | 'request' | 'before-request-keys' | { literal: unknown };
+  /** Recorded by `undogen annotate` so a round-trip keeps the original strategy name. */
+  strategy?: Strategy;
+  /** Free-form notes (ignored), e.g. hints written by `undogen init`. */
+  [note: `_${string}`]: unknown;
 }
 
 export interface RequestTemplate {
@@ -89,7 +116,21 @@ export interface RequestTemplate {
   method: HttpMethod;
   path: string;
   bindings: Record<string, ValueRef>;
+  /** Query parameters for the request, e.g. an api-version the original call also sent. */
+  query?: Record<string, ValueRef>;
   body?: BodyTemplate;
+}
+
+/** How to re-create one child collection of a deleted resource (opt-in: `restoreChildren`). */
+export interface ChildPlan {
+  /** GET that lists the children before the parent is deleted. */
+  list: RequestTemplate;
+  /** POST that re-creates one child under the (re-created) parent. */
+  create: RequestTemplate & { body: { from: 'before'; fields: string[] | '*' } };
+  /** Path parameter that identifies one child, e.g. "commentId". */
+  param: string;
+  /** Field holding a child's id, both in list items and in the create response. */
+  idKey: string;
 }
 
 /** The compiled undo recipe for one mutating operation. */
@@ -99,7 +140,7 @@ export interface InversePlan {
   path: string;
   reversibility: Reversibility;
   strategy: Strategy;
-  /** 0..1: how sure the compiler is, before verification. */
+  /** 0..1: how sure the compiler is, before verification. Heuristic, not calibrated. */
   confidence: number;
   /** Request that captures state before the original call runs. */
   capture?: RequestTemplate;
@@ -107,6 +148,18 @@ export interface InversePlan {
   inverse?: RequestTemplate;
   /** Alternate inverse when the capture found nothing (e.g. PUT that created a resource). */
   inverseIfMissing?: RequestTemplate;
+  /**
+   * GET that reads the state the original call produced. Before undoing, the
+   * runtime re-reads it: if someone else changed what the agent wrote, the
+   * undo stops with a ConflictError instead of overwriting their change.
+   */
+  check?: RequestTemplate;
+  /** For inverses that re-create a resource: which response field carries its new id. */
+  identity?: { param: string; responseKey: string };
+  /** Child collections to re-create after re-creating a deleted parent. */
+  children?: ChildPlan[];
+  /** For `unknown` plans: the inverse undogen suspects, so `undogen learn` can try to confirm it. */
+  suggestion?: { inverse: string; param: string };
   reasons: string[];
   caveats: string[];
 }
@@ -115,4 +168,5 @@ export interface Analysis {
   spec: { title: string; version: string };
   plans: InversePlan[];
   summary: Record<Reversibility, number> & { total: number; readOnly: number };
+  warnings: string[];
 }
