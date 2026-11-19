@@ -111,40 +111,38 @@ export function tokenize(s: string): string[] {
 interface Index {
   ops: Operation[];
   find(method: HttpMethod, path: string): Operation | undefined;
+  byId(id: string): Operation | undefined;
+  /** The first item route directly under a collection: /todos -> /todos/{todoId}. */
+  itemOf(collectionPath: string): string | undefined;
   hasItemChild(path: string): boolean;
 }
 
 function buildIndex(spec: ApiSpec): Index {
   const byKey = new Map<string, Operation>();
+  const byId = new Map<string, Operation>();
+  const items = new Map<string, string>(); // structural collection path -> first item route
   for (const o of spec.operations) {
     const key = `${o.method} ${structuralPath(o.path)}`;
     if (!byKey.has(key)) byKey.set(key, o);
+    if (!byId.has(o.id)) byId.set(o.id, o);
+    const segs = segmentsOf(o.path);
+    if (segs.length && isParamSeg(segs.at(-1)!)) {
+      const parent = joinPath(segs.slice(0, -1));
+      if (!items.has(parent)) items.set(parent, o.path);
+    }
   }
-  const paths = new Set(spec.operations.map((o) => o.path));
   return {
     ops: spec.operations,
     find: (method, path) => byKey.get(`${method} ${structuralPath(path)}`),
-    hasItemChild: (path) => {
-      const target = structuralPath(path);
-      for (const p of paths) {
-        const segs = segmentsOf(p);
-        if (segs.length && isParamSeg(segs[segs.length - 1]!) && joinPath(segs.slice(0, -1)) === target) return true;
-      }
-      return false;
-    },
+    byId: (id) => byId.get(id),
+    itemOf: (path) => items.get(structuralPath(path)),
+    hasItemChild: (path) => items.has(structuralPath(path)),
   };
 }
 
 /** Find the path that addresses a single item of `collectionPath`, e.g. /todos -> /todos/{todoId}. */
 function itemPathOf(index: Index, collectionPath: string): string | undefined {
-  const target = structuralPath(collectionPath);
-  for (const op of index.ops) {
-    const segs = segmentsOf(op.path);
-    if (segs.length && isParamSeg(segs[segs.length - 1]!) && joinPath(segs.slice(0, -1)) === target) {
-      return op.path;
-    }
-  }
-  return undefined;
+  return index.itemOf(collectionPath);
 }
 
 /** Bind every path param of `targetPath` to the original call's params, except `overrides`. */
@@ -364,7 +362,7 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
     });
   }
   if (declared?.inverse) {
-    const target = index.ops.find((o) => o.id === declared.inverse);
+    const target = index.byId(declared.inverse);
     if (!target) {
       return plan(op, 'unknown', 'none', 0, {
         reasons: [`${source}: inverse refers to unknown operation "${declared.inverse}"`],
@@ -391,7 +389,7 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
       op.method === 'delete' && target.method === 'post' && isParamSeg(lastSeg)
         ? { param: paramName(lastSeg), responseKey: idFieldFor(paramName(lastSeg), target.responseSchema).key }
         : undefined;
-    const missingTarget = declared.inverseIfMissing ? index.ops.find((o) => o.id === declared.inverseIfMissing) : undefined;
+    const missingTarget = declared.inverseIfMissing ? index.byId(declared.inverseIfMissing) : undefined;
     return plan(op, declared.reversibility ?? 'reversible', declared.strategy ?? 'declared', declared.confidence ?? 1, {
       identity,
       inverseIfMissing: missingTarget
@@ -692,7 +690,7 @@ function finishPlan(p: InversePlan, op: Operation, index: Index): InversePlan {
       if (getOp) p.check = { operationId: getOp.id, method: 'get', path: getOp.path, bindings: p.inverse.bindings };
     }
   }
-  const byId = (id: string) => index.ops.find((o) => o.id === id);
+  const byId = (id: string) => index.byId(id);
   const shared = new Set(op.queryParams?.map((q) => q.name) ?? []);
   const addQuery = (t: RequestTemplate | undefined) => {
     if (!t || !shared.size) return;

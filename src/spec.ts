@@ -38,6 +38,19 @@ async function fetchDocument(uri: string, options: LoadOptions): Promise<unknown
   } else {
     text = await fetchText(uri, options);
   }
+  return parseText(text);
+}
+
+/** JSON is valid YAML, but JSON.parse is an order of magnitude faster on large specs. */
+function parseText(text: string): unknown {
+  const t = text.trimStart();
+  if (t.startsWith('{') || t.startsWith('[')) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      /* not strict JSON (comments, trailing commas): fall back to the YAML parser */
+    }
+  }
   return parseYaml(text, { maxAliasCount: -1 });
 }
 
@@ -111,7 +124,7 @@ const stripHash = (uri: string) => uri.split('#')[0]!;
 
 /** Parse an OpenAPI 3.x / Swagger 2.0 document from text (JSON or YAML) or an already-parsed object. */
 export function parseSpec(input: string | object, options: ParseOptions = {}): ApiSpec {
-  const doc = (typeof input === 'string' ? parseYaml(input, { maxAliasCount: -1 }) : input) as Record<string, any>;
+  const doc = (typeof input === 'string' ? parseText(input) : input) as Record<string, any>;
   if (!doc || typeof doc !== 'object' || typeof doc.paths !== 'object') {
     throw new Error('Not an OpenAPI document: missing "paths"');
   }
@@ -315,6 +328,19 @@ function firstExample(examples: Record<string, any> | undefined): unknown {
  */
 export function normalizeSchema(schema: Schema | undefined, depth = 0): Schema | undefined {
   if (!schema || typeof schema !== 'object' || depth > MAX_COMPOSITE_DEPTH) return schema;
+  // $refs resolve to shared objects, so the same schema is normalized for many operations: memoize.
+  let byDepth = normalized.get(schema);
+  if (!byDepth) normalized.set(schema, (byDepth = new Map()));
+  const cached = byDepth.get(depth);
+  if (cached) return cached;
+  const result = normalizeUncached(schema, depth);
+  byDepth.set(depth, result);
+  return result;
+}
+
+const normalized = new WeakMap<object, Map<number, Schema>>();
+
+function normalizeUncached(schema: Schema, depth: number): Schema {
   let out: Schema = schema;
   if (Array.isArray(schema.allOf)) {
     const merged: Schema = { ...schema, type: 'object', properties: { ...(schema.properties ?? {}) }, required: [...(schema.required ?? [])] };
