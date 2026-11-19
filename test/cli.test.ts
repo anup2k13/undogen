@@ -61,7 +61,7 @@ describe('cli', () => {
     const specLines = (await readFile(spec, 'utf8')).split('\n');
     expect(specLines[results[0].locations[0].physicalLocation.region.startLine - 1]).toContain('operationId: deleteTodo');
     const html = await readFile(join(dir, 'out/report.html'), 'utf8');
-    expect(html).toContain('<span class="badge failed">Failed</span></td><td><code>deleteTodo</code>');
+    expect(html).toContain('<span class="badge failed">Failed</span></td><td data-label="Operation"><code class="id">deleteTodo</code>');
     expect(html).not.toMatch(/<script|https?:\/\/(?!127)/); // self-contained
     const report = JSON.parse(await readFile(join(dir, 'out/report.json'), 'utf8'));
     const diff = report.results.find((x: any) => x.operationId === 'deleteTodo').diffs[0];
