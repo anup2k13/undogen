@@ -30,6 +30,7 @@ ${c.bold('Usage')}
   undogen arazzo   <spec> [-o <file>]              Export undo workflows as an Arazzo 1.0 document
   undogen compile  <spec> [-o <file>]              Export operations + plans as JSON (for the Python client)
   undogen diff     <old-spec> <new-spec>           Compare reversibility between two versions of an API
+  undogen lint     <spec>                          What to change in the API so more of it can be undone
 
   <spec> is an OpenAPI 3.x or Swagger 2.0 file (JSON or YAML) or URL. External $refs are followed.
 
@@ -60,6 +61,10 @@ ${c.bold('mcp')}
 ${c.bold('diff')}
   --markdown             Print a Markdown summary (for pull request comments)
   --fail-on <what>       Exit 1 on: regressed (default), gated (also new irreversible/unknown writes), any, never
+
+${c.bold('lint')}
+  --fail-on <level>      Exit 1 on: error (default), warning, never
+  --all                  List every operation per rule (default: the first 5)
 
 ${c.bold('undo')}
   --seq <n>              Undo this entry (default: the most recent one)    --all   Undo everything, newest first
@@ -391,6 +396,36 @@ async function main(argv: string[]) {
       return;
     }
 
+    case 'lint': {
+      const { lint } = await import('./lint.js');
+      const findings = lint(spec, analysis);
+      const failOn = values['fail-on'] ?? 'error';
+      if (!['error', 'warning', 'never'].includes(failOn)) throw new UsageError('--fail-on must be error, warning or never');
+      if (values.json) console.log(JSON.stringify(findings, null, 2));
+      else {
+        console.log(`\n${c.bold('undogen lint')}  ${c.dim('·')}  ${spec.title} ${c.dim(spec.version)}\n`);
+        const groups = new Map<string, typeof findings>();
+        for (const f of findings) groups.set(f.rule, [...(groups.get(f.rule) ?? []), f]);
+        const color = { error: c.red, warning: c.yellow, info: c.dim };
+        for (const [rule, list] of groups) {
+          const first = list[0]!;
+          console.log(`  ${color[first.severity](`${first.severity.padEnd(7)} ${rule}`)}  ${c.dim(`(${list.length})`)}`);
+          for (const f of values.all ? list : list.slice(0, 5)) {
+            console.log(`    ${f.operationId.padEnd(36)} ${f.method.padEnd(7)}${f.path}`);
+            console.log(c.dim(`      → ${f.fix}`));
+          }
+          if (!values.all && list.length > 5) console.log(c.dim(`    … ${list.length - 5} more (--all)`));
+          console.log('');
+        }
+        const n = (s: string) => findings.filter((f) => f.severity === s).length;
+        console.log(`  ${c.red(`${n('error')} errors`)} · ${c.yellow(`${n('warning')} warnings`)} · ${c.dim(`${n('info')} info`)}\n`);
+      }
+      const errors = findings.filter((f) => f.severity === 'error').length;
+      const warnings = findings.filter((f) => f.severity === 'warning').length;
+      if ((failOn === 'error' && errors) || (failOn === 'warning' && errors + warnings)) process.exitCode = 1;
+      return;
+    }
+
     case 'compile': {
       const text = JSON.stringify(toBundle(spec, analysis, VERSION), null, 2) + '\n';
       if (values.out) await write(values.out, text);
@@ -402,6 +437,12 @@ async function main(argv: string[]) {
       throw new UsageError(`Unknown command "${command}". Try --help.`);
   }
 }
+
+// `undogen lint | head` closes stdout early: stop quietly instead of crashing with EPIPE.
+process.stdout.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EPIPE') process.exit(0);
+  throw err;
+});
 
 main(process.argv.slice(2)).catch((err) => {
   console.error(c.red(`error: ${(err as Error).message}`));

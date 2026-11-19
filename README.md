@@ -276,7 +276,9 @@ For specs you don't control, use an overrides file (`--overrides overrides.json`
 
 Bindings take values from `params.*`, `query.*`, `response.*`, `before.*`, `request.*`, or `location` (the id at the end of the response's `Location` header). Bodies can be `"before"`, `"before-request-keys"`, `"request"`, or `{ "literal": … }`.
 
-Three commands help fill the gaps:
+Four commands help fill the gaps:
+
+- `undogen lint <spec>` is for API owners: for every operation that can't be undone for a structural reason, the concrete change that fixes it ("return the created resource's id", "add `GET /orgs/{org}/issue-fields/{id}`", "add the opposite action"). Exits 1 on errors, so it can gate API changes.
 
 - `undogen init <spec>` writes starter `overrides.json` and `fixtures.json`: a stub with candidate inverses for each `unknown` operation, `prepare` steps for paired actions (unarchive needs an archived item), and, with `--from-report`, body templates for operations that errored. Keys starting with `_` are notes and are ignored.
 - `undogen learn <spec> --base-url … --out overrides.json` finds bindings by experiment. For creates whose response doesn't name the new id, it tries the `Location` header and id-like fields until one reads the resource back and its `DELETE` removes it. Then run `verify` with the result.
@@ -288,7 +290,7 @@ Three commands help fill the gaps:
 
 | API | Write operations | Undo derived | Irreversible (gated) | Unknown | Time (incl. download) |
 |---|---:|---:|---:|---:|---:|
-| GitHub REST | 614 | 62% | 146 | 89 | 0.6s |
+| GitHub REST | 614 | 64% | 131 | 89 | 0.6s |
 | Kubernetes (Swagger 2.0) | 586 | 82% | 91 | 17 | 0.1s |
 | DigitalOcean (hundreds of `$ref` files) | 448 | 60% | 89 | 92 | 10–40s |
 | Stripe | 339 | 39% | 135 | 72 | 0.5s |

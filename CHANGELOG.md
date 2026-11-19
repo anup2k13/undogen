@@ -11,6 +11,7 @@
 - Bulk `DELETE` on a collection is gated as irreversible.
 
 ### Runtime
+- CLI output piped into a command that closes early (`| head`) no longer crashes with EPIPE.
 - Journal files are created readable by their owner only (0600). Agent tools accept only the header parameters an operation declares, so a tool call cannot replace the configured credentials.
 - Persistent journals (`JournalStore`, `FileJournalStore`, `UndoableClient.open()`), undo by seq, `undogen undo` and `undogen journal`.
 - `FileJournalStore.compact()` and `undogen journal --compact` shrink a journal to the latest version of each entry.
@@ -25,6 +26,7 @@
 - `report.html` (self-contained, light/dark, readable on a phone), `--junit`, `--sarif`, `--redact` (secret-looking keys are always masked), `--strict`.
 
 ### Integrations
+- `undogen lint <spec>`: for API owners, the concrete change that would make each structurally undoable-but-not-yet operation undoable (missing id in create responses, missing GET/DELETE, missing counterpart actions, missing operationIds).
 - `undogen diff <old> <new>`: reversibility changes between two versions of a spec (regressions, new gated writes, removed and changed inverses), with Markdown output for pull requests and `--fail-on`.
 - `undogen mcp`: MCP server with undo-aware tool annotations, undo/journal tools and approval through elicitation.
 - `toolDefinitions()` for any agent framework, including `undogen_preview`: what undo would do for a tool, before calling it.

@@ -676,6 +676,15 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
     // 5. DELETE an item -> snapshot it first, re-create it from the snapshot.
     if (op.method === 'delete') {
       if (!getOp) {
+        // A membership-style route (PUT/DELETE …/repositories/{id}) with a bodiless PUT: the PUT puts it back.
+        const put = index.find('put', op.path);
+        if (put && !put.requestSchema?.required?.length && !(put.requestSchema?.properties && Object.keys(put.requestSchema.properties).length)) {
+          return plan(op, 'reversible', 'toggle', 0.5, {
+            inverse: { operationId: put.id, method: 'put', path: put.path, bindings: bindParams(put.path) },
+            reasons: [`DELETE and a bodiless PUT on ${op.path} remove and add the same membership`],
+            caveats: ['Assumes the membership existed before the DELETE (there is no GET to check)'],
+          });
+        }
         return plan(op, 'irreversible', 'none', 0.7, {
           reasons: [`Cannot capture the resource before deletion: no GET ${op.path}`],
         });
