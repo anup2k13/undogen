@@ -213,3 +213,34 @@ describe('verify --check-conflicts', () => {
     });
   });
 });
+
+describe('synthesize: request bodies that pass validation', () => {
+  it('respects formats, patterns, lengths, ranges, const and minItems', async () => {
+    const { synthesize } = await import('../src/index.js');
+    const body = synthesize({
+      type: 'object',
+      properties: {
+        id: { type: 'string', format: 'uuid' },
+        ip: { type: 'string', format: 'ipv4' },
+        code: { type: 'string', pattern: '^[A-Z]{3}$' },
+        slug: { type: 'string', pattern: '^[a-z0-9-]+$', maxLength: 10 },
+        pin: { type: 'string', minLength: 30 },
+        port: { type: 'integer', minimum: 1024, maximum: 65535 },
+        ratio: { type: 'number', maximum: 0.5 },
+        step: { type: 'integer', minimum: 7, multipleOf: 5 },
+        kind: { const: 'webhook' },
+        tags: { type: 'array', minItems: 2, items: { type: 'string', enum: ['a', 'b'] } },
+      },
+    }) as Record<string, unknown>;
+    expect(body.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(body.ip).toBe('192.0.2.1');
+    expect(body.code).toBe('ABC');
+    expect(body.slug).toMatch(/^[a-z0-9-]{1,10}$/);
+    expect((body.pin as string).length).toBe(30);
+    expect(body.port).toBe(1024);
+    expect(body.ratio).toBeLessThanOrEqual(0.5);
+    expect(body.step).toBe(10);
+    expect(body.kind).toBe('webhook');
+    expect(body.tags).toEqual(['a', 'a']);
+  });
+});

@@ -500,15 +500,35 @@ function bodyFor(op: Operation, current: unknown): unknown {
   return synthesize(op.requestSchema, op.requestExample);
 }
 
+/** A different value for a field that still satisfies its schema, or undefined if we can't make one. */
 function mutate(value: unknown, schema: Schema): unknown {
   if (typeof value === 'boolean') return !value;
-  if (typeof value === 'number') return value + 1;
+  if (typeof value === 'number') {
+    const max = typeof schema.maximum === 'number' ? schema.maximum : Infinity;
+    const step = typeof schema.multipleOf === 'number' ? schema.multipleOf : 1;
+    if (value + step <= max) return value + step;
+    const min = typeof schema.minimum === 'number' ? schema.minimum : -Infinity;
+    return value - step >= min ? value - step : undefined;
+  }
   if (typeof value === 'string') {
     if (Array.isArray(schema.enum)) return schema.enum.find((e) => e !== value) ?? value;
     if (schema.format) return undefined; // dates, emails, uuids: don't produce invalid values
-    return `${value} (undogen)`;
+    const appended = `${value} (undogen)`;
+    const maxLength = typeof schema.maxLength === 'number' ? schema.maxLength : Infinity;
+    const fits = (v: string) => v.length <= maxLength && (typeof schema.pattern !== 'string' || safeTest(schema.pattern, v));
+    if (fits(appended)) return appended;
+    const other = synthesizeString('value', schema);
+    return other !== value && fits(other) ? other : undefined;
   }
   return undefined;
+}
+
+function safeTest(pattern: string, v: string): boolean {
+  try {
+    return new RegExp(pattern, 'u').test(v);
+  } catch {
+    return true;
+  }
 }
 
 /** Produce an example request body from a schema. */
@@ -531,26 +551,77 @@ export function synthesize(schema: Schema | undefined, example?: unknown): unkno
   return synthesizeValue('value', schema);
 }
 
+const FORMAT_VALUES: Record<string, string> = {
+  email: 'undogen@example.com',
+  'date-time': new Date(0).toISOString(),
+  date: '1970-01-01',
+  time: '00:00:00Z',
+  uri: 'https://example.com',
+  url: 'https://example.com',
+  'uri-reference': '/undogen',
+  uuid: '00000000-0000-4000-8000-000000000000',
+  ipv4: '192.0.2.1',
+  ipv6: '2001:db8::1',
+  hostname: 'example.com',
+  byte: 'dW5kb2dlbg==',
+  password: 'Undogen-pa55word!',
+  'phone-number': '+15555550100',
+};
+
+/** A string that satisfies the schema's format, pattern and length constraints, as far as we can tell. */
+function synthesizeString(name: string, s: Schema): string {
+  const fitLength = (v: string) => {
+    const min = typeof s.minLength === 'number' ? s.minLength : 0;
+    const max = typeof s.maxLength === 'number' ? s.maxLength : Infinity;
+    let out = v;
+    while (out.length < min) out += 'x';
+    return out.length > max ? out.slice(0, max) : out;
+  };
+  if (s.format && FORMAT_VALUES[s.format]) return FORMAT_VALUES[s.format]!;
+  const preferred = fitLength(`undogen-${name}`);
+  if (typeof s.pattern !== 'string') return preferred;
+  let re: RegExp;
+  try {
+    re = new RegExp(s.pattern as string, 'u');
+  } catch {
+    return preferred;
+  }
+  const candidates = [preferred, fitLength('undogen'), fitLength(name), 'abc', 'ABC', 'a1', 'A1', '1', '123', 'abc-123', 'abc_123', 'a.b', 'undogen@example.com', '#ffffff', 'ffffff', '2024-01-01', 'US', 'en', 'en-US'];
+  return candidates.find((c) => re.test(c)) ?? preferred;
+}
+
+function synthesizeNumber(s: Schema, integer: boolean): number {
+  const min = typeof s.minimum === 'number' ? s.minimum : typeof s.exclusiveMinimum === 'number' ? s.exclusiveMinimum : undefined;
+  const max = typeof s.maximum === 'number' ? s.maximum : typeof s.exclusiveMaximum === 'number' ? s.exclusiveMaximum : undefined;
+  let v = 1;
+  if (min !== undefined && v <= min) v = min + (s.exclusiveMinimum === true || typeof s.exclusiveMinimum === 'number' ? 1 : 0);
+  if (max !== undefined && v >= max) v = max - (s.exclusiveMaximum === true || typeof s.exclusiveMaximum === 'number' ? 1 : 0);
+  if (typeof s.multipleOf === 'number' && s.multipleOf > 0) v = Math.ceil(v / s.multipleOf) * s.multipleOf;
+  return integer ? Math.round(v) : v;
+}
+
 function synthesizeValue(name: string, s: Schema): unknown {
   if (s.example !== undefined) return s.example;
   if (Array.isArray(s.examples) && s.examples.length) return s.examples[0];
+  if (s.const !== undefined) return s.const;
   if (s.default !== undefined) return s.default;
   if (Array.isArray(s.enum) && s.enum.length) return s.enum.find((e) => e !== null) ?? s.enum[0];
+  const variants = s['x-undogen-variants'] as Schema[] | undefined;
+  if (variants?.length) return synthesize(variants.find((v) => v.properties) ?? variants[0]);
   const type = Array.isArray(s.type) ? s.type.find((t) => t !== 'null') : s.type;
   switch (type) {
     case 'string':
-      if (s.format === 'email') return 'undogen@example.com';
-      if (s.format === 'date-time') return new Date(0).toISOString();
-      if (s.format === 'date') return '1970-01-01';
-      if (s.format === 'uri') return 'https://example.com';
-      return `undogen-${name}`;
+      return synthesizeString(name, s);
     case 'integer':
+      return synthesizeNumber(s, true);
     case 'number':
-      return 1;
+      return synthesizeNumber(s, false);
     case 'boolean':
       return false;
-    case 'array':
-      return [];
+    case 'array': {
+      const n = typeof s.minItems === 'number' ? s.minItems : 0;
+      return Array.from({ length: n }, () => synthesizeValue(name.replace(/s$/, ''), (s.items as Schema) ?? {}));
+    }
     case 'object':
       return s.properties ? synthesize(s) : {};
     default:
