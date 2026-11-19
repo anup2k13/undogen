@@ -498,3 +498,96 @@ describe('JSON Patch and JSON Merge Patch', () => {
     }
   });
 });
+
+describe('conflict checks for paired actions and toggles', () => {
+  it('undoes a PUT that created a singleton (GET was 404) with the DELETE on the same route', async () => {
+    const { createServer } = await import('node:http');
+    let on = false;
+    const srv = createServer((req, res) => {
+      if (req.method === 'GET') return res.writeHead(on ? 200 : 404, { 'content-type': 'application/json' }).end(on ? '{"enabled":true}' : '{}');
+      on = req.method === 'PUT';
+      res.writeHead(204).end();
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const s = parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'x', version: '1' },
+      paths: { '/repos/{repo}/subscription': { get: { operationId: 'getSub', responses: {} }, put: { operationId: 'setSub', responses: {} }, delete: { operationId: 'deleteSub', responses: {} } } },
+    });
+    try {
+      const client = new UndoableClient({ spec: s, baseUrl: `http://127.0.0.1:${(srv.address() as import('node:net').AddressInfo).port}` });
+      const res = await client.call('setSub', { params: { repo: 'r' }, body: { subscribed: true } });
+      expect(res.entry!.inverse).toMatchObject({ method: 'delete', path: '/repos/r/subscription' });
+      await client.undo();
+      expect(on).toBe(false);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it("refuses to unarchive when someone else changed what archive did", async () => {
+    const agent = newClient();
+    const id = idOf(await agent.call('createTodo', { body: { title: 'x' } }));
+    const archived = await agent.call('archiveTodo', { params: { todoId: id } });
+    expect(archived.entry!.check).toMatchObject({ mode: 'diff', expected: { archived: true, done: true } });
+    await newClient().call('unarchiveTodo', { params: { todoId: id } });
+    const err = await agent.undo(archived.entry).catch((e) => e);
+    expect(err).toBeInstanceOf(ConflictError);
+    expect(err.conflicts).toEqual([{ field: 'archived', expected: true, actual: false }]);
+  });
+
+  async function starServer() {
+    const { createServer } = await import('node:http');
+    const starred = new Set<string>(['already']);
+    const srv = createServer((req, res) => {
+      const repo = (req.url ?? '').split('/').at(-2)!; // /repos/{repo}/star
+      if (req.method === 'GET') return res.writeHead(starred.has(repo) ? 204 : 404).end();
+      if (req.method === 'PUT' || req.method === 'POST') starred.add(repo);
+      if (req.method === 'DELETE') starred.delete(repo);
+      res.writeHead(204).end();
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    return { starred, url: `http://127.0.0.1:${(srv.address() as import('node:net').AddressInfo).port}`, close: () => new Promise((r) => srv.close(r)) };
+  }
+  const starSpec = parseSpec({
+    openapi: '3.0.3',
+    info: { title: 'Stars', version: '1' },
+    paths: {
+      '/repos/{repo}/star': {
+        get: { operationId: 'checkStarred', responses: { '204': { description: '' }, '404': { description: '' } } },
+        post: { operationId: 'star', responses: { '204': { description: '' } } },
+        delete: { operationId: 'unstar', responses: { '204': { description: '' } } },
+      },
+    },
+  });
+
+  it('does nothing when undoing a toggle that changed nothing (starring an already-starred repo)', async () => {
+    const api = await starServer();
+    try {
+      const client = new UndoableClient({ spec: starSpec, baseUrl: api.url });
+      const res = await client.call('star', { params: { repo: 'already' } });
+      expect(res.entry!.noop).toBe(true);
+      await client.undo();
+      expect(api.starred.has('already')).toBe(true);
+      expect(res.entry!.undoWarnings).toEqual(['the call changed nothing, so there was nothing to undo']);
+    } finally {
+      await api.close();
+    }
+  });
+
+  it('undoes a toggle that did change something, and refuses if it was flipped back since', async () => {
+    const api = await starServer();
+    try {
+      const client = new UndoableClient({ spec: starSpec, baseUrl: api.url });
+      await client.call('star', { params: { repo: 'new' } });
+      await client.undo();
+      expect(api.starred.has('new')).toBe(false);
+
+      const again = await client.call('star', { params: { repo: 'other' } });
+      api.starred.delete('other'); // someone else unstarred it
+      await expect(client.undo(again.entry)).rejects.toBeInstanceOf(ConflictError);
+    } finally {
+      await api.close();
+    }
+  });
+});

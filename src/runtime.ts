@@ -68,7 +68,16 @@ export interface JournalEntry {
   /** Why `inverse` is null, if it is. */
   inverseError?: string;
   /** What the call left behind; re-read before undoing to detect someone else's change. */
-  check?: { pathTemplate: string; params: Record<string, Scalar>; query?: Record<string, QueryValue>; expected: Record<string, unknown> };
+  check?: {
+    pathTemplate: string;
+    params: Record<string, Scalar>;
+    query?: Record<string, QueryValue>;
+    expected: Record<string, unknown>;
+    /** 'diff': `expected` holds the fields the call changed ("(status)" for the HTTP status). */
+    mode?: 'diff';
+  };
+  /** The call changed nothing (e.g. starring an already-starred repo), so undo does nothing. */
+  noop?: boolean;
   /** The resource this call created, so later calls that use it are known to depend on it. */
   created?: { param: string; value: Scalar };
   identity?: { param: string; responseKey: string };
@@ -348,6 +357,16 @@ export class UndoableClient {
       if (before !== null && plan.children?.length) children = await this.captureChildren(plan.children, params);
     }
 
+    // Paired actions and toggles: read the state first, so we know what the call changed.
+    let diffBefore: HttpResult | undefined;
+    if (plan.checkMode && plan.check && this.options.checkConflicts !== false) {
+      try {
+        diffBefore = await this.request('get', resolvePath(plan.check, pre), { query: resolveQuery(plan.check, pre) });
+      } catch {
+        /* no check possible */
+      }
+    }
+
     const path = fillPath(op.path, params);
     const response = await this.request(op.method, path, {
       query: input.query,
@@ -388,7 +407,20 @@ export class UndoableClient {
       status: 'active',
       undone: false,
     };
-    if (inverse && plan.check && this.options.checkConflicts !== false) {
+    if (inverse && plan.check && diffBefore) {
+      try {
+        const checkPath = resolvePath(plan.check, sources);
+        const after = await this.request('get', checkPath, { query: resolveQuery(plan.check, sources) });
+        const changed = changedState(diffBefore, after);
+        if (Object.keys(changed).length) {
+          entry.check = { pathTemplate: plan.check.path, params: resolveParams(plan.check, sources), query: resolveQuery(plan.check, sources), expected: changed, mode: 'diff' };
+        } else if (plan.checkMode === 'diff-exact') {
+          entry.noop = true;
+        }
+      } catch {
+        /* no check possible; undo proceeds unchecked */
+      }
+    } else if (inverse && plan.check && !plan.checkMode && this.options.checkConflicts !== false) {
       try {
         entry.check = {
           pathTemplate: plan.check.path,
@@ -450,6 +482,10 @@ export class UndoableClient {
     if (!target.inverse && target.plan.strategy === 'no-side-effects') {
       return this.finish(target, { status: 204, data: undefined, headers: {} });
     }
+    if (target.noop) {
+      target.undoWarnings = [...(target.undoWarnings ?? []), 'the call changed nothing, so there was nothing to undo'];
+      return this.finish(target, { status: 204, data: undefined, headers: {} });
+    }
     if (!target.inverse) {
       target.undoError = `cannot be undone: ${target.inverseError}`;
       target.status = 'failed';
@@ -464,18 +500,24 @@ export class UndoableClient {
     if (target.check && !opts.force && this.options.checkConflicts !== false) {
       const checkPath = fillPath(target.check.pathTemplate, this.remapParams(target.check.params));
       const current = await this.request('get', checkPath, { query: target.check.query });
-      if (current.status === 404 || current.status === 410) {
-        if (inverse.method === 'delete') {
-          target.undoWarnings = [...(target.undoWarnings ?? []), 'the resource was already gone'];
-          return this.finish(target, current);
+      if (target.check.mode === 'diff') {
+        // Paired action / toggle: the fields (or status) the call changed must still be as it left them.
+        const conflicts = compareExpected(target.check.expected, stateOf(current));
+        if (conflicts.length) return this.conflict(target, conflicts, current);
+      } else {
+        if (current.status === 404 || current.status === 410) {
+          if (inverse.method === 'delete') {
+            target.undoWarnings = [...(target.undoWarnings ?? []), 'the resource was already gone'];
+            return this.finish(target, current);
+          }
+          return this.conflict(target, [{ field: '(resource)', expected: 'exists', actual: `HTTP ${current.status}` }], current);
         }
-        return this.conflict(target, [{ field: '(resource)', expected: 'exists', actual: `HTTP ${current.status}` }], current);
+        if (current.status >= 300) {
+          throw new UndoError(`Undo of #${target.seq}: could not read current state (GET ${checkPath} -> HTTP ${current.status})`, target, current);
+        }
+        const conflicts = compareExpected(target.check.expected, current.data);
+        if (conflicts.length) return this.conflict(target, conflicts, current);
       }
-      if (current.status >= 300) {
-        throw new UndoError(`Undo of #${target.seq}: could not read current state (GET ${checkPath} -> HTTP ${current.status})`, target, current);
-      }
-      const conflicts = compareExpected(target.check.expected, current.data);
-      if (conflicts.length) return this.conflict(target, conflicts, current);
       const etag = current.headers['etag'];
       if (etag && checkPath === inverse.path) headers['if-match'] = etag;
     }
@@ -828,6 +870,31 @@ function resolveBody(body: BodyTemplate | undefined, sources: Sources): unknown 
       if (sources.before == null) throw new Error('No captured state to restore from');
       return invertJsonPatch(sources.request, sources.before);
   }
+}
+
+/** Fields that change on every write and say nothing about who changed what. */
+export const VOLATILE_FIELDS = [
+  'createdAt', 'updatedAt', 'created_at', 'updated_at', 'modifiedAt', 'modified_at',
+  'lastModified', 'last_modified', 'etag', 'ETag',
+];
+
+/** A response as comparable fields; "(status)" carries the HTTP status (for resources that toggle between 204 and 404). */
+function stateOf(res: HttpResult): Record<string, unknown> {
+  const data = res.data && typeof res.data === 'object' && !Array.isArray(res.data) && res.status < 300 ? (res.data as Record<string, unknown>) : {};
+  return { '(status)': res.status, ...data };
+}
+
+/** The fields that differ between two reads, with their new values. */
+function changedState(before: HttpResult, after: HttpResult): Record<string, unknown> {
+  if (before.status !== after.status) return { '(status)': after.status };
+  const a = stateOf(before);
+  const b = stateOf(after);
+  const out: Record<string, unknown> = {};
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    if (VOLATILE_FIELDS.includes(k)) continue;
+    if (stableStringify(a[k]) !== stableStringify(b[k])) out[k] = b[k];
+  }
+  return out;
 }
 
 const unescapePointer = (s: string) => s.replace(/~1/g, '/').replace(/~0/g, '~');

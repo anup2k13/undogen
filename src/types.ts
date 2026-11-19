@@ -166,6 +166,13 @@ export interface InversePlan {
    * undo stops with a ConflictError instead of overwriting their change.
    */
   check?: RequestTemplate;
+  /**
+   * How `check` is used. Default: compare the fields the call wrote. 'diff': read the
+   * state before and after the call and expect the fields that changed to stay that way
+   * (paired actions, toggles). 'diff-exact': the check reads the toggled resource itself,
+   * so "nothing changed" means the call was a no-op and the undo does nothing.
+   */
+  checkMode?: 'diff' | 'diff-exact';
   /** For inverses that re-create a resource: which response field carries its new id. */
   identity?: { param: string; responseKey: string };
   /** Child collections to re-create after re-creating a deleted parent. */

@@ -139,7 +139,7 @@ await client.undoAll();  // saga-style rollback of the whole session, newest fir
 
 Undo is careful about the world having moved on:
 
-- **Someone else changed the data since?** Before undoing, the client re-reads what the call produced. If a field the agent wrote has a different value now, the undo stops with a `ConflictError` instead of overwriting the other person's change. When the API sends ETags, the undo also carries `If-Match`. `undo(entry, { force: true })` overrides.
+- **Someone else changed the data since?** Before undoing, the client re-reads what the call produced. If a field the agent wrote (or, for an action like `archive`, a field the action changed) has a different value now, the undo stops with a `ConflictError` instead of overwriting the other person's change. A toggle that changed nothing (starring an already-starred repo) is undone by doing nothing. When the API sends ETags, the undo also carries `If-Match`. `undo(entry, { force: true })` overrides.
 - **Later writes depend on it?** Undoing a create that later calls used (a todo that now has comments) raises `DependencyError`; `{ cascade: true }` undoes the dependents first.
 - **Ids changed?** When undoing a delete re-creates a resource under a new id, older journal entries follow the new id automatically.
 - **Retries are safe.** Undo requests carry an `Idempotency-Key`; rate limits (`429`, `Retry-After`), timeouts and `5xx` are retried where repeating is safe.
@@ -307,13 +307,12 @@ The compiled plans are hypotheses. `verify` is what turns them into facts. Confi
 
 - Inverses are **compensations**, not distributed transactions. Webhooks that already fired, emails a server sent as a side effect, and things people saw in the meantime are outside any API's reach. undogen's job is to make that boundary explicit.
 - Verification can only see state that the API exposes through `GET` routes. Lists are followed through `Link: rel="next"` pagination up to `--max-pages` (5); cursor tokens in response bodies are not followed.
-- Conflict detection compares the top-level fields the agent wrote. Changes made through other fields, or nested inside a field the agent didn't send, are not detected unless the API sends ETags.
+- Conflict detection covers what the undo would overwrite: the fields the call wrote, or, for paired actions and toggles, the fields (or status) the call changed, read before and after it. A paired action whose effect the API doesn't expose through a `GET` is undone unchecked.
 - `--restore-children` captures up to three levels (children, grandchildren, great-grandchildren) and only through list routes that return arrays.
 
 ## Roadmap
 
 - Calibrate confidence scores from `verify` results across many APIs
-- Field-level conflict detection for nested objects
 - GraphQL mutations
 - A hosted registry of reviewed `x-undogen` declarations for popular APIs
 

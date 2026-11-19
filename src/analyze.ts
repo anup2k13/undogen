@@ -558,6 +558,8 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
   if ((op.method === 'put' || op.method === 'patch') && !lastIsParam) {
     const getOp = index.find('get', op.path);
     if (getOp) {
+      // If nothing was there before (GET 404), the PUT created it: the way back is the DELETE on the same route.
+      const del = op.method === 'put' ? index.find('delete', op.path) : undefined;
       return plan(op, 'reversible', 'restore-snapshot', op.method === 'patch' ? 0.8 : 0.75, {
         capture: getTemplate(getOp),
         inverse: {
@@ -567,6 +569,7 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
           bindings: bindParams(op.path),
           body: op.method === 'patch' ? patchBody(op) : { from: 'before', fields: writableFields(op.requestSchema) },
         },
+        inverseIfMissing: del ? { operationId: del.id, method: 'delete', path: del.path, bindings: bindParams(del.path) } : undefined,
         reasons: [`Snapshot via ${getOp.id}, then write the old values back with ${op.id}`],
         caveats: ['Assumes the GET and the write use the same representation'],
       });
@@ -744,6 +747,17 @@ function finishPlan(p: InversePlan, op: Operation, index: Index): InversePlan {
     ) {
       const getOp = index.find('get', p.inverse.path);
       if (getOp) p.check = { operationId: getOp.id, method: 'get', path: getOp.path, bindings: p.inverse.bindings };
+    }
+  }
+  // Paired actions and toggles write no fields we can name: compare the state before and after instead.
+  if (!p.check && p.inverse && (p.strategy === 'paired-action' || p.strategy === 'toggle')) {
+    const exact = index.find('get', op.path);
+    const segs = segmentsOf(op.path);
+    const root = exact ? undefined : index.find('get', joinPath(segs.slice(0, -1)));
+    const getOp = exact ?? root;
+    if (getOp && getOp.path !== '/') {
+      p.check = { operationId: getOp.id, method: 'get', path: getOp.path, bindings: bindParams(getOp.path) };
+      p.checkMode = exact ? 'diff-exact' : 'diff';
     }
   }
   const byId = (id: string) => index.byId(id);

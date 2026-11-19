@@ -291,7 +291,7 @@ describe('analyze: runtime support fields', async () => {
   it('adds a check GET to snapshot restores and creates', () => {
     expect(plain.updateTodo!.check).toMatchObject({ method: 'get', path: '/todos/{todoId}' });
     expect(plain.createTodo!.check).toMatchObject({ method: 'get', path: '/todos/{todoId}', bindings: { todoId: { from: 'response', key: 'id' } } });
-    expect(plain.archiveTodo!.check).toBeUndefined();
+    expect(plain.archiveTodo).toMatchObject({ check: { method: 'get', path: '/todos/{todoId}' }, checkMode: 'diff' });
   });
 
   it('records where a re-created resource reports its new id', () => {

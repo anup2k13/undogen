@@ -1,5 +1,5 @@
 import { analyze } from './analyze.js';
-import { fillPath, getPath, UndoableClient, type CallInput, type HttpResult } from './runtime.js';
+import { fillPath, getPath, UndoableClient, VOLATILE_FIELDS, type CallInput, type HttpResult } from './runtime.js';
 import type { ApiSpec, InversePlan, Operation, RequestTemplate, Reversibility, Schema, Strategy } from './types.js';
 import { structuralPath } from './spec.js';
 import { VERSION } from './version.js';
@@ -91,10 +91,7 @@ export interface VerifyReport {
   summary: Record<Outcome, number> & { total: number };
 }
 
-export const DEFAULT_IGNORED_FIELDS = [
-  'createdAt', 'updatedAt', 'created_at', 'updated_at', 'modifiedAt', 'modified_at',
-  'lastModified', 'last_modified', 'etag', 'ETag',
-];
+export const DEFAULT_IGNORED_FIELDS = [...VOLATILE_FIELDS];
 
 const SNAPSHOT_MISSING = Symbol('missing');
 

@@ -3,7 +3,8 @@
 ## Unreleased
 
 ### Safety
-- **Conflict detection.** Before undoing, the client re-reads the state a call produced and refuses (`ConflictError`) if someone changed a field the agent wrote; `If-Match` is sent when the API provides ETags. `{ force: true }` overrides.
+- **Conflict detection.** Before undoing, the client re-reads the state a call produced and refuses (`ConflictError`) if someone changed a field the agent wrote; `If-Match` is sent when the API provides ETags. `{ force: true }` overrides. Paired actions and toggles are checked by reading the state before and after the call: the fields it changed must still be as it left them, and a toggle that changed nothing is undone by doing nothing.
+- A `PUT` that created a singleton (its `GET` was 404 before) is undone with the `DELETE` on the same route; it used to fail with "No captured state".
 - **Verify can no longer pass a no-op.** A snapshot between the operation and its undo must show a change; otherwise the result is `inconclusive`. Previously an operation that changed nothing was reported as `verified`.
 - **Irreversible verbs anywhere in the name or summary.** `createAndSendInvoice` and "Creates an invoice and emails it" are now gated (they were classified reversible). Negations ("without notifying") are respected; descriptions add caveats.
 - **Replay guard.** An identical irreversible call is refused a second time (`ReplayBlockedError`), including across restarts with a persisted journal.

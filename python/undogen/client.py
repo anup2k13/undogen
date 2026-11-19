@@ -308,6 +308,14 @@ class UndoableClient:
             if before is not None and plan.get("children"):
                 children = self._capture_children(plan["children"], params)
 
+        # Paired actions and toggles: read the state first, so we know what the call changed.
+        diff_before = None
+        if plan.get("checkMode") and plan.get("check") and self.check_conflicts:
+            try:
+                diff_before = self.request("get", self._resolve_path(plan["check"], sources), query=self._resolve_query(plan["check"], sources))
+            except UndogenError:
+                diff_before = None
+
         path = fill_path(op["path"], params)
         response = self.request(op["method"], path, query=query, headers=headers, body=body, content_type=op.get("requestContentType"))
         if response["status"] >= 400:
@@ -357,7 +365,23 @@ class UndoableClient:
             entry["fingerprint"] = fingerprint
         if plan.get("identity"):
             entry["identity"] = plan["identity"]
-        if inverse and plan.get("check") and self.check_conflicts:
+        if inverse and plan.get("check") and diff_before is not None:
+            try:
+                after = self.request("get", self._resolve_path(plan["check"], sources), query=self._resolve_query(plan["check"], sources))
+                changed = _changed_state(diff_before, after)
+                if changed:
+                    entry["check"] = {
+                        "pathTemplate": plan["check"]["path"],
+                        "params": self._resolve_params(plan["check"], sources),
+                        "query": self._resolve_query(plan["check"], sources),
+                        "expected": changed,
+                        "mode": "diff",
+                    }
+                elif plan.get("checkMode") == "diff-exact":
+                    entry["noop"] = True
+            except UndogenError:
+                pass
+        elif inverse and plan.get("check") and not plan.get("checkMode") and self.check_conflicts:
             try:
                 only_echoed = inverse["method"] == "delete" or plan["strategy"] == "soft-delete"
                 entry["check"] = {
@@ -418,6 +442,9 @@ class UndoableClient:
 
         if not target.get("inverse") and target["plan"]["strategy"] == "no-side-effects":
             return self._finish(target, {"status": 204, "data": None, "headers": {}})
+        if target.get("noop"):
+            target.setdefault("undoWarnings", []).append("the call changed nothing, so there was nothing to undo")
+            return self._finish(target, {"status": 204, "data": None, "headers": {}})
         if not target.get("inverse"):
             target["status"] = "failed"
             target["undoError"] = f"cannot be undone: {target.get('inverseError')}"
@@ -430,16 +457,21 @@ class UndoableClient:
         if check and not force and self.check_conflicts:
             check_path = fill_path(check["pathTemplate"], self._remap_params(check["params"]))
             current = self.request("get", check_path, query=check.get("query"))
-            if current["status"] in (404, 410):
-                if inverse["method"] == "delete":
-                    target.setdefault("undoWarnings", []).append("the resource was already gone")
-                    return self._finish(target, current)
-                return self._conflict(target, [{"field": "(resource)", "expected": "exists", "actual": f"HTTP {current['status']}"}], current)
-            if current["status"] >= 300:
-                raise UndoError(f"Undo of #{target['seq']}: could not read current state (GET {check_path} -> HTTP {current['status']})", target, current)
-            conflicts = _compare(check["expected"], current["data"])
-            if conflicts:
-                return self._conflict(target, conflicts, current)
+            if check.get("mode") == "diff":
+                conflicts = _compare(check["expected"], _state_of(current))
+                if conflicts:
+                    return self._conflict(target, conflicts, current)
+            else:
+                if current["status"] in (404, 410):
+                    if inverse["method"] == "delete":
+                        target.setdefault("undoWarnings", []).append("the resource was already gone")
+                        return self._finish(target, current)
+                    return self._conflict(target, [{"field": "(resource)", "expected": "exists", "actual": f"HTTP {current['status']}"}], current)
+                if current["status"] >= 300:
+                    raise UndoError(f"Undo of #{target['seq']}: could not read current state (GET {check_path} -> HTTP {current['status']})", target, current)
+                conflicts = _compare(check["expected"], current["data"])
+                if conflicts:
+                    return self._conflict(target, conflicts, current)
             etag = current["headers"].get("etag")
             if etag and check_path == inverse["path"]:
                 headers["if-match"] = etag
@@ -751,6 +783,25 @@ def _expected_state(request: Any, response: Any, only_echoed: bool) -> dict:
         elif not only_echoed:
             out[k] = v
     return out
+
+
+VOLATILE_FIELDS = {
+    "createdAt", "updatedAt", "created_at", "updated_at", "modifiedAt", "modified_at",
+    "lastModified", "last_modified", "etag", "ETag",
+}
+
+
+def _state_of(res: dict) -> dict:
+    data = res["data"] if isinstance(res.get("data"), dict) and res["status"] < 300 else {}
+    return {"(status)": res["status"], **data}
+
+
+def _changed_state(before: dict, after: dict) -> dict:
+    """The fields that differ between two reads, with their new values ("(status)" for the HTTP status)."""
+    if before["status"] != after["status"]:
+        return {"(status)": after["status"]}
+    a, b = _state_of(before), _state_of(after)
+    return {k: b.get(k) for k in {*a, *b} - VOLATILE_FIELDS if _stable(a.get(k)) != _stable(b.get(k))}
 
 
 def _compare(expected: dict, current: Any) -> List[dict]:

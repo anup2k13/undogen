@@ -216,3 +216,14 @@ def test_tools_only_send_declared_headers(bundle_path, server_url):
     tool = next(t for t in tool_definitions(client) if t.name == "listTodos")
     tool.execute(headers={"authorization": "Bearer agent", "x-tenant": "acme", "cookie": "a=b"})
     assert sent[0]["authorization"] == "Bearer configured" and sent[0]["X-Tenant"] == "acme" and "cookie" not in sent[0]
+
+
+def test_paired_action_conflict(bundle_path, server_url):
+    agent = UndoableClient(bundle_path, server_url)
+    tid = agent.call("createTodo", body={"title": "x"})["data"]["id"]
+    archived = agent.call("archiveTodo", params={"todoId": tid})
+    assert archived["entry"]["check"]["expected"] == {"archived": True, "done": True}
+    UndoableClient(bundle_path, server_url).call("unarchiveTodo", params={"todoId": tid})
+    with pytest.raises(ConflictError) as err:
+        agent.undo(archived["entry"])
+    assert err.value.conflicts == [{"field": "archived", "expected": True, "actual": False}]

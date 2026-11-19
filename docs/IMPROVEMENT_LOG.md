@@ -5,7 +5,6 @@ committed, and pushed; this file records what was done and what is next.
 
 ## Backlog (highest value first)
 
-- [ ] Docs: tighten Limits (conflict checks cover what undo writes; paired actions/toggles are unchecked)
 - [ ] verify: self-contained HTML report
 ## Done
 
@@ -22,3 +21,4 @@ committed, and pushed; this file records what was done and what is next.
 - **Security** (19 Nov, TS + Python): agent tools pass only the operation's declared header parameters (a tool call could previously replace the configured `Authorization` header or set any header); journal files are created with mode 0600 since they hold request and response bodies.
 - **Release check** (19 Nov): `scripts/release-check.sh` packs both packages as they'd be published, installs them in clean directories and uses them (CLI, ESM import, `undogen/mcp`, type declarations from a strict TS consumer, the wheel and its adapters). Runs in CI and before publishing. Found and fixed: source maps pointed at unshipped sources (now inlined), CHANGELOG not shipped, wheel without LICENSE, deprecated `license` table in pyproject.
 - **Compound action pairs + top-level flat routes** (19 Nov): `addFollowers`↔`removeFollowers`, `markRead`↔`markUnread` (forwarding only the fields the counterpart declares, and only when each side provides what the other requires — this kept Stripe `add_lines`/`remove_lines` and `pause`/`resume` from being paired wrongly), and sub-collection creates undone at a top-level item route (Asana `POST /projects/{gid}/sections` → `DELETE /sections/{gid}`), which yields to other rules when it can't name the created resource (a GitHub false positive caught in review). Asana 73% of writes now get an inverse, unknown 29; GitHub, Stripe and the others unchanged (checked plan by plan).
+- **Conflict checks for paired actions and toggles** (19 Nov, TS + Python): the runtime reads the item (or the toggled resource) before and after the call; the fields or status it changed must still be as it left them before undoing. A toggle that changed nothing (star an already-starred repo) is undone by doing nothing; previously the undo would have un-starred it. Writing the tests exposed a pre-existing bug: a `PUT` that created a singleton (GET 404 before) could not be undone ("No captured state"); it now falls back to the `DELETE` on the same route. Also caught a bug in my own first edit (the old field check still ran after the diff check) before commit.
