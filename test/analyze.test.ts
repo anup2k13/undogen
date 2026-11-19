@@ -477,3 +477,75 @@ describe('analyze: same-route pairs are not read-only and only get bodies they a
     expect(byId['issues/lock']!.inverse!.body).toBeUndefined();
   });
 });
+
+describe('analyze: compound action pairs (Asana style)', () => {
+  const body = (props: string[]) => ({ content: { 'application/json': { schema: { type: 'object', properties: Object.fromEntries(props.map((p) => [p, { type: 'string' }])) } } } });
+  const spec = parseSpec({
+    openapi: '3.0.3',
+    info: { title: 'Asana-ish', version: '1' },
+    paths: {
+      '/tasks/{task_gid}/addProject': { post: { operationId: 'addProjectForTask', requestBody: body(['project', 'insert_before', 'section']), responses: {} } },
+      '/tasks/{task_gid}/removeProject': { post: { operationId: 'removeProjectForTask', requestBody: body(['project']), responses: {} } },
+      '/users/{user_gid}/notifications/markRead': { post: { operationId: 'markRead', responses: {} } },
+      '/users/{user_gid}/notifications/markUnread': { post: { operationId: 'markUnread', responses: {} } },
+      '/subscriptions/{id}/pause': { post: { operationId: 'pause', requestBody: body(['behavior']), responses: {} } },
+      '/subscriptions/{id}/resume': { post: { operationId: 'resume', requestBody: body(['proration_behavior']), responses: {} } },
+      '/projects/{project_gid}/sections': { post: { operationId: 'createSectionForProject', responses: { '201': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object', properties: { gid: { type: 'string' } } } } } } } } } } },
+      '/sections/{section_gid}': { delete: { operationId: 'deleteSection', responses: { '200': { description: '' } } } },
+    },
+  });
+  const byId = Object.fromEntries(analyze(spec).plans.map((p) => [p.operationId, p]));
+
+  it('pairs addX with removeX and forwards only the fields the counterpart accepts', () => {
+    expect(byId.addProjectForTask).toMatchObject({ strategy: 'paired-action', inverse: { operationId: 'removeProjectForTask', body: { from: 'request', fields: ['project'] } } });
+    expect(byId.removeProjectForTask!.inverse!.operationId).toBe('addProjectForTask');
+  });
+
+  it('flips a trailing word (markRead <-> markUnread) under a non-item route', () => {
+    expect(byId.markRead!.inverse!.operationId).toBe('markUnread');
+    expect(byId.markUnread!.inverse!.operationId).toBe('markRead');
+  });
+
+  it('does not forward a body between simple pairs that take different arguments', () => {
+    expect(byId.pause).toMatchObject({ strategy: 'paired-action', inverse: { operationId: 'resume' } });
+    expect(byId.pause!.inverse!.body).toBeUndefined();
+  });
+
+  it('follows a sub-collection create to a top-level item route', () => {
+    expect(byId.createSectionForProject).toMatchObject({
+      strategy: 'delete-created',
+      inverse: { operationId: 'deleteSection', bindings: { section_gid: { from: 'response', key: 'data.gid' } } },
+    });
+  });
+});
+
+describe('analyze: compound pairs and top-level routes stay conservative', () => {
+  const json = (schema: object) => ({ content: { 'application/json': { schema } } });
+  const spec = parseSpec({
+    openapi: '3.0.3',
+    info: { title: 'x', version: '1' },
+    paths: {
+      '/invoices/{invoice}/add_lines': {
+        post: { operationId: 'addLines', requestBody: json({ type: 'object', required: ['lines'], properties: { lines: { type: 'array', items: { type: 'object', properties: { amount: { type: 'integer' } } } } } }), responses: {} },
+      },
+      '/invoices/{invoice}/remove_lines': {
+        post: { operationId: 'removeLines', requestBody: json({ type: 'object', required: ['lines'], properties: { lines: { type: 'array', items: { type: 'object', required: ['id', 'behavior'], properties: { id: { type: 'string' }, behavior: { type: 'string' } } } } } }), responses: {} },
+      },
+      '/repos/{owner}/{repo}/restrictions/teams': {
+        post: { operationId: 'addTeamRestrictions', requestBody: json({ type: 'object', properties: { teams: { type: 'array' } } }), responses: { '200': { description: '', ...json({ type: 'array', items: { type: 'object' } }) } } },
+        delete: { operationId: 'removeTeamRestrictions', requestBody: json({ type: 'object', properties: { teams: { type: 'array' } } }), responses: {} },
+      },
+      '/teams/{team_id}': { delete: { operationId: 'deleteTeamLegacy', responses: {} } },
+    },
+  });
+  const byId = Object.fromEntries(analyze(spec).plans.map((p) => [p.operationId, p]));
+
+  it('does not pair actions whose counterpart needs fields the request never had', () => {
+    expect(byId.addLines!.reversibility).toBe('unknown');
+    expect(byId.removeLines!.reversibility).toBe('unknown');
+  });
+
+  it('does not let a loose top-level route displace a same-route toggle', () => {
+    expect(byId.addTeamRestrictions).toMatchObject({ strategy: 'toggle', inverse: { operationId: 'removeTeamRestrictions' } });
+  });
+});

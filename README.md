@@ -289,7 +289,7 @@ Three commands help fill the gaps:
 | Kubernetes (Swagger 2.0) | 586 | 82% | 91 | 17 | 0.1s |
 | DigitalOcean (hundreds of `$ref` files) | 448 | 60% | 89 | 92 | 10–40s |
 | Stripe | 339 | 39% | 135 | 72 | 0.5s |
-| Asana | 143 | 47% | 9 | 67 | 0.8s |
+| Asana | 143 | 73% | 9 | 29 | 0.8s |
 | Twilio | 94 | 68% | 18 | 12 | 0.1s |
 | Slack (Swagger 2.0, RPC) | 94 | 26% | 11 | 59 | 0.1s |
 

@@ -94,7 +94,8 @@ export type BodyTemplate =
   | { from: 'before-request-keys'; nullMissing?: boolean }
   /** The inverse of an RFC 6902 JSON Patch, computed from `before` for every member the patch touched. */
   | { from: 'before-json-patch' }
-  | { from: 'request' }
+  /** The original request body; with `fields`, only those top-level fields (what the target accepts). */
+  | { from: 'request'; fields?: string[] }
   /** A fixed body, e.g. { state: 'closed' } for soft deletes. */
   | { from: 'literal'; value: unknown };
 

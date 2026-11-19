@@ -807,7 +807,7 @@ function resolveBody(body: BodyTemplate | undefined, sources: Sources): unknown 
   if (!body) return undefined;
   switch (body.from) {
     case 'request':
-      return sources.request;
+      return body.fields ? pick(sources.request, body.fields) : sources.request;
     case 'literal':
       return body.value;
     case 'before':

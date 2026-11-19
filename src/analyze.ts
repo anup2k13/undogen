@@ -226,6 +226,66 @@ function softDeleteOf(index: Index, itemPath: string): { op: Operation; field: s
   return undefined;
 }
 
+/**
+ * The sibling action that undoes `last`: archive <-> unarchive, and compound names
+ * where the leading verb or trailing word flips (addFollowers <-> removeFollowers,
+ * markRead <-> markUnread). The counterpart gets the same body when both take one.
+ */
+function pairedActionPlan(op: Operation, index: Index, parentPath: string, last: string): InversePlan | undefined {
+  const norm = (s: string) => tokenize(s).join('');
+  const words = tokenize(last);
+  const candidates = new Set(counterpartsOf(last.toLowerCase()).map(norm));
+  if (words.length > 1) {
+    const [head, ...rest] = words as [string, ...string[]];
+    for (const c of counterpartsOf(head)) candidates.add([c, ...rest].join(''));
+    const tail = words.at(-1)!;
+    const init = words.slice(0, -1);
+    candidates.add([...init, tail.startsWith('un') ? tail.slice(2) : `un${tail}`].join(''));
+  }
+  candidates.delete(norm(last));
+  const target = index.ops.find((o) => {
+    if (o.method === 'get' || o.id === op.id) return false;
+    const segs = segmentsOf(o.path);
+    return joinPath(segs.slice(0, -1)) === parentPath && candidates.has(norm(segs.at(-1) ?? ''));
+  });
+  if (!target) return undefined;
+  // Only compound names (addTag/removeTag) imply the same arguments; pause/resume take different ones.
+  const acceptsBody = (o: Operation) => !!(o.requestSchema || o.requestExample !== undefined);
+  const sameArgs = words.length > 1 && acceptsBody(op) && acceptsBody(target);
+  // ...and only if what the counterpart requires is in our request (Stripe remove_lines needs line ids add_lines never had).
+  // Both directions: add/remove of members is symmetric; remove_lines (by id) -> add_lines (by content) is not.
+  if (sameArgs && !(providesRequired(op.requestSchema, target.requestSchema) && providesRequired(target.requestSchema, op.requestSchema))) return undefined;
+  const theirs = target.requestSchema?.properties ? Object.keys(target.requestSchema.properties) : undefined;
+  const shared = theirs && op.requestSchema?.properties ? Object.keys(op.requestSchema.properties).filter((k) => theirs.includes(k)) : undefined;
+  const counterpart = segmentsOf(target.path).at(-1)!;
+  return plan(op, 'reversible', 'paired-action', words.length > 1 ? 0.6 : 0.7, {
+    inverse: {
+      operationId: target.id,
+      method: target.method,
+      path: target.path,
+      bindings: bindParams(target.path),
+      body: sameArgs ? (shared ? { from: 'request', fields: shared } : { from: 'request' }) : undefined,
+    },
+    reasons: [`"${last}" is paired with "${counterpart}"`],
+    caveats: [
+      'Paired actions are inverses only if they reset every field the action touched — verify it',
+      ...(sameArgs ? ['Assumes the counterpart takes the same arguments; items that were already present are removed by the undo too'] : []),
+    ],
+  });
+}
+
+/** Does a request matching `source` carry every field `target` requires, recursively (objects and array items)? */
+function providesRequired(source: Schema | undefined, target: Schema | undefined, depth = 0): boolean {
+  if (!target || !source || depth > 3) return true;
+  if (target.items || source.items) return providesRequired(source.items, target.items, depth + 1);
+  const theirs = target.properties ?? {};
+  const ours = source.properties ?? {};
+  if (!source.properties && target.required?.length) return false;
+  for (const r of target.required ?? []) if (source.properties && !(r in ours)) return false;
+  for (const [k, t] of Object.entries(theirs)) if (k in ours && !providesRequired(ours[k], t, depth + 1)) return false;
+  return true;
+}
+
 function counterpartsOf(action: string): string[] {
   const out: string[] = [];
   for (const [a, b] of ACTION_PAIRS) {
@@ -280,9 +340,9 @@ function flatItemDeleteOf(index: Index, opPath: string): Operation | undefined {
   const matches = index.ops.filter((o) => {
     if (o.method !== 'delete') return false;
     const s = segmentsOf(o.path);
-    if (s.length < 3 || s.at(-2) !== last || !isParamSeg(s.at(-1)!)) return false;
+    if (s.length < 2 || s.at(-2) !== last || !isParamSeg(s.at(-1)!)) return false;
     const prefix = s.slice(0, -2);
-    if (prefix[0] !== parent[0]) return false;
+    if (prefix.length && prefix[0] !== parent[0]) return false; // empty prefix: a top-level route (Asana /sections/{gid})
     let j = 0; // prefix must be a subsequence of the parent route
     for (const seg of parent) if (seg === prefix[j]) j++;
     return j === prefix.length;
@@ -486,7 +546,11 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
   if (op.method === 'post' && !lastIsParam) {
     const flatDel = flatItemDeleteOf(index, op.path);
     if (flatDel) {
-      return deleteCreatedPlan(op, flatDel, -0.15, `Creates a resource that ${flatDel.id} removes (flat item route)`);
+      const p = deleteCreatedPlan(op, flatDel, -0.15, `Creates a resource that ${flatDel.id} removes (flat item route)`);
+      // A top-level match (/teams/{id} for POST …/restrictions/teams) is a weak signal: only take it
+      // when the response names the created resource; otherwise let the other rules decide.
+      const topLevel = segmentsOf(flatDel.path).length === 2;
+      if (!(topLevel && p.reversibility === 'unknown')) return p;
     }
   }
 
@@ -544,26 +608,18 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
   }
 
   if (isAction) {
-    for (const counterpart of counterpartsOf(last.toLowerCase())) {
-      const counterpartPath = `${parentPath}/${counterpart}`;
-      const target = MUTATING.map((m) => index.find(m, counterpartPath)).find(Boolean);
-      if (target) {
-        return plan(op, 'reversible', 'paired-action', 0.7, {
-          inverse: {
-            operationId: target.id,
-            method: target.method,
-            path: target.path,
-            bindings: bindParams(target.path),
-          },
-          reasons: [`"${last}" is paired with "${counterpart}"`],
-          caveats: ['Paired actions are inverses only if they reset every field the action touched — verify it'],
-        });
-      }
-    }
+    const paired = pairedActionPlan(op, index, parentPath, last);
+    if (paired) return paired;
     return plan(op, 'unknown', 'none', 0, {
       reasons: [`Action endpoint "${last}" has no recognisable counterpart`],
       caveats: ['Declare one with x-undogen: { inverse: <operationId> }'],
     });
+  }
+
+  // 3b. Actions under a non-item route: POST …/notifications/markRead <-> …/markUnread.
+  if (op.method === 'post' && !lastIsParam && !isCollection) {
+    const paired = pairedActionPlan(op, index, parentPath, last);
+    if (paired) return paired;
   }
 
   if (lastIsParam) {

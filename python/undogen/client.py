@@ -683,7 +683,11 @@ def _resolve_body(body: Optional[dict], sources: dict) -> Any:
         return None
     kind = body["from"]
     if kind == "request":
-        return sources.get("request")
+        req = sources.get("request")
+        fields = body.get("fields")
+        if fields is not None and isinstance(req, dict):
+            return {k: req[k] for k in fields if k in req}
+        return req
     if kind == "literal":
         return body.get("value")
     before = sources.get("before")
