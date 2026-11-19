@@ -168,3 +168,17 @@ describe('verify: pagination and parallel snapshots', () => {
     expect(nextLink('<https://api.x.com/v1/items?page=1>; rel="prev"', 'https://api.x.com/v1')).toBeUndefined();
   });
 });
+
+describe('toHtml', () => {
+  it('escapes every value', async () => {
+    const { toHtml } = await import('../src/index.js');
+    const html = toHtml({
+      ...report,
+      spec: { title: '<img src=x onerror=alert(1)>', version: '1' },
+      results: [{ ...report.results[0]!, outcome: 'failed', detail: '<b>x</b>', diffs: [{ resource: 'GET /x', path: '$.a', before: '<script>', after: 1 }] }],
+    });
+    expect(html).not.toContain('<img src=x');
+    expect(html).not.toContain('<script>');
+    expect(html).toContain('&lt;script&gt;');
+  });
+});

@@ -38,7 +38,7 @@ export {
 export { formatAnalysis, toMarkdown, toBadge } from './report.js';
 export { VERSION } from './version.js';
 export type * from './types.js';
-export { formatResultLine, formatSummary, toJUnit, toSarif, redactReport } from './report.js';
+export { formatResultLine, formatSummary, toJUnit, toSarif, toHtml, redactReport } from './report.js';
 export { annotate, toArazzo, toBundle, toDeclaration, toLink, type AnnotateOptions } from './export.js';
 export { learn, candidateIds, type LearnAttempt, type LearnOptions, type LearnResult } from './learn.js';
 export { initFiles, type InitResult } from './init.js';

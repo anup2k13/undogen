@@ -266,3 +266,93 @@ export function redactReport(report: VerifyReport, options: { all?: boolean } = 
     })),
   };
 }
+
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+/**
+ * A self-contained HTML report (no external assets), e.g. to attach to a CI run.
+ * Every value is escaped; diffs of failed operations are expanded.
+ */
+export function toHtml(report: VerifyReport): string {
+  const s = report.summary;
+  const label: Record<Outcome, string> = { verified: 'Verified', failed: 'Failed', inconclusive: 'Inconclusive', gated: 'Gated', skipped: 'Skipped', error: 'Error' };
+  const tiles = (['verified', 'failed', 'inconclusive', 'gated', 'error', 'skipped'] as Outcome[])
+    .map((o) => `<div class="tile ${o}"><div class="n">${s[o]}</div><div class="l">${label[o]}</div></div>`)
+    .join('');
+  const rows = report.results
+    .map((r) => {
+      const diffs = r.diffs.length
+        ? `<details${r.outcome === 'failed' ? ' open' : ''}><summary>${r.diffs.length} difference(s)</summary><div class="diffwrap"><table class="diffs"><thead><tr><th>Resource</th><th>Path</th><th>Before</th><th>After undo</th></tr></thead><tbody>${r.diffs
+            .map((d) => `<tr><td><code>${esc(d.resource)}</code></td><td><code>${esc(d.path)}</code></td><td><code class="before">${esc(fmt(d.before))}</code></td><td><code class="after">${esc(fmt(d.after))}</code></td></tr>`)
+            .join('')}</tbody></table></div></details>`
+        : '';
+      return `<tr class="${r.outcome}"><td data-label="Result"><span class="badge ${r.outcome}">${label[r.outcome]}</span></td><td data-label="Operation"><code class="id">${esc(r.operationId)}</code></td><td data-label="Route"><code>${esc(`${r.method} ${r.path}`)}</code></td><td data-label="Class">${esc(r.reversibility)}</td><td data-label="Detail">${esc(r.detail)}${diffs}</td></tr>`;
+    })
+    .join('\n');
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reversibility report: ${esc(report.spec.title)}</title>
+<style>
+:root { --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --line: #d1d9e0; --card: #f6f8fa;
+  --ok: #1a7f37; --bad: #cf222e; --warn: #9a6700; --gate: #8250df; }
+@media (prefers-color-scheme: dark) { :root { --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --line: #3d444d; --card: #151b23;
+  --ok: #3fb950; --bad: #f85149; --warn: #d29922; --gate: #ab7df8; } }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 24px 16px 48px; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1100px; margin: 0 auto; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+.meta { color: var(--muted); margin: 0 0 20px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 24px; }
+.tile { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.tile .n { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tile .l { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.tile.verified .n { color: var(--ok); } .tile.failed .n, .tile.error .n { color: var(--bad); }
+.tile.inconclusive .n { color: var(--warn); } .tile.gated .n { color: var(--gate); }
+.scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+th { font-size: 12px; color: var(--muted); font-weight: 600; background: var(--card); }
+tr:last-child > td { border-bottom: 0; }
+code { font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+code.id { overflow-wrap: normal; white-space: nowrap; }
+.diffwrap { overflow-x: auto; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid currentColor; white-space: nowrap; }
+.badge.verified { color: var(--ok); } .badge.failed, .badge.error { color: var(--bad); }
+.badge.inconclusive { color: var(--warn); } .badge.gated { color: var(--gate); } .badge.skipped { color: var(--muted); }
+details { margin-top: 6px; } summary { cursor: pointer; color: var(--muted); }
+table.diffs { margin-top: 6px; border: 1px solid var(--line); border-radius: 6px; }
+table.diffs td, table.diffs th { padding: 4px 8px; }
+.before { color: var(--ok); } .after { color: var(--bad); }
+footer { color: var(--muted); margin-top: 16px; font-size: 12px; }
+@media (max-width: 720px) {
+  .results, .results > tbody { display: block; }
+  .results > thead { display: none; }
+  .results > tbody > tr { display: block; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .results > tbody > tr:last-child { border-bottom: 0; }
+  .results > tbody > tr > td { display: block; border: 0; padding: 2px 0; }
+  .results > tbody > tr > td[data-label]:not(:first-child)::before { content: attr(data-label); display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin-top: 6px; }
+  code.id { white-space: normal; overflow-wrap: anywhere; }
+  table.diffs { min-width: 520px; }
+}
+</style>
+</head>
+<body>
+<main>
+<h1>Reversibility report: ${esc(report.spec.title)} ${esc(report.spec.version)}</h1>
+<p class="meta">undogen ${esc(report.tool.version)} against <code>${esc(report.baseUrl)}</code> · ${esc(report.finishedAt)}</p>
+<div class="tiles">${tiles}</div>
+<div class="scroll"><table class="results">
+<thead><tr><th>Result</th><th>Operation</th><th>Route</th><th>Class</th><th>Detail</th></tr></thead>
+<tbody>
+${rows}
+</tbody>
+</table></div>
+<footer>An inverse is verified only when the state after the operation and its undo is equivalent to the state before. Gated operations are never executed.</footer>
+</main>
+</body>
+</html>
+`;
+}

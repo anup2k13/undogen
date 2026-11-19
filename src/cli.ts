@@ -7,7 +7,7 @@ import { analyze } from './analyze.js';
 import { annotate, toArazzo, toBundle } from './export.js';
 import { initFiles, mergeKeepingExisting } from './init.js';
 import { learn } from './learn.js';
-import { c, formatAnalysis, formatResultLine, formatSummary, redactReport, toBadge, toJUnit, toMarkdown, toSarif } from './report.js';
+import { c, formatAnalysis, formatResultLine, formatSummary, redactReport, toBadge, toHtml, toJUnit, toMarkdown, toSarif } from './report.js';
 import { FileJournalStore, UndoableClient } from './runtime.js';
 import { loadSpec } from './spec.js';
 import { describeEntry } from './tools.js';
@@ -42,7 +42,7 @@ ${c.bold('Common options')}
 ${c.bold('verify')}
   --fixtures <file>      Per-operation params, bodies, prepare steps, skips
   --ignore <a,b,...>     Extra fields that may legitimately differ (default: timestamps, etags)
-  --report <dir>         Write report.json, report.md and badge.json to <dir>
+  --report <dir>         Write report.json, report.md, report.html and badge.json to <dir>
   --junit <file>         Write JUnit XML          --sarif <file>   Write SARIF 2.1.0 (code scanning)
   --redact               Mask every value in written reports (secret-looking keys are always masked)
   --strict               Exit 1 on inconclusive results too
@@ -259,6 +259,7 @@ async function main(argv: string[]) {
         await writeFile(join(values.report, 'report.json'), JSON.stringify(report, null, 2));
         await writeFile(join(values.report, 'report.md'), toMarkdown(report));
         await writeFile(join(values.report, 'badge.json'), JSON.stringify(toBadge(report)));
+        await writeFile(join(values.report, 'report.html'), toHtml(report));
         console.log(c.dim(`  Reports written to ${values.report}/`));
       }
       if (values.junit) {

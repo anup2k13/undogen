@@ -99,7 +99,7 @@ For each write operation, `verify`:
 - **never executes** operations classified as irreversible;
 - **deletes everything it created** afterwards (`--keep` to inspect it).
 
-The exit code is `1` when any inverse fails (`--strict`: or is inconclusive), so it works as a CI gate. `--report` writes `report.json`, `report.md`, and a [shields.io endpoint badge](https://shields.io/badges/endpoint-badge) (`badge.json`); `--junit` and `--sarif` write JUnit XML and SARIF 2.1.0 for CI test views and code scanning. Values under secret-looking keys are always masked in reports; `--redact` masks everything.
+The exit code is `1` when any inverse fails (`--strict`: or is inconclusive), so it works as a CI gate. `--report` writes `report.json`, `report.md`, a self-contained `report.html`, and a [shields.io endpoint badge](https://shields.io/badges/endpoint-badge) (`badge.json`); `--junit` and `--sarif` write JUnit XML and SARIF 2.1.0 for CI test views and code scanning. Values under secret-looking keys are always masked in reports; `--redact` masks everything.
 
 On a shared sandbox, `--scoped-only` snapshots only routes scoped to the resources verify created, so other people's activity can't fail the run.
 
