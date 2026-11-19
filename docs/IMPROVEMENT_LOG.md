@@ -5,7 +5,10 @@ committed, and pushed; this file records what was done and what is next.
 
 ## Backlog (highest value first)
 
-
+- [ ] Release check: `npm pack` + install the tarball in a clean directory, run the CLI and MCP server; build the Python sdist/wheel
+- [ ] Analyzer: compound action pairs (Asana addTag/removeTag, addFollowers/removeFollowers); look at Asana and Slack unknowns
+- [ ] Docs: tighten Limits (conflict checks cover what undo writes; paired actions/toggles are unchecked)
+- [ ] verify: self-contained HTML report
 ## Done
 
 - **Self-review fixes** (19 Nov): an irreversible call (e.g. a reminder about a todo) no longer blocks undoing what it used; a client constructed directly on an existing journal file loads it first instead of reusing sequence numbers (which silently overwrote entries); POST undos are no longer retried after a timeout/5xx (could re-create twice when the API ignores idempotency keys); header parameters are exposed in agent tools (TS + Python).
@@ -18,3 +21,4 @@ committed, and pushed; this file records what was done and what is next.
 - **JSON Patch + Merge Patch** (19 Nov, TS + Python): `application/json-patch+json` PATCHes get an inverse patch computed from the captured state (`add` restores each touched member, `remove` drops members the patch created; whole-document patches restore the document); conflict checks compare the touched members. `application/merge-patch+json` undo sends `null` for keys the patch added.
 - **Speed** (19 Nov): JSON specs are parsed with `JSON.parse` instead of the YAML parser (GitHub 4.1s → 0.3s), schema normalization is memoized per shared schema (Stripe 1.1s → 0.2s), and the analyzer indexes operations by id and item route (GitHub analyze 290ms → 46ms). Checked against the previous commit: 0 differences across 1,870 plans from six real APIs.
 - **Examples + PATCH caveat** (19 Nov): `examples/mcp`, `examples/python/agent_session.py` (run by the Python tests), `examples/github-workflow/undogen.yml` (checked against action.yml inputs); plans for plain-JSON PATCH restores now warn that fields the call adds are not removed.
+- **Security** (19 Nov, TS + Python): agent tools pass only the operation's declared header parameters (a tool call could previously replace the configured `Authorization` header or set any header); journal files are created with mode 0600 since they hold request and response bodies.

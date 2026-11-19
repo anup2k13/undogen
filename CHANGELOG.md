@@ -10,6 +10,7 @@
 - Bulk `DELETE` on a collection is gated as irreversible.
 
 ### Runtime
+- Journal files are created readable by their owner only (0600). Agent tools accept only the header parameters an operation declares, so a tool call cannot replace the configured credentials.
 - Persistent journals (`JournalStore`, `FileJournalStore`, `UndoableClient.open()`), undo by seq, `undogen undo` and `undogen journal`.
 - Dependency-aware undo (`DependencyError`, `{ cascade: true }`), id remapping after re-creation, opt-in child re-creation (`restoreChildren`, `--restore-children`), recursive up to three levels (projects → tasks → notes).
 - `Idempotency-Key` on undo requests; retries for `429` (honouring `Retry-After`), timeouts and `5xx`; per-request timeouts; entry status (`active`, `undone`, `failed`, `conflict`).

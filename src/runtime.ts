@@ -185,7 +185,8 @@ export class FileJournalStore implements JournalStore {
   }
   async save(entry: JournalEntry) {
     await mkdir(dirname(this.path), { recursive: true });
-    await appendFile(this.path, JSON.stringify(entry) + '\n');
+    // Entries hold request and response bodies: keep the file readable by its owner only.
+    await appendFile(this.path, JSON.stringify(entry) + '\n', { mode: 0o600 });
   }
 }
 

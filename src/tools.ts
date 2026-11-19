@@ -120,6 +120,21 @@ function inputSchemaFor(op: Operation): ToolDefinition['inputSchema'] {
   return { type: 'object', properties, required };
 }
 
+/**
+ * Only the header parameters the operation declares: an agent must not be able to
+ * replace the configured Authorization header (or set any other header) through a tool call.
+ */
+function declaredHeaders(op: Operation, given: unknown): Record<string, string> | undefined {
+  if (!given || typeof given !== 'object') return undefined;
+  const allowed = new Map(op.headerParams.map((h) => [h.name.toLowerCase(), h.name]));
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(given as Record<string, unknown>)) {
+    const name = allowed.get(k.toLowerCase());
+    if (name && v !== undefined && v !== null) out[name] = String(v);
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 /** Summarise a journal entry for an agent: what ran and what undo would do. */
 export function describeEntry(e: JournalEntry) {
   return {
@@ -166,7 +181,7 @@ export function toolDefinitions(client: UndoableClient, operations: Operation[],
           await client.call(op.id, {
             params,
             query: args.query as Record<string, string | number | boolean> | undefined,
-            headers: args.headers ? Object.fromEntries(Object.entries(args.headers as Record<string, unknown>).map(([k, v]) => [k, String(v)])) : undefined,
+            headers: declaredHeaders(op, args.headers),
             body: args.body,
           }),
         );

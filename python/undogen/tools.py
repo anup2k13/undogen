@@ -138,7 +138,10 @@ def tool_definitions(
 
         def execute(_op: dict = op, approved: bool = False, **args: Any) -> dict:
             params = {p: args[p] for p in _op["pathParams"] if p in args}
-            headers = {k: str(v) for k, v in (args.get("headers") or {}).items()} or None
+            # Only declared header parameters: a tool call must not override Authorization or other headers.
+            allowed = {h["name"].lower(): h["name"] for h in _op.get("headerParams") or []}
+            given = args.get("headers") if isinstance(args.get("headers"), dict) else {}
+            headers = {allowed[k.lower()]: str(v) for k, v in given.items() if k.lower() in allowed and v is not None} or None
             res = client.call(_op["id"], params=params, body=args.get("body"), query=args.get("query"), headers=headers, approved=approved)
             out = {"status": res["status"], "data": res["data"]}
             if res.get("entry"):

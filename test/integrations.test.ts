@@ -291,3 +291,35 @@ describe('tools: undogen_preview', () => {
     expect(calls).toEqual([]);
   });
 });
+
+describe('security', () => {
+  it('tools only pass declared header parameters, so an agent cannot replace Authorization', async () => {
+    const s = parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'x', version: '1' },
+      paths: { '/things': { get: { operationId: 'listThings', parameters: [{ name: 'X-Tenant', in: 'header', schema: { type: 'string' } }], responses: {} } } },
+    });
+    const seen: Record<string, string>[] = [];
+    const f: typeof fetch = async (_u, init) => {
+      seen.push(init!.headers as Record<string, string>);
+      return new Response('[]');
+    };
+    const client = new UndoableClient({ spec: s, baseUrl: 'http://x', fetch: f, headers: { authorization: 'Bearer configured' } });
+    const [tool] = toolDefinitions(client, s.operations, { undoTools: false });
+    await tool!.execute({ headers: { authorization: 'Bearer agent', 'x-tenant': 'acme', cookie: 'a=b' } });
+    expect(seen[0]).toMatchObject({ authorization: 'Bearer configured', 'X-Tenant': 'acme' });
+    expect(seen[0]!.cookie).toBeUndefined();
+  });
+
+  it('creates journal files readable by their owner only', async () => {
+    const { mkdtemp, stat, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { FileJournalStore } = await import('../src/runtime.js');
+    const d = await mkdtemp(join(tmpdir(), 'undogen-perm-'));
+    const client = new UndoableClient({ spec, baseUrl: server.url, store: new FileJournalStore(join(d, 'j.jsonl')) });
+    await client.call('createTodo', { body: { title: 'secret' } });
+    expect((await stat(join(d, 'j.jsonl'))).mode & 0o777).toBe(0o600);
+    await rm(d, { recursive: true, force: true });
+  });
+});

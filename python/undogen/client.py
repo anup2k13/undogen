@@ -121,7 +121,9 @@ class FileJournalStore:
         directory = os.path.dirname(self.path)
         if directory:
             os.makedirs(directory, exist_ok=True)
-        with open(self.path, "a", encoding="utf-8") as f:
+        # Entries hold request and response bodies: create the file readable by its owner only.
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
 

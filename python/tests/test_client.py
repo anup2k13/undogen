@@ -193,3 +193,26 @@ def test_example_agent_session(bundle_path, server_url, capsys):
     out = capsys.readouterr().out
     assert "blocked: sendReminder needs approval (sendReminder was refused)" in out
     assert "rolled back 2 writes, 0 failed" in out
+
+
+def test_journal_file_is_owner_only(bundle_path, server_url, tmp_path):
+    import os
+    import stat
+
+    path = str(tmp_path / "j.jsonl")
+    UndoableClient(bundle_path, server_url, store=FileJournalStore(path)).call("createTodo", body={"title": "secret"})
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
+def test_tools_only_send_declared_headers(bundle_path, server_url):
+    import json as _json
+
+    data = _json.load(open(bundle_path))
+    for op in data["operations"]:
+        if op["id"] == "listTodos":
+            op["headerParams"] = [{"name": "X-Tenant", "required": False}]
+    sent = []
+    client = UndoableClient(data, server_url, headers={"authorization": "Bearer configured"}, before_request=lambda r: sent.append(dict(r.headers)))
+    tool = next(t for t in tool_definitions(client) if t.name == "listTodos")
+    tool.execute(headers={"authorization": "Bearer agent", "x-tenant": "acme", "cookie": "a=b"})
+    assert sent[0]["authorization"] == "Bearer configured" and sent[0]["X-Tenant"] == "acme" and "cookie" not in sent[0]
