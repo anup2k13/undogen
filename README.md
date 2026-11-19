@@ -153,6 +153,37 @@ await client.undo(entry, { force: true }); // when you really mean it
 
 A created resource that someone already deleted counts as undone, and nothing gets sent.
 
+### 4. Give any MCP agent an undo button
+
+`undogen mcp` serves an OpenAPI-described API as [MCP](https://modelcontextprotocol.io) tools. Every write goes through the journal, and the agent gets three extra tools:
+
+| Tool | What it does |
+|---|---|
+| `undogen_undo` | Revert the latest write (or one by `seq`). Refuses on conflict and reports what changed. |
+| `undogen_undo_all` | Roll back the whole session, newest first. |
+| `undogen_journal` | List what the agent changed and how each change can be undone. |
+
+```json
+{
+  "mcpServers": {
+    "todo-api": {
+      "command": "npx",
+      "args": ["-y", "undogen", "mcp", "./openapi.yaml",
+               "--base-url", "https://api.example.com",
+               "--header", "authorization: Bearer ${API_TOKEN}",
+               "--journal", "./agent-run.jsonl"]
+    }
+  }
+}
+```
+
+This works with any MCP client (Cursor, VS Code, Codex, and others):
+
+- **Tool descriptions say what can be undone**, so the model knows before it acts ("Reversible: Undo restores the previous values", "Compensable: re-created under a new id"…).
+- **Irreversible operations are hidden** unless you pass `--allow-irreversible`. When exposed, they carry MCP's `destructiveHint`, so clients ask the user first.
+- **Conflicts come back as tool errors**, with the exact fields someone else changed, so the agent can ask before forcing.
+- **The journal outlives the session**: `undogen undo --journal agent-run.jsonl --all` rolls back from your terminal.
+
 ## How the compiler works
 
 | Pattern in the spec | Strategy | Inverse |
@@ -225,7 +256,7 @@ The compiled plans are hypotheses. `verify` is what turns them into facts.
 
 ## Roadmap
 
-- MCP proxy mode: put verified undo in front of any MCP server built from an OpenAPI spec
+- Wrap existing MCP servers (not just OpenAPI APIs) with journaling and undo
 - Learning bindings from verification runs (turning `unknown` into `verified` automatically)
 - Swagger 2.0, external `$ref`s, GraphQL mutations
 

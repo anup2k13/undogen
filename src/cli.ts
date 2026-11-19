@@ -16,6 +16,7 @@ ${c.bold('undogen')} ${c.dim(VERSION)} — compile undo operations from an OpenA
 ${c.bold('Usage')}
   undogen analyze <spec> [--json] [--overrides <file>]
   undogen verify  <spec> --base-url <url> [options]
+  undogen mcp     <spec> --base-url <url> [--journal <file>] [--header <k:v>] [--allow-irreversible]
   undogen journal <file>
   undogen undo    --journal <file> --base-url <url> [--seq <n> | --all] [--force] [--header <k:v>]
 
@@ -34,6 +35,8 @@ ${c.bold('verify')}    Run each operation and its inverse against a test server,
   --report <dir>         Write report.json, report.md and badge.json to <dir>
   --no-seed              Don't seed child resources (disables cascade detection)
   Exit code is 1 when any inverse fails verification.
+
+${c.bold('mcp')}       Serve the API as MCP tools over stdio, with every write journaled and undoable.
 
 ${c.bold('journal')}   Show what a journal recorded: each write, its inverse, and whether it was undone.
 
@@ -71,6 +74,7 @@ async function main(argv: string[]) {
       seq: { type: 'string' },
       all: { type: 'boolean' },
       force: { type: 'boolean' },
+      'allow-irreversible': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
@@ -131,6 +135,21 @@ async function main(argv: string[]) {
 
   if (command === 'analyze') {
     console.log(values.json ? JSON.stringify(analysis, null, 2) : formatAnalysis(analysis));
+    return;
+  }
+
+  if (command === 'mcp') {
+    const baseUrl = values['base-url'];
+    if (!baseUrl) throw new Error('mcp needs --base-url');
+    const { serveStdio } = await import('./mcp.js');
+    await serveStdio({
+      spec,
+      plans: analysis.plans,
+      baseUrl,
+      headers,
+      journalFile: values.journal,
+      allowIrreversible: !!values['allow-irreversible'],
+    });
     return;
   }
 

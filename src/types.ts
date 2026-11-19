@@ -24,6 +24,8 @@ export interface Operation {
   pathParams: string[];
   requestSchema?: Schema;
   requestExample?: unknown;
+  /** requestBody.required in the spec. */
+  requestRequired?: boolean;
   responseSchema?: Schema;
   /** Vendor extensions (x-*) declared on the operation. */
   extensions: Record<string, unknown>;

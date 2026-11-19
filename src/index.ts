@@ -29,3 +29,4 @@ export { diffStates, diffValues } from './diff.js';
 export { formatAnalysis, formatJournal, toMarkdown, toBadge } from './report.js';
 export { VERSION } from './version.js';
 export type * from './types.js';
+export { createMcpServer, serveStdio, type McpOptions } from './mcp.js';

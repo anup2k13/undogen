@@ -66,6 +66,7 @@ export function parseSpec(input: string | object): ApiSpec {
         pathParams: pathParamsOf(path),
         requestSchema: mergeAllOf(requestContent?.schema),
         requestExample: requestContent?.example ?? firstExample(requestContent?.examples),
+        requestRequired: op.requestBody?.required === true,
         responseSchema: mergeAllOf(responseContent?.schema),
         extensions,
       });
