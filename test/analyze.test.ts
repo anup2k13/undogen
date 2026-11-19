@@ -573,3 +573,29 @@ describe('analyze: restore actions and plural/singular siblings', () => {
     expect(byId.removeSubIssue!.inverse!.operationId).toBe('addSubIssue');
   });
 });
+
+describe('analyze: Kubernetes pod subresources', () => {
+  const spec = parseSpec({
+    swagger: '2.0',
+    info: { title: 'k8s', version: '1' },
+    paths: {
+      '/api/v1/namespaces/{namespace}/pods/{name}/proxy': { post: { operationId: 'connectCoreV1PostNamespacedPodProxy', responses: { '200': { description: '' } } } },
+      '/api/v1/namespaces/{namespace}/pods/{name}/proxy/{path}': {
+        post: { operationId: 'connectCoreV1PostNamespacedPodProxyWithPath', responses: { '200': { description: '' } } },
+        delete: { operationId: 'connectCoreV1DeleteNamespacedPodProxyWithPath', responses: { '200': { description: '' } } },
+      },
+      '/api/v1/namespaces/{namespace}/pods/{name}/exec': { post: { operationId: 'connectCoreV1PostNamespacedPodExec', responses: { '200': { description: '' } } } },
+      '/api/v1/namespaces/{namespace}/pods/{name}/eviction': { post: { operationId: 'createCoreV1NamespacedPodEviction', responses: { '200': { description: '' } } } },
+    },
+  });
+  const byId = Object.fromEntries(analyze(spec).plans.map((p) => [p.operationId, p]));
+
+  it('never treats a proxied request as a create that DELETE undoes', () => {
+    expect(byId.connectCoreV1PostNamespacedPodProxy!.reversibility).toBe('irreversible');
+  });
+
+  it('gates exec and eviction', () => {
+    expect(byId.connectCoreV1PostNamespacedPodExec!.reversibility).toBe('irreversible');
+    expect(byId.createCoreV1NamespacedPodEviction!.reversibility).toBe('irreversible');
+  });
+});

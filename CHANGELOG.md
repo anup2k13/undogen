@@ -8,7 +8,7 @@
 - **Verify can no longer pass a no-op.** A snapshot between the operation and its undo must show a change; otherwise the result is `inconclusive`. Previously an operation that changed nothing was reported as `verified`.
 - **Irreversible verbs anywhere in the name or summary.** `createAndSendInvoice` and "Creates an invoice and emails it" are now gated (they were classified reversible). Negations ("without notifying") are respected; descriptions add caveats.
 - **Replay guard.** An identical irreversible call is refused a second time (`ReplayBlockedError`), including across restarts with a persisted journal.
-- Bulk `DELETE` on a collection is gated as irreversible.
+- Bulk `DELETE` on a collection is gated as irreversible. Kubernetes pod/service/node `proxy` and `exec` are gated (proxy was taken for a create undone by DELETE).
 
 ### Runtime
 - CLI output piped into a command that closes early (`| head`) no longer crashes with EPIPE.

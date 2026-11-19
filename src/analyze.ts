@@ -50,6 +50,7 @@ const IRREVERSIBLE_VERBS = new Set([
   'send', 'email', 'mail', 'notify', 'sms', 'broadcast', 'charge', 'pay', 'payout',
   'transfer', 'refund', 'purge', 'wipe', 'shred', 'deliver', 'dispatch', 'execute', 'remind',
   'cancel', 'merge', 'revoke', 'rerun', 'rerequest', 'ping', 'redeliver', 'dismiss', 'trigger',
+  'exec', 'proxy', // run a command in a container, or forward an arbitrary request: effects are unknowable
 ]);
 
 /**
@@ -83,6 +84,7 @@ const SIDE_EFFECT_FREE_VERBS = new Set([
 const ONE_WAY_VERBS = new Set([
   'void', 'expire', 'finalize', 'capture', 'confirm', 'submit', 'reverse', 'reject', 'decline', 'fail',
   'redact', 'complete', 'accept', 'approve', 'advance', 'migrate', 'delete', 'destroy', 'erase', 'revoke',
+  'evict', 'eviction',
 ]);
 
 /** Values of a state/status field that mean "this is gone" for APIs without DELETE. */
