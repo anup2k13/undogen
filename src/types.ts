@@ -135,6 +135,8 @@ export interface ChildPlan {
   param: string;
   /** Field holding a child's id, both in list items and in the create response. */
   idKey: string;
+  /** This child's own child collections (grandchildren), a few levels deep. */
+  children?: ChildPlan[];
 }
 
 /** The compiled undo recipe for one mutating operation. */

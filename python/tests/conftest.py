@@ -63,3 +63,26 @@ def get(url: str):
             return r.status, json.loads(r.read() or b"null")
     except urllib.error.HTTPError as e:
         return e.code, None
+
+
+@pytest.fixture(scope="session")
+def projects(tmp_path_factory):
+    """The three-level projects API (test/fixtures/projects-server.ts) and a restore-children bundle for it."""
+    d = tmp_path_factory.mktemp("projects")
+    spec = d / "projects.json"
+    script = "import('./test/fixtures/projects-server.ts').then(m => process.stdout.write(JSON.stringify(m.projectsSpec)))"
+    spec.write_text(subprocess.run([str(TSX), "-e", script], cwd=ROOT, check=True, capture_output=True, text=True).stdout)
+    bundle = d / "bundle.json"
+    subprocess.run([str(TSX), str(ROOT / "src/cli.ts"), "compile", str(spec), "--restore-children", "-o", str(bundle)], cwd=ROOT, check=True)
+    port = _free_port()
+    proc = subprocess.Popen([str(TSX), str(ROOT / "test/fixtures/projects-server.ts"), str(port)], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    url = f"http://127.0.0.1:{port}"
+    for _ in range(100):
+        try:
+            urllib.request.urlopen(url + "/projects", timeout=1)
+            break
+        except Exception:
+            time.sleep(0.1)
+    yield str(bundle), url
+    proc.terminate()
+    proc.wait(timeout=5)

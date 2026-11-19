@@ -39,6 +39,8 @@ export interface CapturedChildren {
   plan: ChildPlan;
   params: Record<string, Scalar>;
   items: unknown[];
+  /** Grandchildren: itemChildren[i] belongs to items[i]. */
+  itemChildren?: CapturedChildren[][];
 }
 
 /**
@@ -342,13 +344,7 @@ export class UndoableClient {
       else if (snap.status < 300) before = snap.data ?? {};
       else throw new Error(`Capture before ${operationId} failed: HTTP ${snap.status}`);
       captured = true;
-      if (before !== null && plan.children?.length) {
-        children = [];
-        for (const child of plan.children) {
-          const res = await this.request('get', resolvePath(child.list, pre), { query: resolveQuery(child.list, pre) });
-          if (res.status < 300 && Array.isArray(res.data)) children.push({ plan: child, params: { ...params }, items: res.data });
-        }
-      }
+      if (before !== null && plan.children?.length) children = await this.captureChildren(plan.children, params);
     }
 
     const path = fillPath(op.path, params);
@@ -631,11 +627,36 @@ export class UndoableClient {
     throw new ConflictError(target, conflicts, res);
   }
 
-  private async restoreChildren(target: JournalEntry) {
+  /** List each child collection (and, recursively, each child's own collections) before a delete. */
+  private async captureChildren(plans: ChildPlan[], params: Record<string, Scalar>): Promise<CapturedChildren[]> {
+    const out: CapturedChildren[] = [];
+    for (const child of plans) {
+      let path: string;
+      try {
+        path = fillPath(child.list.path, params);
+      } catch {
+        continue;
+      }
+      const res = await this.request('get', path);
+      if (res.status >= 300 || !Array.isArray(res.data)) continue;
+      const group: CapturedChildren = { plan: child, params: { ...params }, items: res.data };
+      if (child.children?.length) {
+        group.itemChildren = [];
+        for (const item of res.data) {
+          const id = getPath(item, child.idKey) as Scalar | undefined;
+          group.itemChildren.push(id === undefined ? [] : await this.captureChildren(child.children, { ...params, [child.param]: id }));
+        }
+      }
+      out.push(group);
+    }
+    return out;
+  }
+
+  private async restoreChildren(target: JournalEntry, groups: CapturedChildren[] = target.children ?? []) {
     const warnings: string[] = [];
-    for (const group of target.children ?? []) {
+    for (const group of groups) {
       const params = this.remapParams(group.params);
-      for (const item of group.items) {
+      for (const [index, item] of group.items.entries()) {
         const body = resolveBody(group.plan.create.body, { params, query: {}, before: item });
         let path: string;
         try {
@@ -653,6 +674,9 @@ export class UndoableClient {
         const oldId = getPath(item, group.plan.idKey) as Scalar | undefined;
         const newId = getPath(res.data, group.plan.idKey) as Scalar | undefined;
         if (oldId !== undefined && newId !== undefined) this.recordId(target, group.plan.param, oldId, newId);
+        // Grandchildren: their captured params name the old child id, which now remaps to the new one.
+        const nested = group.itemChildren?.[index];
+        if (nested?.length) await this.restoreChildren(target, nested);
       }
     }
     if (warnings.length) target.undoWarnings = [...(target.undoWarnings ?? []), ...warnings];

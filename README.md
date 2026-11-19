@@ -306,13 +306,13 @@ The compiled plans are hypotheses. `verify` is what turns them into facts. Confi
 - Inverses are **compensations**, not distributed transactions. Webhooks that already fired, emails a server sent as a side effect, and things people saw in the meantime are outside any API's reach. undogen's job is to make that boundary explicit.
 - Verification can only see state that the API exposes through `GET` routes. Lists are followed through `Link: rel="next"` pagination up to `--max-pages` (5); cursor tokens in response bodies are not followed.
 - Conflict detection compares the top-level fields the agent wrote. Changes made through other fields, or nested inside a field the agent didn't send, are not detected unless the API sends ETags.
-- `--restore-children` re-creates one level of children; grandchildren are not captured.
+- `--restore-children` captures up to three levels (children, grandchildren, great-grandchildren) and only through list routes that return arrays.
 - The Python client sends multipart bodies as JSON.
 
 ## Roadmap
 
 - Calibrate confidence scores from `verify` results across many APIs
-- Deeper child capture (grandchildren) and field-level conflict detection for nested objects
+- Field-level conflict detection for nested objects
 - GraphQL mutations
 - A hosted registry of reviewed `x-undogen` declarations for popular APIs
 

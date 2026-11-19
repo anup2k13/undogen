@@ -140,3 +140,17 @@ def test_preview_tool(bundle_path, server_url):
     assert p["undo"] == "PATCH /todos/{todoId} (body: the captured values of the fields sent)"
     assert p["capture"] == "GET /todos/{todoId}" and p["needsApproval"] is False
     assert tools["undogen_preview"].execute(tool="sendReminder")["needsApproval"] is True
+
+
+def test_restore_grandchildren(projects):
+    bundle, url = projects
+    setup = UndoableClient(bundle, url)
+    p = setup.call("createProject", body={"title": "launch"})["data"]["id"]
+    t = setup.call("createTask", params={"projectId": p}, body={"title": "design"})["data"]["id"]
+    setup.call("createNote", params={"projectId": p, "taskId": t}, body={"title": "use blue"})
+    agent = UndoableClient(bundle, url)
+    agent.call("deleteProject", params={"projectId": p})
+    agent.undo()
+    np, nt = agent.remap_id("projectId", p), agent.remap_id("taskId", t)
+    assert [x["title"] for x in get(f"{url}/projects/{np}/tasks")[1]] == ["design"]
+    assert [x["title"] for x in get(f"{url}/projects/{np}/tasks/{nt}/notes")[1]] == ["use blue"]

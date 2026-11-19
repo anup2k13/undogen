@@ -304,11 +304,7 @@ class UndoableClient:
                 raise UndogenError(f"Capture before {operation_id} failed: HTTP {snap['status']}")
             captured = True
             if before is not None and plan.get("children"):
-                children = []
-                for child in plan["children"]:
-                    res = self.request("get", self._resolve_path(child["list"], sources))
-                    if res["status"] < 300 and isinstance(res["data"], list):
-                        children.append({"plan": child, "params": dict(params), "items": res["data"]})
+                children = self._capture_children(plan["children"], params)
 
         path = fill_path(op["path"], params)
         response = self.request(op["method"], path, query=query, headers=headers, body=body, content_type=op.get("requestContentType"))
@@ -577,11 +573,31 @@ class UndoableClient:
         params = self._remap_params(req["params"])
         return {**req, "params": params, "path": fill_path(req["pathTemplate"], params)}
 
-    def _restore_children(self, target: dict) -> None:
-        for group in target.get("children") or []:
+    def _capture_children(self, plans: List[dict], params: Dict[str, Scalar]) -> List[dict]:
+        out = []
+        for child in plans:
+            try:
+                path = fill_path(child["list"]["path"], params)
+            except UndogenError:
+                continue
+            res = self.request("get", path)
+            if res["status"] >= 300 or not isinstance(res["data"], list):
+                continue
+            group: Dict[str, Any] = {"plan": child, "params": dict(params), "items": res["data"]}
+            if child.get("children"):
+                nested = []
+                for item in res["data"]:
+                    cid = get_path(item, child["idKey"])
+                    nested.append([] if cid is None else self._capture_children(child["children"], {**params, child["param"]: cid}))
+                group["itemChildren"] = nested
+            out.append(group)
+        return out
+
+    def _restore_children(self, target: dict, groups: Optional[List[dict]] = None) -> None:
+        for group in target.get("children") or [] if groups is None else groups:
             params = self._remap_params(group["params"])
             create = group["plan"]["create"]
-            for item in group["items"]:
+            for index, item in enumerate(group["items"]):
                 fields = create["body"]["fields"]
                 body = item if fields == "*" else {k: item[k] for k in fields if isinstance(item, dict) and k in item}
                 op = self.bundle.operations.get(create["operationId"], {})
@@ -592,6 +608,9 @@ class UndoableClient:
                 old, new = get_path(item, group["plan"]["idKey"]), get_path(res["data"], group["plan"]["idKey"])
                 if old is not None and new is not None:
                     self._record_id(target, group["plan"]["param"], old, new)
+                nested = (group.get("itemChildren") or [None] * len(group["items"]))[index]
+                if nested:
+                    self._restore_children(target, nested)
 
     def _lookup(self, ref: dict, sources: dict) -> Any:
         if ref["from"] == "location":

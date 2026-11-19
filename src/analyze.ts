@@ -699,7 +699,9 @@ function finishPlan(p: InversePlan, op: Operation, index: Index): InversePlan {
 }
 
 /** Child collections of an item route that can be listed and re-created: /todos/{todoId}/comments. */
-function childPlansOf(index: Index, itemPath: string): ChildPlan[] {
+const MAX_CHILD_DEPTH = 3;
+
+function childPlansOf(index: Index, itemPath: string, depth = 1): ChildPlan[] {
   const out: ChildPlan[] = [];
   for (const list of index.ops) {
     if (list.method !== 'get') continue;
@@ -720,10 +722,13 @@ function childPlansOf(index: Index, itemPath: string): ChildPlan[] {
       },
       param,
       idKey: idFieldFor(param, create.responseSchema).key,
+      children: depth < MAX_CHILD_DEPTH ? nonEmpty(childPlansOf(index, childItem, depth + 1)) : undefined,
     });
   }
   return out;
 }
+
+const nonEmpty = <T>(xs: T[]) => (xs.length ? xs : undefined);
 
 export interface AnalyzeOptions {
   /** Declarations for specs you don't control, keyed by operationId. */

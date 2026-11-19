@@ -11,7 +11,7 @@
 
 ### Runtime
 - Persistent journals (`JournalStore`, `FileJournalStore`, `UndoableClient.open()`), undo by seq, `undogen undo` and `undogen journal`.
-- Dependency-aware undo (`DependencyError`, `{ cascade: true }`), id remapping after re-creation, opt-in child re-creation (`restoreChildren`, `--restore-children`).
+- Dependency-aware undo (`DependencyError`, `{ cascade: true }`), id remapping after re-creation, opt-in child re-creation (`restoreChildren`, `--restore-children`), recursive up to three levels (projects → tasks → notes).
 - `Idempotency-Key` on undo requests; retries for `429` (honouring `Retry-After`), timeouts and `5xx`; per-request timeouts; entry status (`active`, `undone`, `failed`, `conflict`).
 - Query parameters, form and multipart bodies, header functions and a `beforeRequest` hook.
 

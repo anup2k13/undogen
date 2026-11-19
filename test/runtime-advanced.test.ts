@@ -387,3 +387,35 @@ describe('review fixes', () => {
     expect(calls.filter((m) => m === 'POST')).toHaveLength(1);
   });
 });
+
+describe('restoreChildren: grandchildren', () => {
+  it('re-creates tasks and their notes after a cascading project delete', async () => {
+    const { startProjectsServer, projectsSpec } = await import('./fixtures/projects-server.js');
+    const api = await startProjectsServer();
+    try {
+      const s = parseSpec(projectsSpec);
+      const setup = new UndoableClient({ spec: s, baseUrl: api.url });
+      const p = idOf(await setup.call('createProject', { body: { title: 'launch' } }));
+      const t1 = idOf(await setup.call('createTask', { params: { projectId: p }, body: { title: 'design' } }));
+      const t2 = idOf(await setup.call('createTask', { params: { projectId: p }, body: { title: 'build' } }));
+      await setup.call('createNote', { params: { projectId: p, taskId: t1 }, body: { title: 'use blue' } });
+      await setup.call('createNote', { params: { projectId: p, taskId: t2 }, body: { title: 'ship friday' } });
+
+      const agent = new UndoableClient({ spec: s, baseUrl: api.url, restoreChildren: true });
+      await agent.call('deleteProject', { params: { projectId: p } });
+      expect(api.tables.notes!.size).toBe(0);
+      await agent.undo();
+
+      const np = agent.remapId('projectId', p);
+      const tasks = (await agent.call('listTasks', { params: { projectId: np } })).data as Array<{ id: string; title: string }>;
+      expect(tasks.map((t) => t.title)).toEqual(['design', 'build']);
+      const notesOf = async (taskId: string) =>
+        ((await agent.call('listNotes', { params: { projectId: np, taskId } })).data as Array<{ title: string }>).map((n) => n.title);
+      expect(await notesOf(agent.remapId('taskId', t1) as string)).toEqual(['use blue']);
+      expect(await notesOf(agent.remapId('taskId', t2) as string)).toEqual(['ship friday']);
+      expect(agent.journal[0]!.undoWarnings).toBeUndefined();
+    } finally {
+      await api.close();
+    }
+  });
+});
