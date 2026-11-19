@@ -29,11 +29,13 @@ def to_openai_agents_tools(
     include_reads: bool = True,
     undo_tools: bool = True,
     needs_approval: bool = True,
+    tags: Optional[List[str]] = None,
+    compact: bool = False,
 ) -> list:
     from agents import FunctionTool
 
     tools = []
-    for d in tool_definitions(client, only=only, include_reads=include_reads, undo_tools=undo_tools):
+    for d in tool_definitions(client, only=only, include_reads=include_reads, undo_tools=undo_tools, tags=tags, compact=compact):
         approval = needs_approval and d.needs_approval
 
         async def invoke(_ctx: Any, args_json: str, _d=d, _approved=approval) -> str:

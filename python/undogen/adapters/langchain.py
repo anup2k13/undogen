@@ -20,11 +20,18 @@ from ..client import UndogenError, UndoableClient
 from ..tools import tool_definitions
 
 
-def to_langchain_tools(client: UndoableClient, only: Optional[List[str]] = None, include_reads: bool = True, undo_tools: bool = True) -> list:
+def to_langchain_tools(
+    client: UndoableClient,
+    only: Optional[List[str]] = None,
+    include_reads: bool = True,
+    undo_tools: bool = True,
+    tags: Optional[List[str]] = None,
+    compact: bool = False,
+) -> list:
     from langchain_core.tools import StructuredTool
 
     tools = []
-    for d in tool_definitions(client, only=only, include_reads=include_reads, undo_tools=undo_tools):
+    for d in tool_definitions(client, only=only, include_reads=include_reads, undo_tools=undo_tools, tags=tags, compact=compact):
 
         def run(_d=d, **kwargs: Any) -> str:
             try:

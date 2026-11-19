@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -119,18 +120,141 @@ def _input_schema(op: dict) -> Dict[str, Any]:
     return {"type": "object", "properties": props, "required": required}
 
 
+STOPWORDS = {"a", "an", "the", "to", "of", "for", "in", "on", "by", "and", "or", "with", "from", "my", "all", "this", "that", "it", "is", "be", "as", "at", "into", "some", "new"}
+
+
+def _stem(w: str) -> str:
+    x = re.sub(r"ies$", "y", w)
+    x = re.sub(r"(sses|ches|shes|xes)$", lambda m: m.group(0)[:-2], x)
+    x = re.sub(r"([^s])s$", r"\1", x)
+    if len(x) > 4:
+        x = re.sub(r"(ing|ed)$", "", x)
+    if len(x) > 3:
+        x = re.sub(r"e$", "", x)
+    return x
+
+
+def _words(s: str) -> List[str]:
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", s or "").lower()
+    return [_stem(w) for w in re.split(r"[^a-z0-9]+", s) if len(w) > 1 and w not in STOPWORDS]
+
+
+def _search_index(client: UndoableClient, tools: List["ToolDefinition"]):
+    """Rank operations for a query: field weights (summary/name > tags > path > description), IDF, phrase bonus."""
+    docs = []
+    for t in tools:
+        op = client.bundle.operations[t.operation_id]
+        fields = [
+            (_words(op.get("summary") or ""), 3),
+            (_words(op["id"].split("/")[-1]), 3),
+            (_words(" ".join(op.get("tags") or [])), 2),
+            (_words(re.sub(r"\{[^}]+\}", " ", op["path"])), 1),
+            (_words((op.get("description") or "")[:300]), 0.5),
+        ]
+        weight: Dict[str, float] = {}
+        for ws, w in fields:
+            for x in ws:
+                weight[x] = max(weight.get(x, 0), w)
+        docs.append((t, weight, (op.get("summary") or "").lower(), bool(op.get("deprecated"))))
+    df: Dict[str, int] = {}
+    for _, weight, _, _ in docs:
+        for w in weight:
+            df[w] = df.get(w, 0) + 1
+    idf = lambda w: math.log(1 + len(docs) / df.get(w, len(docs)))  # noqa: E731
+
+    def rank(query: str) -> List["ToolDefinition"]:
+        q = list(dict.fromkeys(_words(query)))
+        phrase = query.lower().strip()
+        scored = []
+        for t, weight, summary, deprecated in docs:
+            score = 0.0
+            for w in q:
+                if w in weight:
+                    score += weight[w] * idf(w)
+                elif len(w) >= 4:
+                    hit = next(((x, v) for x, v in weight.items() if x.startswith(w) or (len(x) >= 4 and w.startswith(x))), None)
+                    if hit:
+                        score += hit[1] * idf(hit[0]) * 0.5
+            if phrase and phrase in summary:
+                score += 10
+            if score > 0:
+                scored.append((score * (0.3 if deprecated else 1), t))
+        return [t for _, t in sorted(scored, key=lambda x: -x[0])]
+
+    return rank
+
+
+def _compact(client: UndoableClient, per_op: List["ToolDefinition"]) -> List["ToolDefinition"]:
+    by_key: Dict[str, ToolDefinition] = {}
+    for t in per_op:
+        by_key[t.name] = t
+        if t.operation_id:
+            by_key[t.operation_id] = t
+    rank = _search_index(client, per_op)
+
+    def find(name: Any) -> "ToolDefinition":
+        t = by_key.get(str(name or ""))
+        if t is None:
+            raise UndogenError(f'Unknown operation "{name}". Use undogen_search to find one.')
+        return t
+
+    def brief(t: "ToolDefinition") -> dict:
+        op = client.bundle.operations[t.operation_id]
+        return {"operation": t.name, "route": f"{op['method'].upper()} {op['path']}", "description": t.description}
+
+    def search(query: str = "", limit: int = 10, **_: Any) -> dict:
+        return {"results": [brief(t) for t in rank(query)[:limit]]}
+
+    def describe(operation: str = "", **_: Any) -> dict:
+        t = find(operation)
+        return {**brief(t), "input": t.input_schema, "annotations": t.annotations}
+
+    def call(operation: str = "", input: Optional[dict] = None, approved: bool = False, **_: Any) -> dict:
+        return find(operation).execute(approved=approved, **(input or {}))
+
+    return [
+        ToolDefinition(
+            name="undogen_search",
+            description=f"Find API operations by what they do ({len(per_op)} available). Returns names for undogen_describe and undogen_call, and whether each can be undone.",
+            input_schema={"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]},
+            annotations={"title": "Search operations", "readOnlyHint": True},
+            execute=search,
+        ),
+        ToolDefinition(
+            name="undogen_describe",
+            description="The input schema of an operation found with undogen_search, and whether it can be undone. Makes no API calls.",
+            input_schema={"type": "object", "properties": {"operation": {"type": "string"}}, "required": ["operation"]},
+            annotations={"title": "Describe an operation", "readOnlyHint": True},
+            execute=describe,
+        ),
+        ToolDefinition(
+            name="undogen_call",
+            description="Call an operation by name with the input undogen_describe shows: { operation, input: { <path params>, query, headers, body } }. Writes are journaled and can be undone with undogen_undo.",
+            input_schema={"type": "object", "properties": {"operation": {"type": "string"}, "input": {"type": "object"}}, "required": ["operation"]},
+            annotations={"title": "Call an operation", "destructiveHint": True, "openWorldHint": True},
+            execute=call,
+            needs_approval=any(t.needs_approval for t in per_op),
+        ),
+    ]
+
+
 def tool_definitions(
     client: UndoableClient,
     only: Optional[List[str]] = None,
     include_reads: bool = True,
     undo_tools: bool = True,
+    tags: Optional[List[str]] = None,
+    compact: bool = False,
 ) -> List[ToolDefinition]:
+    """One tool per operation (or, with compact=True, search/describe/call), plus undo and journal tools."""
     taken: Set[str] = set(UNDO_TOOLS)
     tools: List[ToolDefinition] = []
     for op in client.bundle.operations.values():
         if op["method"] == "get" and not include_reads:
             continue
         if not matches_only(op["id"], only):
+            continue
+        if tags and not any(t.lower() in {x.lower() for x in tags} for t in op.get("tags") or []):
             continue
         plan = client.plan_for(op["id"])
         reversible = op["method"] == "get" or (plan or {}).get("reversibility") == "reversible"
@@ -165,6 +289,8 @@ def tool_definitions(
                 needs_approval=risky,
             )
         )
+    if compact:
+        tools = _compact(client, tools)
     if not undo_tools:
         return tools
 

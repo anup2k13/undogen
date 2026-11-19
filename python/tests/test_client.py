@@ -307,3 +307,14 @@ def test_python_cli_lists_and_undoes(bundle_path, server_url, tmp_path, capsys):
     assert get(f"{server_url}/todos/{tid}")[0] == 404
     assert main(["journal", "--journal", path, "--compact"]) == 0
     assert "4 lines -> 2 entries" in capsys.readouterr().out
+
+
+def test_compact_tools(bundle_path, server_url):
+    client = UndoableClient(bundle_path, server_url)
+    tools = {t.name: t for t in tool_definitions(client, compact=True)}
+    assert list(tools)[:3] == ["undogen_search", "undogen_describe", "undogen_call"]
+    assert tools["undogen_search"].execute(query="archive a todo")["results"][0]["operation"] == "archiveTodo"
+    assert tools["undogen_describe"].execute(operation="createTodo")["input"]["required"] == ["body"]
+    created = tools["undogen_call"].execute(operation="createTodo", input={"body": {"title": "compact"}})
+    tools["undogen_undo"].execute()
+    assert get(f"{server_url}/todos/{created['data']['id']}")[0] == 404

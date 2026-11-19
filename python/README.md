@@ -33,7 +33,8 @@ Tools for agent frameworks:
 from undogen.adapters.langchain import to_langchain_tools
 from undogen.adapters.openai_agents import to_openai_agents_tools   # irreversible tools use needs_approval
 
-tools = to_langchain_tools(client)   # one tool per operation + undogen_undo, undogen_undo_all, undogen_journal
+tools = to_langchain_tools(client)   # one tool per operation + the undo tools
+tools = to_langchain_tools(client, compact=True)   # large APIs: search / describe / call + the undo tools
 ```
 
 Inspect and roll back journals without Node: `python -m undogen journal --journal …` and `python -m undogen undo undogen.json --base-url … --journal … [--seq N | --after N | --all]`.
