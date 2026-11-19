@@ -5,7 +5,6 @@ committed, and pushed; this file records what was done and what is next.
 
 ## Backlog (highest value first)
 
-- [ ] Examples: Claude Desktop config, Python agent script, GitHub workflow
 
 ## Done
 
@@ -18,3 +17,4 @@ committed, and pushed; this file records what was done and what is next.
 - **Python: multipart bodies + 3.9 check** (19 Nov): multipart/form-data encoding (scalars, JSON for objects, `(filename, bytes, type)` files); the suite passes on Python 3.9.25 (installed with uv) as well as 3.13.
 - **JSON Patch + Merge Patch** (19 Nov, TS + Python): `application/json-patch+json` PATCHes get an inverse patch computed from the captured state (`add` restores each touched member, `remove` drops members the patch created; whole-document patches restore the document); conflict checks compare the touched members. `application/merge-patch+json` undo sends `null` for keys the patch added.
 - **Speed** (19 Nov): JSON specs are parsed with `JSON.parse` instead of the YAML parser (GitHub 4.1s → 0.3s), schema normalization is memoized per shared schema (Stripe 1.1s → 0.2s), and the analyzer indexes operations by id and item route (GitHub analyze 290ms → 46ms). Checked against the previous commit: 0 differences across 1,870 plans from six real APIs.
+- **Examples + PATCH caveat** (19 Nov): `examples/mcp`, `examples/python/agent_session.py` (run by the Python tests), `examples/github-workflow/undogen.yml` (checked against action.yml inputs); plans for plain-JSON PATCH restores now warn that fields the call adds are not removed.

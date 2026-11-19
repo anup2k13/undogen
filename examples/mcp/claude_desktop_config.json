@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "todo-api": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "undogen",
+        "mcp",
+        "/absolute/path/to/openapi.yaml",
+        "--base-url",
+        "https://sandbox.example.com",
+        "--header",
+        "authorization: Bearer YOUR_SANDBOX_TOKEN",
+        "--journal",
+        "/absolute/path/to/.undogen/journal.jsonl"
+      ]
+    }
+  }
+}

@@ -699,6 +699,9 @@ function finishPlan(p: InversePlan, op: Operation, index: Index): InversePlan {
     if (names.length) t.query = { ...Object.fromEntries(names.map((n) => [n, { from: 'query' as const, key: n }])), ...t.query };
   };
   for (const t of [p.capture, p.inverse, p.inverseIfMissing, p.check]) addQuery(t);
+  if (p.inverse?.body?.from === 'before-request-keys' && !p.inverse.body.nullMissing && p.inverse.operationId === op.id) {
+    p.caveats.push('A field the call adds that did not exist before is not removed by the undo');
+  }
   if (p.reversibility !== 'irreversible') {
     const verb = strongVerbIn(op.description, true);
     if (verb) p.caveats.push(`The description mentions "${verb}": side effects like that cannot be called back by any inverse`);

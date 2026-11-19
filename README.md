@@ -47,6 +47,8 @@ Reading the spec, the compiler believes both inverses are correct. Only running 
 
 ## Try it
 
+More in [examples/](examples): a Claude Desktop config, a Python agent session, and a CI workflow.
+
 ```bash
 git clone https://github.com/anup2k13/undogen && cd undogen
 npm install
@@ -281,15 +283,15 @@ Three commands help fill the gaps:
 
 `undogen analyze` on official API descriptions ([full table](docs/benchmarks.md), regenerate with `npx tsx scripts/benchmark.ts`):
 
-| API | Write operations | Undo derived | Irreversible (gated) | Unknown | Time |
+| API | Write operations | Undo derived | Irreversible (gated) | Unknown | Time (incl. download) |
 |---|---:|---:|---:|---:|---:|
-| GitHub REST | 614 | 62% | 146 | 89 | 4.9s |
-| Kubernetes (Swagger 2.0) | 586 | 82% | 91 | 17 | 1.5s |
-| DigitalOcean (hundreds of `$ref` files) | 448 | 60% | 89 | 92 | 9.6s |
-| Stripe | 339 | 39% | 135 | 72 | 3.4s |
-| Asana | 143 | 47% | 9 | 67 | 0.7s |
-| Twilio | 94 | 68% | 18 | 12 | 0.5s |
-| Slack (Swagger 2.0, RPC) | 94 | 26% | 11 | 59 | 0.4s |
+| GitHub REST | 614 | 62% | 146 | 89 | 0.6s |
+| Kubernetes (Swagger 2.0) | 586 | 82% | 91 | 17 | 0.1s |
+| DigitalOcean (hundreds of `$ref` files) | 448 | 60% | 89 | 92 | 10–40s |
+| Stripe | 339 | 39% | 135 | 72 | 0.5s |
+| Asana | 143 | 47% | 9 | 67 | 0.8s |
+| Twilio | 94 | 68% | 18 | 12 | 0.1s |
+| Slack (Swagger 2.0, RPC) | 94 | 26% | 11 | 59 | 0.1s |
 
 "Undo derived" is the share of write operations that get an inverse with zero hand-written code; the rest is either gated or explicitly flagged `unknown`. On GitHub, for example:
 

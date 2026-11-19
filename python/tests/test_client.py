@@ -184,3 +184,12 @@ def test_json_patch_inverse():
         {"op": "remove", "path": "/c"},
         {"op": "add", "path": "/a~1b", "value": 1},
     ]
+
+
+def test_example_agent_session(bundle_path, server_url, capsys):
+    import runpy
+
+    runpy.run_path(str(ROOT / "examples/python/agent_session.py"), run_name="example").get("main")(bundle_path, server_url)
+    out = capsys.readouterr().out
+    assert "blocked: sendReminder needs approval (sendReminder was refused)" in out
+    assert "rolled back 2 writes, 0 failed" in out

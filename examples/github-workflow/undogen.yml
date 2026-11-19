@@ -1,0 +1,41 @@
+# Copy to .github/workflows/undogen.yml in the repository that owns the API description.
+name: undogen
+
+on:
+  pull_request:
+    paths: ['openapi.yaml']
+
+jobs:
+  # No sandbox needed: fail when the change makes a write harder to undo.
+  diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: git show "origin/${{ github.base_ref }}:openapi.yaml" > /tmp/base.yaml
+      - run: npx -y undogen diff /tmp/base.yaml openapi.yaml --markdown >> "$GITHUB_STEP_SUMMARY"
+
+  # Prove the inverses against a sandbox and annotate failures on the spec.
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - id: undogen
+        uses: anup2k13/undogen@main
+        with:
+          spec: openapi.yaml
+          base-url: ${{ vars.SANDBOX_URL }}
+          headers: |
+            authorization: Bearer ${{ secrets.SANDBOX_TOKEN }}
+          fixtures: undogen/fixtures.json
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always() && steps.undogen.outputs.sarif-file != ''
+        with:
+          sarif_file: ${{ steps.undogen.outputs.sarif-file }}
