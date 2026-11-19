@@ -1,0 +1,98 @@
+name: undogen verify
+description: Prove that the undo operations compiled from your OpenAPI spec actually restore state.
+author: anup2k13
+branding:
+  icon: rotate-ccw
+  color: green
+
+inputs:
+  spec:
+    description: Path or URL of the OpenAPI 3.x spec
+    required: true
+  base-url:
+    description: Sandbox server to verify against. verify creates and deletes data — never point it at production.
+    required: true
+  fixtures:
+    description: Path to a fixtures JSON file
+    required: false
+  overrides:
+    description: Path to an overrides JSON file
+    required: false
+  headers:
+    description: 'Extra request headers, one "name: value" per line (use secrets for tokens)'
+    required: false
+  ignore:
+    description: Comma-separated extra fields that may legitimately differ
+    required: false
+  only:
+    description: Comma-separated operationIds to verify
+    required: false
+  report-dir:
+    description: Where to write report.json, report.md and badge.json
+    required: false
+    default: undogen-report
+  fail-on-failure:
+    description: Fail the step when any inverse fails verification
+    required: false
+    default: 'true'
+
+outputs:
+  verified:
+    description: Number of verified inverses
+    value: ${{ steps.verify.outputs.verified }}
+  failed:
+    description: Number of inverses that failed verification
+    value: ${{ steps.verify.outputs.failed }}
+  report-dir:
+    description: Directory containing the reports
+    value: ${{ inputs.report-dir }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: Build undogen
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm ci --no-audit --no-fund --loglevel=error && npm run build
+
+    - name: Verify undo operations
+      id: verify
+      shell: bash
+      env:
+        UNDOGEN: ${{ github.action_path }}/dist/cli.js
+        IN_SPEC: ${{ inputs.spec }}
+        IN_BASE_URL: ${{ inputs.base-url }}
+        IN_FIXTURES: ${{ inputs.fixtures }}
+        IN_OVERRIDES: ${{ inputs.overrides }}
+        IN_HEADERS: ${{ inputs.headers }}
+        IN_IGNORE: ${{ inputs.ignore }}
+        IN_ONLY: ${{ inputs.only }}
+        IN_REPORT: ${{ inputs.report-dir }}
+        IN_FAIL: ${{ inputs.fail-on-failure }}
+        FORCE_COLOR: '1'
+      run: |
+        args=(verify "$IN_SPEC" --base-url "$IN_BASE_URL" --report "$IN_REPORT")
+        [ -n "$IN_FIXTURES" ] && args+=(--fixtures "$IN_FIXTURES")
+        [ -n "$IN_OVERRIDES" ] && args+=(--overrides "$IN_OVERRIDES")
+        [ -n "$IN_IGNORE" ] && args+=(--ignore "$IN_IGNORE")
+        [ -n "$IN_ONLY" ] && args+=(--only "$IN_ONLY")
+        while IFS= read -r line; do
+          [ -n "$line" ] && args+=(--header "$line")
+        done <<< "$IN_HEADERS"
+
+        set +e
+        node "$UNDOGEN" "${args[@]}"
+        code=$?
+        set -e
+
+        if [ -f "$IN_REPORT/report.json" ]; then
+          cat "$IN_REPORT/report.md" >> "$GITHUB_STEP_SUMMARY"
+          node -e 'const s=require(process.argv[1]).summary; console.log(`verified=${s.verified}\nfailed=${s.failed}`)' \
+            "$(realpath "$IN_REPORT/report.json")" >> "$GITHUB_OUTPUT"
+        fi
+        if [ "$code" -eq 1 ] && [ "$IN_FAIL" != "true" ]; then code=0; fi
+        exit $code

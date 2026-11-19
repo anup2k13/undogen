@@ -244,3 +244,11 @@ describe('analyze: GitHub-shaped APIs', () => {
     expect(() => analyze(spec, { overrides: { nope: { reversibility: 'irreversible' } } })).toThrow(/unknown operationId "nope"/);
   });
 });
+
+describe('release metadata', () => {
+  it('keeps package.json and the VERSION constant in sync', async () => {
+    const { VERSION } = await import('../src/index.js');
+    const pkg = (await import('../package.json', { with: { type: 'json' } })).default;
+    expect(VERSION).toBe(pkg.version);
+  });
+});

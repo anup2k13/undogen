@@ -95,6 +95,20 @@ The exit code is `1` when any inverse fails, so it works as a CI gate. `--report
 
 > ⚠️ `verify` creates and deletes data. Point it at a sandbox, never at production.
 
+#### In CI with GitHub Actions
+
+```yaml
+- uses: anup2k13/undogen@v0.2.0
+  with:
+    spec: openapi.yaml
+    base-url: http://localhost:4010          # your sandbox / docker-compose service
+    fixtures: undogen.fixtures.json          # optional
+    headers: |
+      authorization: Bearer ${{ secrets.SANDBOX_TOKEN }}
+```
+
+The action writes the report into the job summary and exposes `verified` and `failed` outputs. It fails the job when an inverse stops working, so a refactor that breaks undo gets caught before your agents rely on it.
+
 ### 3. Give agents an undo button
 
 ```ts

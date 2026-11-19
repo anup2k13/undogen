@@ -1,0 +1,40 @@
+name: Action
+
+# Runs the repository's own GitHub Action against the demo API and checks
+# that it catches exactly the two planted reversibility bugs.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Start the demo API
+        run: |
+          npx tsx examples/todo-api/server.ts 4010 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:4010/todos >/dev/null && break; sleep 1; done
+      - name: Run undogen verify via the action
+        id: undogen
+        uses: ./
+        with:
+          spec: examples/todo-api/openapi.yaml
+          base-url: http://127.0.0.1:4010
+          fixtures: examples/todo-api/fixtures.json
+          fail-on-failure: 'false'
+      - name: Check results
+        env:
+          VERIFIED: ${{ steps.undogen.outputs.verified }}
+          FAILED: ${{ steps.undogen.outputs.failed }}
+        run: |
+          echo "verified=$VERIFIED failed=$FAILED"
+          test "$VERIFIED" = "6"
+          test "$FAILED" = "2"
+          test -f undogen-report/badge.json
