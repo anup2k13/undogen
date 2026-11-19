@@ -103,6 +103,8 @@ The exit code is `1` when any inverse fails (`--strict`: or is inconclusive), so
 
 On a shared sandbox, `--scoped-only` snapshots only routes scoped to the resources verify created, so other people's activity can't fail the run.
 
+`--check-conflicts` proves the runtime's safety check too: it repeats each verified operation, lets "someone else" change what it wrote (through the API's own `PATCH`/`PUT`, or by reversing an action), and requires the undo to refuse. An API whose reads don't reflect other clients' writes (a cache in front of `GET`) fails here instead of in production.
+
 > ⚠️ `verify` creates and deletes data. Point it at a sandbox, never at production.
 
 Add `--restore-children` and the cascading delete above stops being a failure: before deleting a todo, undogen captures its comments, and the undo re-creates them under the re-created todo:

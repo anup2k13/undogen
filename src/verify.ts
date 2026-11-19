@@ -1,5 +1,5 @@
 import { analyze } from './analyze.js';
-import { fillPath, getPath, UndoableClient, VOLATILE_FIELDS, type CallInput, type HttpResult } from './runtime.js';
+import { ConflictError, fillPath, getPath, UndoableClient, VOLATILE_FIELDS, type CallInput, type HttpResult } from './runtime.js';
 import type { ApiSpec, InversePlan, Operation, RequestTemplate, Reversibility, Schema, Strategy } from './types.js';
 import { structuralPath } from './spec.js';
 import { VERSION } from './version.js';
@@ -45,6 +45,11 @@ export interface VerifyOptions {
   scopedOnly?: boolean;
   /** When compiling plans here: also re-create child collections when undoing a delete. */
   restoreChildren?: boolean;
+  /**
+   * Also prove the conflict check: repeat each verified operation, let "someone else" change
+   * what it wrote, and require the undo to refuse. Doubles the requests made.
+   */
+  checkConflicts?: boolean;
   /** Parallel GETs per snapshot. Default 4. */
   concurrency?: number;
   /** Pages to follow (Link: rel="next") when a GET returns a list. Default 5; 1 disables. */
@@ -79,6 +84,11 @@ export interface OperationResult {
   outcome: Outcome;
   detail: string;
   diffs: StateDiff[];
+  /**
+   * With checkConflicts: whether the runtime refused to undo over a simulated concurrent change.
+   * 'missed' makes the outcome 'failed'.
+   */
+  conflictCheck?: { result: 'caught' | 'missed' | 'not-applicable'; detail: string };
 }
 
 export interface VerifyReport {
@@ -168,8 +178,8 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
       strategy: plan.strategy,
       diffs: [] as StateDiff[],
     };
-    const record = (outcome: Outcome, detail: string, diffs: StateDiff[] = []) => {
-      const r = { ...base, outcome, detail, diffs };
+    const record = (outcome: Outcome, detail: string, diffs: StateDiff[] = [], conflictCheck?: OperationResult['conflictCheck']) => {
+      const r: OperationResult = { ...base, outcome, detail, diffs, ...(conflictCheck ? { conflictCheck } : {}) };
       results.push(r);
       options.onResult?.(r);
     };
@@ -185,8 +195,8 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
 
     const created: Created[] = [];
     const client = new UndoableClient(clientOptions);
-    try {
-      // 1. Arrange: real resources for every path param, plus children to expose cascades.
+    /** Real resources for every path param, plus children to expose cascades, plus fixture prepare steps. */
+    const arrange = async (): Promise<Record<string, Scalar>> => {
       const pool: Record<string, Scalar> = { ...(fixture.params ?? {}) };
       await ensure(op.path, pool, created);
       const root = itemRootOf(structuralPath(op.path));
@@ -207,6 +217,52 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
         });
         if (res.status >= 400) throw new SetupError(`fixture step ${step.operationId} returned HTTP ${res.status}`);
       }
+      return pool;
+    };
+    const probeClients: UndoableClient[] = [];
+    const probeConflict = async (): Promise<NonNullable<OperationResult['conflictCheck']>> => {
+      const na = (detail: string) => ({ result: 'not-applicable' as const, detail });
+      const pool = await arrange();
+      const current = (await raw.request('get', fillPath(op.path, pool)).catch(() => undefined))?.data;
+      const c = new UndoableClient(clientOptions);
+      probeClients.push(c);
+      const res = await c.call(op.id, { params: pick(pool, op.pathParams), body: fixture.body ?? bodyFor(op, current) });
+      const e = res.entry;
+      if (res.status >= 400 || !e?.inverse) return na('could not repeat the operation');
+      if (!e.check || e.noop) return na('nothing to check: the operation leaves no readable state');
+      let what: string;
+      if (e.check.mode === 'diff') {
+        // For an action, "someone else" reverses it.
+        const r = await raw.request(e.inverse.method, e.inverse.path, { body: e.inverse.body, contentType: e.inverse.contentType });
+        if (r.status >= 400) return na(`could not simulate a concurrent change: ${e.inverse.operationId} returned HTTP ${r.status}`);
+        what = `someone else ran ${e.inverse.operationId}`;
+      } else {
+        const checkPath = fillPath(e.check.pathTemplate, e.check.params);
+        const writers = spec.operations.filter((o) => (o.method === 'patch' || o.method === 'put') && structuralPath(o.path) === structuralPath(e.check!.pathTemplate));
+        const writer = writers.find((o) => o.method === 'patch') ?? writers[0];
+        const change = mutateExpected(e.check.expected);
+        if (!writer) return na(`no PATCH or PUT on ${e.check.pathTemplate} to simulate a concurrent change with`);
+        if (!change) return na('no field it wrote can be changed safely');
+        let body: unknown = change.body;
+        if (writer.method === 'put') {
+          const now = await raw.request('get', checkPath);
+          body = deepAssign(structuredClone(now.data ?? {}), change.body);
+        }
+        const r = await raw.request(writer.method, checkPath, { body, contentType: writer.requestContentType });
+        if (r.status >= 400) return na(`could not simulate a concurrent change: ${writer.id} returned HTTP ${r.status}`);
+        what = `someone else changed ${change.field} through ${writer.id}`;
+      }
+      try {
+        await c.undo(e);
+        return { result: 'missed', detail: what };
+      } catch (err) {
+        if (err instanceof ConflictError) return { result: 'caught', detail: what };
+        return na(`the undo failed for another reason: ${(err as Error).message}`);
+      }
+    };
+    try {
+      // 1. Arrange.
+      const pool = await arrange();
 
       // 2. Snapshot, act, snapshot, undo, snapshot.
       const before = await snapshot(pool);
@@ -256,17 +312,27 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
         record('failed', `${diffs.length} difference(s) remain after undo`, diffs);
       } else if (!changed && plan.strategy !== 'no-side-effects') {
         record('inconclusive', 'the operation changed no visible state, so its inverse was not exercised — add a fixture body');
-      } else if (identityChanged) {
-        const n = Object.values(entry.idMap ?? {}).reduce((sum, m) => sum + Object.keys(m).length, 0);
-        record('verified', n > 1 ? `state restored (${n} resources re-created under new ids)` : 'state restored (resource re-created under a new id)');
       } else {
-        record('verified', 'state restored exactly');
+        const n = Object.values(entry.idMap ?? {}).reduce((sum, m) => sum + Object.keys(m).length, 0);
+        const detail = !identityChanged
+          ? 'state restored exactly'
+          : n > 1
+            ? `state restored (${n} resources re-created under new ids)`
+            : 'state restored (resource re-created under a new id)';
+        if (!options.checkConflicts) {
+          record('verified', detail);
+        } else {
+          // 3. Prove the conflict check: run it again, let "someone else" change what it wrote, and expect the undo to refuse.
+          const check = await probeConflict();
+          if (check.result === 'missed') record('failed', `${detail}, but the undo overwrote a concurrent change (${check.detail})`, [], check);
+          else record('verified', check.result === 'caught' ? `${detail}; refused to overwrite a concurrent change` : detail, [], check);
+        }
       }
     } catch (err) {
       record('error', (err as Error).message);
     } finally {
       if (cleanup) {
-        const leftovers = client.journal.filter((e) => e.status !== 'undone' && e.created && e.inverse?.pathTemplate);
+        const leftovers = [client, ...probeClients].flatMap((x) => x.journal).filter((e) => e.status !== 'undone' && e.created && e.inverse?.pathTemplate);
         for (const e of leftovers) created.push({ remove: { ...planById.get(e.operationId)!.inverse!, path: e.inverse!.pathTemplate! }, params: e.inverse!.params ?? {} });
         await removeAll(created, (k, v) => client.remapId(k, v));
       }
@@ -360,6 +426,31 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
   };
   await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
   return out;
+}
+
+/** A change to one field the call wrote (following nested objects), as a body that sets it. */
+function mutateExpected(expected: Record<string, unknown>): { body: Record<string, unknown>; field: string } | undefined {
+  for (const [k, v] of Object.entries(expected)) {
+    if (k === '(status)') continue;
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      const inner = mutateExpected(v as Record<string, unknown>);
+      if (inner) return { body: { [k]: inner.body }, field: `${k}.${inner.field}` };
+      continue;
+    }
+    const changed =
+      typeof v === 'string' ? `${v} (changed by someone else)` : typeof v === 'number' ? v + 1 : typeof v === 'boolean' ? !v : undefined;
+    if (changed !== undefined) return { body: { [k]: changed }, field: k };
+  }
+  return undefined;
+}
+
+function deepAssign(target: unknown, patch: Record<string, unknown>): unknown {
+  if (!target || typeof target !== 'object' || Array.isArray(target)) return patch;
+  const t = target as Record<string, unknown>;
+  for (const [k, v] of Object.entries(patch)) {
+    t[k] = v && typeof v === 'object' && !Array.isArray(v) ? deepAssign(t[k], v as Record<string, unknown>) : v;
+  }
+  return t;
 }
 
 function parentOf(path: string): string {

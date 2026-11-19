@@ -182,3 +182,34 @@ describe('toHtml', () => {
     expect(html).toContain('&lt;script&gt;');
   });
 });
+
+describe('verify --check-conflicts', () => {
+  it('proves the conflict check fires on the real API, per operation', async () => {
+    const spec = await loadSpec(new URL('../examples/todo-api/openapi.yaml', import.meta.url).pathname);
+    const r = await verify({ spec, baseUrl: server.url, fixtures, checkConflicts: true });
+    const check = (id: string) => r.results.find((x) => x.operationId === id)!.conflictCheck;
+    expect(check('createTodo')).toEqual({ result: 'caught', detail: 'someone else changed title through updateTodo' });
+    expect(check('updateTodo')!.result).toBe('caught');
+    expect(check('replaceTodo')!.result).toBe('caught');
+    expect(check('unarchiveTodo')).toEqual({ result: 'caught', detail: 'someone else ran archiveTodo' });
+    expect(check('createComment')).toMatchObject({ result: 'not-applicable', detail: expect.stringContaining('no PATCH or PUT') });
+    expect(r.summary).toMatchObject({ verified: 6, failed: 2 });
+  });
+
+  it('fails an operation whose undo overwrites a concurrent change', async () => {
+    const spec = await loadSpec(new URL('../examples/todo-api/openapi.yaml', import.meta.url).pathname);
+    // An API whose reads are stale (a cache in front of GET): the concurrent change is invisible to the check.
+    const stale: typeof fetch = async (input, init) => {
+      const res = await fetch(input, init);
+      if ((init?.method ?? 'GET') !== 'GET') return res;
+      const text = await res.text();
+      return new Response(text.replace(/ \(changed by someone else\)/g, ''), { status: res.status, headers: res.headers });
+    };
+    const r = await verify({ spec, baseUrl: server.url, fetch: stale, only: ['updateTodo'], checkConflicts: true });
+    expect(r.results[0]).toMatchObject({
+      outcome: 'failed',
+      detail: 'state restored exactly, but the undo overwrote a concurrent change (someone else changed title through updateTodo)',
+      conflictCheck: { result: 'missed' },
+    });
+  });
+});

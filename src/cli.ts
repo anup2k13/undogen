@@ -48,6 +48,7 @@ ${c.bold('verify')}
   --redact               Mask every value in written reports (secret-looking keys are always masked)
   --strict               Exit 1 on inconclusive results too
   --scoped-only          Only snapshot routes scoped to created resources (for shared sandboxes)
+  --check-conflicts      Also prove that undo refuses to overwrite a concurrent change (doubles the requests)
   --keep                 Keep the resources verify created (default: delete them afterwards)
   --no-seed              Don't seed child resources (disables cascade detection)
   --concurrency <n>      Parallel GETs per snapshot (default 4)
@@ -88,6 +89,7 @@ const OPTIONS = {
   redact: { type: 'boolean' },
   strict: { type: 'boolean' },
   'scoped-only': { type: 'boolean' },
+  'check-conflicts': { type: 'boolean' },
   keep: { type: 'boolean' },
   'no-seed': { type: 'boolean' },
   concurrency: { type: 'string' },
@@ -257,6 +259,7 @@ async function main(argv: string[]) {
         seedChildren: !values['no-seed'],
         cleanup: !values.keep,
         scopedOnly: values['scoped-only'],
+        checkConflicts: values['check-conflicts'],
         concurrency: values.concurrency ? Number(values.concurrency) : undefined,
         maxPages: values['max-pages'] ? Number(values['max-pages']) : undefined,
         ignoreFields: [...DEFAULT_IGNORED_FIELDS, ...(list(values.ignore) ?? [])],

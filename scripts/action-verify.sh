@@ -14,6 +14,7 @@ args=(verify "$INPUT_SPEC" --base-url "$INPUT_BASE_URL" --report "$dir" --junit 
 [ "${INPUT_STRICT:-false}" = "true" ] && args+=(--strict)
 [ "${INPUT_RESTORE_CHILDREN:-false}" = "true" ] && args+=(--restore-children)
 [ "${INPUT_SCOPED_ONLY:-false}" = "true" ] && args+=(--scoped-only)
+[ "${INPUT_CHECK_CONFLICTS:-false}" = "true" ] && args+=(--check-conflicts)
 [ "${INPUT_REDACT:-true}" = "true" ] && args+=(--redact)
 
 while IFS= read -r line; do

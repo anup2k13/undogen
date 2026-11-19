@@ -22,6 +22,7 @@
 
 ### Verify
 - Deletes everything it created (`--keep` to inspect), probes created resources directly, `--scoped-only` for shared sandboxes.
+- `--check-conflicts`: repeats each verified operation, simulates a concurrent change, and fails it if the undo would overwrite that change.
 - Snapshots run in parallel (`--concurrency`) and follow `Link: rel="next"` pagination (`--max-pages`), so side effects past the first page of a list are caught.
 - `report.html` (self-contained, light/dark, readable on a phone), `--junit`, `--sarif`, `--redact` (secret-looking keys are always masked), `--strict`.
 

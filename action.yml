@@ -43,6 +43,10 @@ inputs:
     description: Only snapshot routes scoped to created resources (for shared sandboxes)
     required: false
     default: 'false'
+  check-conflicts:
+    description: Also prove that undo refuses to overwrite a concurrent change (doubles the requests)
+    required: false
+    default: 'false'
   redact:
     description: Mask every value in written reports (secret-looking keys are always masked)
     required: false
@@ -92,6 +96,7 @@ runs:
         INPUT_STRICT: ${{ inputs.strict }}
         INPUT_RESTORE_CHILDREN: ${{ inputs.restore-children }}
         INPUT_SCOPED_ONLY: ${{ inputs.scoped-only }}
+        INPUT_CHECK_CONFLICTS: ${{ inputs.check-conflicts }}
         INPUT_REDACT: ${{ inputs.redact }}
         INPUT_ARGS: ${{ inputs.args }}
         UNDOGEN_CLI: ${{ github.action_path }}/dist/cli.js
