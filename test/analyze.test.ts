@@ -549,3 +549,27 @@ describe('analyze: compound pairs and top-level routes stay conservative', () =>
     expect(byId.addTeamRestrictions).toMatchObject({ strategy: 'toggle', inverse: { operationId: 'removeTeamRestrictions' } });
   });
 });
+
+describe('analyze: restore actions and plural/singular siblings', () => {
+  const body = (props: string[]) => ({ content: { 'application/json': { schema: { type: 'object', required: [props[0]], properties: Object.fromEntries(props.map((p) => [p, { type: 'integer' }])) } } } });
+  const spec = parseSpec({
+    openapi: '3.0.3',
+    info: { title: 'x', version: '1' },
+    paths: {
+      '/user/packages/{name}/versions/{version_id}': { delete: { operationId: 'deleteVersion', responses: {} } },
+      '/user/packages/{name}/versions/{version_id}/restore': { post: { operationId: 'restoreVersion', responses: {} } },
+      '/repos/{repo}/issues/{n}/sub_issues': { post: { operationId: 'addSubIssue', requestBody: body(['sub_issue_id', 'replace_parent']), responses: {} } },
+      '/repos/{repo}/issues/{n}/sub_issue': { delete: { operationId: 'removeSubIssue', requestBody: body(['sub_issue_id']), responses: {} } },
+    },
+  });
+  const byId = Object.fromEntries(analyze(spec).plans.map((p) => [p.operationId, p]));
+
+  it('undoes a restore by deleting the item again', () => {
+    expect(byId.restoreVersion).toMatchObject({ strategy: 'paired-action', inverse: { operationId: 'deleteVersion', path: '/user/packages/{name}/versions/{version_id}' } });
+  });
+
+  it('pairs a plural add with its singular remove, passing the shared identifying fields', () => {
+    expect(byId.addSubIssue).toMatchObject({ strategy: 'toggle', inverse: { operationId: 'removeSubIssue', body: { from: 'request', fields: ['sub_issue_id'] } } });
+    expect(byId.removeSubIssue!.inverse!.operationId).toBe('addSubIssue');
+  });
+});

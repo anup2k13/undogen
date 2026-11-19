@@ -287,6 +287,44 @@ function pairedActionPlan(op: Operation, index: Index, parentPath: string, last:
   });
 }
 
+/** POST …/versions/{id}/restore (undelete) is undone by deleting the item again. */
+function restorePlan(op: Operation, index: Index, parentPath: string, last: string): InversePlan | undefined {
+  if (op.method !== 'post' || !/^(restore|undelete|recover)$/i.test(last)) return undefined;
+  const del = index.find('delete', parentPath);
+  if (!del) return undefined;
+  return plan(op, 'reversible', 'paired-action', 0.6, {
+    inverse: { operationId: del.id, method: 'delete', path: del.path, bindings: bindParams(del.path) },
+    reasons: [`"${last}" brings back what ${del.id} removes`],
+    caveats: ['Assumes the item was deleted before the restore; restoring an item that exists would be undone by deleting it — verify it'],
+  });
+}
+
+/**
+ * A plural route adds, the singular sibling removes, with the same arguments:
+ * POST …/issues/{n}/sub_issues { sub_issue_id } <-> DELETE …/issues/{n}/sub_issue { sub_issue_id }.
+ */
+function singularSiblingPlan(op: Operation, index: Index, parentPath: string, last: string): InversePlan | undefined {
+  const opposite = op.method === 'post' ? 'delete' : op.method === 'delete' ? 'post' : undefined;
+  if (!opposite || !op.requestSchema?.properties) return undefined;
+  const target = index.ops.find((o) => {
+    if (o.method !== opposite) return false;
+    const segs = segmentsOf(o.path);
+    const name = segs.at(-1) ?? '';
+    if (joinPath(segs.slice(0, -1)) !== parentPath || name === last || isParamSeg(name)) return false;
+    return op.method === 'post' ? `${name}s` === last || `${name}es` === last : `${last}s` === name || `${last}es` === name;
+  });
+  if (!target?.requestSchema?.properties) return undefined;
+  if (!(providesRequired(op.requestSchema, target.requestSchema) && providesRequired(target.requestSchema, op.requestSchema))) return undefined;
+  const theirs = Object.keys(target.requestSchema.properties);
+  const shared = Object.keys(op.requestSchema.properties).filter((k) => theirs.includes(k));
+  if (!shared.length) return undefined;
+  return plan(op, 'reversible', 'toggle', 0.55, {
+    inverse: { operationId: target.id, method: target.method, path: target.path, bindings: bindParams(target.path), body: { from: 'request', fields: shared } },
+    reasons: [`${op.method.toUpperCase()} ${last} and ${target.method.toUpperCase()} ${segmentsOf(target.path).at(-1)} add and remove the same item`],
+    caveats: ['Assumes both take the same identifying arguments — verify it'],
+  });
+}
+
 /** Does a request matching `source` carry every field `target` requires, recursively (objects and array items)? */
 function providesRequired(source: Schema | undefined, target: Schema | undefined, depth = 0): boolean {
   if (!target || !source || depth > 3) return true;
@@ -628,7 +666,7 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
   }
 
   if (isAction) {
-    const paired = pairedActionPlan(op, index, parentPath, last);
+    const paired = pairedActionPlan(op, index, parentPath, last) ?? restorePlan(op, index, parentPath, last) ?? singularSiblingPlan(op, index, parentPath, last);
     if (paired) return paired;
     return plan(op, 'unknown', 'none', 0, {
       reasons: [`Action endpoint "${last}" has no recognisable counterpart`],
@@ -640,6 +678,10 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
   if (op.method === 'post' && !lastIsParam && !isCollection) {
     const paired = pairedActionPlan(op, index, parentPath, last);
     if (paired) return paired;
+  }
+  if ((op.method === 'post' || op.method === 'delete') && !lastIsParam) {
+    const sibling = singularSiblingPlan(op, index, parentPath, last);
+    if (sibling) return sibling;
   }
 
   if (lastIsParam) {
