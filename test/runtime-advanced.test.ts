@@ -781,3 +781,23 @@ describe("journalDetail: 'minimal'", () => {
     expect((await later.call('getTodo', { params: { todoId: id } })).status).toBe(404);
   });
 });
+
+describe('rate limits', () => {
+  it("retries a 403 that carries Retry-After (GitHub's secondary rate limit), but not a plain 403", async () => {
+    let n = 0;
+    const f: typeof fetch = async () => {
+      n++;
+      if (n === 1) return new Response('{"message":"You have exceeded a secondary rate limit"}', { status: 403, headers: { 'retry-after': '0' } });
+      return new Response('[]', { status: 200 });
+    };
+    const client = new UndoableClient({ spec, baseUrl: 'http://x', fetch: f, retryDelayMs: 1 });
+    expect((await client.call('listTodos')).status).toBe(200);
+    expect(n).toBe(2);
+
+    let m = 0;
+    const forbidden: typeof fetch = async () => (m++, new Response('{}', { status: 403 }));
+    const c2 = new UndoableClient({ spec, baseUrl: 'http://x', fetch: forbidden, retryDelayMs: 1 });
+    expect((await c2.call('listTodos')).status).toBe(403);
+    expect(m).toBe(1);
+  });
+});

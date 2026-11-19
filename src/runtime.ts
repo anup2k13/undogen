@@ -663,7 +663,9 @@ export class UndoableClient {
             : `${outgoing.method} ${outgoing.url.pathname} failed: ${e.message}`,
         );
       }
-      const transient = res.status === 429 || ((res.status === 502 || res.status === 503 || res.status === 504) && canRetry);
+      // 429, or a 403 that says when to retry (GitHub's secondary rate limits), means "slow down", not "forbidden".
+      const rateLimited = res.status === 429 || (res.status === 403 && res.headers.has('retry-after'));
+      const transient = rateLimited || ((res.status === 502 || res.status === 503 || res.status === 504) && canRetry);
       if (transient && attempt < retries) {
         await res.body?.cancel().catch(() => {});
         await sleep(retryAfterMs(res.headers.get('retry-after')) ?? this.backoff(attempt));

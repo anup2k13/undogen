@@ -592,7 +592,9 @@ class UndoableClient:
                 status = err.code
                 raw = err.read()
                 hdrs = dict(err.headers.items()) if err.headers else {}
-                transient = status == 429 or (status in (502, 503, 504) and can_retry)
+                # 429, or a 403 that says when to retry (GitHub's secondary rate limits), means "slow down".
+                rate_limited = status == 429 or (status == 403 and any(k.lower() == "retry-after" for k in hdrs))
+                transient = rate_limited or (status in (502, 503, 504) and can_retry)
                 if transient and attempt < self.retries:
                     time.sleep(_retry_after(hdrs.get("Retry-After")) or self.retry_delay * 2**attempt)
                     attempt += 1
