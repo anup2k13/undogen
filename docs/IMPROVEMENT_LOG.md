@@ -5,7 +5,8 @@ committed, and pushed; this file records what was done and what is next.
 
 ## Backlog (highest value first)
 
-- [ ] Checkpoints: `checkpoint()` / `undoTo(checkpoint)` in both runtimes, `undogen_checkpoint` + `undogen_undo_all { to }` tools, `undogen undo --to`
+- [ ] `verify --check-conflicts`: prove on the real API that the conflict check fires (and doesn't fire falsely)
+- [ ] README: table of contents (it has grown long)
 
 ## Done
 
@@ -28,3 +29,4 @@ committed, and pushed; this file records what was done and what is next.
 - **Checkpoints** (19 Nov, TS + Python + MCP + CLI): `checkpoint()` / `undoTo(cp)`, `undogen_checkpoint` + `undogen_undo_all { to }`, `undogen undo --after <seq>`: roll back one task of a longer agent session and keep what came before.
 - **Journal compaction** (19 Nov, TS + Python + CLI): `FileJournalStore.compact()` / `undogen journal --compact` rewrites the journal with only the latest version of each entry (every status change appends one), atomically and owner-only.
 - **`undogen lint`** (19 Nov): per-operation fixes for API owners (11 rules: create without id / returning a list / without DELETE, write or delete without GET, action without counterpart, missing operationId, …), grouped output, `--fail-on`. Running it on GitHub found two more things: every CLI command crashed with EPIPE when piped into `head` (fixed), and 15 DELETE membership routes with a bodiless PUT counterpart (`remove-selected-repo-from-org-secret` ↔ `add-…`) were wrongly irreversible (now toggles; GitHub 64% undo derived).
+- **Envelope-aware undo** (19 Nov, TS + Python): `{data: {...}}` / JSON:API / Rails-style bodies are followed into the envelope, so undo writes back only the nested fields that were sent (not read-only `gid`/`created_at`, which an API may reject) and unrelated edits inside the envelope aren't conflicts. An envelope is a key that wraps the whole representation, so an object-valued field like `settings` beside other fields is still restored whole (tested both ways). PUTs with an envelope or no schema use "fields sent" (27 Asana, 14 GitHub, 6 Kubernetes plans).

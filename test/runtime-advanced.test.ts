@@ -634,3 +634,64 @@ describe('journal compaction', () => {
     expect(reopened.journal.map((e) => [e.seq, e.status])).toEqual([[1, 'undone'], [2, 'undone']]);
   });
 });
+
+describe('envelope APIs ({ data: { ... } })', () => {
+  it('restores and checks only the nested fields that were sent', async () => {
+    const { createServer } = await import('node:http');
+    const task = { gid: 't1', name: 'orig', notes: 'n', created_at: '2020-01-01', resource_type: 'task' };
+    const seen: unknown[] = [];
+    const srv = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      if (req.method === 'PUT') {
+        const body = JSON.parse(Buffer.concat(chunks).toString());
+        seen.push(body);
+        for (const k of Object.keys(body.data)) if (['gid', 'created_at', 'resource_type'].includes(k)) return res.writeHead(400).end('{"errors":["read-only"]}');
+        Object.assign(task, body.data);
+      }
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ data: task }));
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const s = parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'Asana-ish', version: '1' },
+      paths: { '/tasks/{task_gid}': { get: { operationId: 'getTask', responses: {} }, put: { operationId: 'updateTask', responses: {} } } },
+    });
+    try {
+      const client = new UndoableClient({ spec: s, baseUrl: `http://127.0.0.1:${(srv.address() as import('node:net').AddressInfo).port}` });
+      const res = await client.call('updateTask', { params: { task_gid: 't1' }, body: { data: { name: 'new' } } });
+      expect(res.entry!.check!.expected).toEqual({ data: { name: 'new' } });
+      task.notes = 'someone else edited the notes'; // unrelated: not a conflict
+      await client.undo();
+      expect(seen.at(-1)).toEqual({ data: { name: 'orig' } });
+      expect(task.name).toBe('orig');
+      expect(task.notes).toBe('someone else edited the notes');
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+describe('envelopes vs object-valued fields', () => {
+  it('restores an object-valued field whole when it is not an envelope', async () => {
+    const { createServer } = await import('node:http');
+    const user = { id: 'u1', name: 'ann', settings: { theme: 'dark', lang: 'en' } };
+    const srv = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      if (req.method === 'PATCH') Object.assign(user, JSON.parse(Buffer.concat(chunks).toString())); // replaces settings wholesale
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(user));
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const s = parseSpec({ openapi: '3.0.3', info: { title: 'x', version: '1' }, paths: { '/users/{id}': { get: { operationId: 'getUser', responses: {} }, patch: { operationId: 'patchUser', responses: {} } } } });
+    try {
+      const client = new UndoableClient({ spec: s, baseUrl: `http://127.0.0.1:${(srv.address() as import('node:net').AddressInfo).port}` });
+      await client.call('patchUser', { params: { id: 'u1' }, body: { settings: { theme: 'light' } } });
+      expect(user.settings).toEqual({ theme: 'light' });
+      await client.undo();
+      expect(user.settings).toEqual({ theme: 'dark', lang: 'en' });
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});

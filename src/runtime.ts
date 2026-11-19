@@ -895,14 +895,7 @@ function resolveBody(body: BodyTemplate | undefined, sources: Sources): unknown 
       return body.fields === '*' ? sources.before : pick(sources.before, body.fields);
     case 'before-request-keys': {
       if (sources.before == null) throw new Error('No captured state to restore from');
-      const keys = sources.request && typeof sources.request === 'object' ? Object.keys(sources.request) : [];
-      const out: Record<string, unknown> = {};
-      for (const k of keys) {
-        const hit = looseGet(sources.before, k);
-        if (hit.found) out[k] = hit.value;
-        else if (body.nullMissing) out[k] = null; // merge patch: null removes the key the call added
-      }
-      return out;
+      return restoreSent(sources.request, sources.before, !!body.nullMissing);
     }
     case 'before-json-patch':
       if (sources.before == null) throw new Error('No captured state to restore from');
@@ -968,6 +961,42 @@ export function invertJsonPatch(patch: unknown, before: unknown): unknown[] {
  * with the values the server reported back (or the sent values when it reported nothing).
  * For creates, only keys the server echoed back are expected.
  */
+const isPlainObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+const ENVELOPE_NAMES = new Set(['data', 'attributes']);
+const ENVELOPE_SIBLINGS = new Set(['meta', 'links', 'included', 'jsonapi', 'errors']);
+
+/**
+ * Keys of `body` that wrap the resource rather than being a field of it: JSON:API's data/attributes,
+ * or a single key holding the whole representation (Asana { data: {...} }, Rails { task: {...} }).
+ * A field like { settings: {...} } next to other fields is not an envelope.
+ */
+function envelopeKeys(body: Record<string, unknown>, state: unknown): Set<string> {
+  const out = new Set<string>();
+  if (!isPlainObject(state)) return out;
+  const keys = Object.keys(body);
+  for (const k of keys) {
+    const hit = looseGet(state, k);
+    if (!isPlainObject(body[k]) || !isPlainObject(hit.value)) continue;
+    const wrapsAll = keys.length === 1 && Object.keys(state).every((x) => looseGet({ [x]: 0 }, k).found || ENVELOPE_SIBLINGS.has(x));
+    if (ENVELOPE_NAMES.has(k) || wrapsAll) out.add(k);
+  }
+  return out;
+}
+
+/** The previous values of exactly the fields `request` sent, following envelopes into nested objects. */
+function restoreSent(request: unknown, before: unknown, nullMissing: boolean): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!isPlainObject(request)) return out;
+  const nested = envelopeKeys(request, before);
+  for (const k of Object.keys(request)) {
+    const hit = looseGet(before, k);
+    if (nested.has(k)) out[k] = restoreSent(request[k], hit.value, nullMissing);
+    else if (hit.found) out[k] = hit.value;
+    else if (nullMissing) out[k] = null; // merge patch: null removes the key the call added
+  }
+  return out;
+}
+
 function expectedState(request: unknown, response: unknown, onlyEchoed: boolean): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   const patched = jsonPatchMembers(request);
@@ -976,22 +1005,28 @@ function expectedState(request: unknown, response: unknown, onlyEchoed: boolean)
     for (const m of patched) if (m) out[m] = (response as Record<string, unknown>)[m];
     return out;
   }
-  if (!request || typeof request !== 'object' || Array.isArray(request)) return out;
-  const res = response && typeof response === 'object' && !Array.isArray(response) ? (response as Record<string, unknown>) : undefined;
+  if (!isPlainObject(request)) return out;
+  const res = isPlainObject(response) ? response : undefined;
+  const nested = envelopeKeys(request, res);
   for (const [k, v] of Object.entries(request)) {
     const hit = looseGet(res, k);
-    if (hit.found) out[k] = hit.value;
+    if (nested.has(k)) {
+      const inner = expectedState(v, hit.value, onlyEchoed);
+      if (Object.keys(inner).length) out[k] = inner;
+    } else if (hit.found) out[k] = hit.value;
     else if (!onlyEchoed) out[k] = v;
   }
   return out;
 }
 
-function compareExpected(expected: Record<string, unknown>, current: unknown): Conflict[] {
-  const cur = current && typeof current === 'object' ? (current as Record<string, unknown>) : {};
+function compareExpected(expected: Record<string, unknown>, current: unknown, prefix = ''): Conflict[] {
+  const cur = isPlainObject(current) ? current : {};
+  const nested = envelopeKeys(expected, cur);
   const out: Conflict[] = [];
   for (const [field, value] of Object.entries(expected)) {
     const actual = looseGet(cur, field).value;
-    if (stableStringify(actual) !== stableStringify(value)) out.push({ field, expected: value, actual });
+    if (nested.has(field)) out.push(...compareExpected(value as Record<string, unknown>, actual, `${prefix}${field}.`));
+    else if (stableStringify(actual) !== stableStringify(value)) out.push({ field: prefix + field, expected: value, actual });
   }
   return out;
 }

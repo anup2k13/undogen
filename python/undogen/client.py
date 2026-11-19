@@ -753,15 +753,7 @@ def _resolve_body(body: Optional[dict], sources: dict) -> Any:
         fields = body["fields"]
         return before if fields == "*" else {k: before[k] for k in fields if isinstance(before, dict) and k in before}
     if kind == "before-request-keys":
-        req = sources.get("request")
-        out = {}
-        for k in list(req.keys()) if isinstance(req, dict) else []:
-            found, value = loose_get(before, k)
-            if found:
-                out[k] = value
-            elif body.get("nullMissing"):
-                out[k] = None  # merge patch: null removes the key the call added
-        return out
+        return _restore_sent(sources.get("request"), before, bool(body.get("nullMissing")))
     if kind == "before-json-patch":
         return invert_json_patch(sources.get("request"), before)
     raise UndogenError(f"Unknown body template {kind}")
@@ -792,6 +784,43 @@ def invert_json_patch(patch: Any, before: Any) -> List[dict]:
     return [{"op": "add", "path": f"/{esc(m)}", "value": prior[m]} if m in prior else {"op": "remove", "path": f"/{esc(m)}"} for m in members]
 
 
+ENVELOPE_NAMES = {"data", "attributes"}
+ENVELOPE_SIBLINGS = {"meta", "links", "included", "jsonapi", "errors"}
+
+
+def _envelope_keys(body: dict, state: Any) -> set:
+    """Keys of `body` that wrap the resource (JSON:API data/attributes, or a single key holding the whole
+    representation, like Asana's {"data": {...}}), as opposed to fields such as {"settings": {...}}."""
+    out = set()
+    if not isinstance(state, dict):
+        return out
+    for k, v in body.items():
+        found, inner = loose_get(state, k)
+        if not isinstance(v, dict) or not isinstance(inner, dict):
+            continue
+        wraps_all = len(body) == 1 and all(loose_get({x: 0}, k)[0] or x in ENVELOPE_SIBLINGS for x in state)
+        if k in ENVELOPE_NAMES or wraps_all:
+            out.add(k)
+    return out
+
+
+def _restore_sent(request: Any, before: Any, null_missing: bool) -> dict:
+    """The previous values of exactly the fields `request` sent, following envelopes into nested objects."""
+    out: Dict[str, Any] = {}
+    if not isinstance(request, dict):
+        return out
+    nested = _envelope_keys(request, before)
+    for k, v in request.items():
+        found, value = loose_get(before, k)
+        if k in nested:
+            out[k] = _restore_sent(v, value, null_missing)
+        elif found:
+            out[k] = value
+        elif null_missing:
+            out[k] = None  # merge patch: null removes the key the call added
+    return out
+
+
 def _expected_state(request: Any, response: Any, only_echoed: bool) -> dict:
     patched = json_patch_members(request)
     if patched is not None and isinstance(response, dict):
@@ -799,10 +828,15 @@ def _expected_state(request: Any, response: Any, only_echoed: bool) -> dict:
     if not isinstance(request, dict):
         return {}
     res = response if isinstance(response, dict) else None
+    nested = _envelope_keys(request, res)
     out = {}
     for k, v in request.items():
         found, value = loose_get(res, k)
-        if found:
+        if k in nested:
+            inner = _expected_state(v, value, only_echoed)
+            if inner:
+                out[k] = inner
+        elif found:
             out[k] = value
         elif not only_echoed:
             out[k] = v
@@ -828,12 +862,16 @@ def _changed_state(before: dict, after: dict) -> dict:
     return {k: b.get(k) for k in {*a, *b} - VOLATILE_FIELDS if _stable(a.get(k)) != _stable(b.get(k))}
 
 
-def _compare(expected: dict, current: Any) -> List[dict]:
+def _compare(expected: dict, current: Any, prefix: str = "") -> List[dict]:
+    cur = current if isinstance(current, dict) else {}
+    nested = _envelope_keys(expected, cur)
     out = []
     for k, v in expected.items():
-        actual = loose_get(current, k)[1]
-        if _stable(actual) != _stable(v):
-            out.append({"field": k, "expected": v, "actual": actual})
+        actual = loose_get(cur, k)[1]
+        if k in nested:
+            out.extend(_compare(v, actual, f"{prefix}{k}."))
+        elif _stable(actual) != _stable(v):
+            out.append({"field": prefix + k, "expected": v, "actual": actual})
     return out
 
 

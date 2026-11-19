@@ -37,6 +37,7 @@
 ### Specs
 - Swagger 2.0, external `$ref`s (fetched in parallel, with retries), `oneOf`/`anyOf`, OpenAPI 3.1 type arrays and `examples`.
 - Recursive schemas no longer cut off unrelated deep schemas: `$ref`s are memoised with cycle detection instead of a nesting-depth limit, and anything undogen can't use is reported in `warnings`.
+- Envelope-shaped bodies (Asana `{data: {...}}`, JSON:API `data`/`attributes`, Rails `{task: {...}}`): undo restores and conflict-checks only the nested fields that were sent, so read-only fields are never written back and unrelated changes inside the envelope are not conflicts. A `PUT` with an envelope or no schema restores the fields it sent.
 - JSON Patch (`application/json-patch+json`) PATCHes are undone with an inverse patch computed from the captured state; JSON Merge Patch undo removes added keys with `null`.
 - New shapes: `POST`-to-item updates (Stripe, Twilio), `.json` path suffixes (Twilio), RPC-style pairs (Slack), case- and separator-insensitive field matching.
 

@@ -245,3 +245,16 @@ def test_journal_compaction(bundle_path, server_url, tmp_path):
     client.undo_all()
     assert FileJournalStore(path).compact() == {"before": 2, "after": 1}
     assert [e["status"] for e in FileJournalStore(path).load()] == ["undone"]
+
+
+def test_envelope_restore_and_check():
+    from undogen.client import _compare, _expected_state, _restore_sent
+
+    before = {"data": {"gid": "t1", "name": "orig", "notes": "n", "created_at": "2020"}}
+    assert _restore_sent({"data": {"name": "new"}}, before, False) == {"data": {"name": "orig"}}
+    expected = _expected_state({"data": {"name": "new"}}, {"data": {"gid": "t1", "name": "new", "notes": "n"}}, False)
+    assert expected == {"data": {"name": "new"}}
+    assert _compare(expected, {"data": {"gid": "t1", "name": "new", "notes": "changed by someone"}}) == []
+    assert _compare(expected, {"data": {"name": "theirs"}}) == [{"field": "data.name", "expected": "new", "actual": "theirs"}]
+    # a field holding an object next to other fields is not an envelope: restored and compared whole
+    assert _restore_sent({"settings": {"a": 2}}, {"id": 1, "settings": {"a": 1, "b": 1}}, False) == {"settings": {"a": 1, "b": 1}}

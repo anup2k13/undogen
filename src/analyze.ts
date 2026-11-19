@@ -164,6 +164,19 @@ function patchBody(op: Operation): BodyTemplate {
   return { from: 'before-request-keys' };
 }
 
+/**
+ * How to write a PUT back. With a known flat schema: the writable fields of the snapshot.
+ * With an envelope ({ data: {...} }) or no schema: exactly the fields the PUT sent, so
+ * read-only fields of the representation (ids, timestamps) are never sent back.
+ */
+function putBody(op: Operation): BodyTemplate {
+  const props = op.requestSchema?.properties;
+  const keys = props ? Object.keys(props) : [];
+  const envelope = keys.length === 1 && (props![keys[0]!]?.properties !== undefined || props![keys[0]!]?.type === 'object');
+  if (!keys.length || envelope) return { from: 'before-request-keys' };
+  return { from: 'before', fields: writableFields(op.requestSchema) };
+}
+
 function writableFields(schema: Schema | undefined): string[] | '*' {
   if (!schema?.properties) return '*';
   return Object.entries(schema.properties)
@@ -567,7 +580,7 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
           method: op.method,
           path: op.path,
           bindings: bindParams(op.path),
-          body: op.method === 'patch' ? patchBody(op) : { from: 'before', fields: writableFields(op.requestSchema) },
+          body: op.method === 'patch' ? patchBody(op) : putBody(op),
         },
         inverseIfMissing: del ? { operationId: del.id, method: 'delete', path: del.path, bindings: bindParams(del.path) } : undefined,
         reasons: [`Snapshot via ${getOp.id}, then write the old values back with ${op.id}`],
@@ -651,7 +664,7 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
           method: op.method,
           path: op.path,
           bindings: bindParams(op.path),
-          body: op.method === 'patch' ? patchBody(op) : { from: 'before', fields: writableFields(op.requestSchema) },
+          body: op.method === 'patch' ? patchBody(op) : putBody(op),
         },
         inverseIfMissing: del && op.method === 'put'
           ? { operationId: del.id, method: 'delete', path: op.path, bindings: bindParams(op.path) }
