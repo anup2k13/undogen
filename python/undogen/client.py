@@ -181,6 +181,18 @@ def _stable(v: Any) -> str:
     return json.dumps(v, sort_keys=True, separators=(",", ":"))
 
 
+def _body_mentions(body: Any, ids: set, depth: int = 0) -> bool:
+    if depth > 3 or body is None or isinstance(body, bool):
+        return False
+    if isinstance(body, (str, int, float)):
+        return str(body) in ids
+    if isinstance(body, list):
+        return any(_body_mentions(x, ids, depth + 1) for x in body)
+    if isinstance(body, dict):
+        return any(_body_mentions(x, ids, depth + 1) for x in body.values())
+    return False
+
+
 def get_path(obj: Any, dotted: str) -> Any:
     cur = obj
     for key in dotted.split("."):
@@ -423,6 +435,8 @@ class UndoableClient:
             return []
         param, value = created["param"], created["value"]
         ids = {str(value), str(self.remap_id(param, value))}
+        # In the body too (POST /comments {todoId}), but only for ids that can't be mistaken for small numbers.
+        body_ids = {i for i in ids if len(i) >= 4}
         return [
             e
             for e in self.journal
@@ -430,7 +444,10 @@ class UndoableClient:
             and e["status"] != "undone"
             and e["plan"]["strategy"] != "no-side-effects"
             and e.get("inverse") is not None
-            and str((e["request"].get("params") or {}).get(param)) in ids
+            and (
+                str((e["request"].get("params") or {}).get(param)) in ids
+                or (body_ids and _body_mentions(e["request"].get("body"), body_ids))
+            )
         ]
 
     def undo(self, entry: Union[dict, int, None] = None, *, force: bool = False, cascade: bool = False) -> dict:

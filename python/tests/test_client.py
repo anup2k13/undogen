@@ -318,3 +318,15 @@ def test_compact_tools(bundle_path, server_url):
     created = tools["undogen_call"].execute(operation="createTodo", input={"body": {"title": "compact"}})
     tools["undogen_undo"].execute()
     assert get(f"{server_url}/todos/{created['data']['id']}")[0] == 404
+
+
+def test_dependencies_through_request_bodies(bundle_path, server_url):
+    client = UndoableClient(bundle_path, server_url)
+    base = {"status": "active", "plan": {"strategy": "delete-created"}, "inverse": {"method": "delete"}}
+    parent = {**base, "seq": 1, "created": {"param": "boardId", "value": "obj_1abc"}, "request": {"params": {}}}
+    child = {**base, "seq": 2, "request": {"params": {}, "body": {"boardId": "obj_1abc", "title": "c"}}}
+    other = {**base, "seq": 3, "request": {"params": {}, "body": {"position": 1}}}
+    client.journal.extend([parent, child, other])
+    assert [e["seq"] for e in client.dependents_of(parent)] == [2]
+    short = {**parent, "created": {"param": "boardId", "value": 1}}
+    assert client.dependents_of(short) == []

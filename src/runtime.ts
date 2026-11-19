@@ -478,14 +478,16 @@ export class UndoableClient {
     if (!entry.created) return [];
     const { param, value } = entry.created;
     const ids = new Set([String(value), String(this.remapId(param, value))]);
+    // In the body too (POST /comments { todoId }), but only for ids that can't be mistaken for small numbers.
+    const bodyIds = [...ids].filter((id) => id.length >= 4);
     return this.journal.filter(
       (e) =>
         e.seq > entry.seq &&
         e.status !== 'undone' &&
         e.plan.strategy !== 'no-side-effects' &&
         e.inverse !== null &&
-        e.request.params?.[param] !== undefined &&
-        ids.has(String(e.request.params[param])),
+        ((e.request.params?.[param] !== undefined && ids.has(String(e.request.params[param]))) ||
+          (bodyIds.length > 0 && bodyMentions(e.request.body, bodyIds))),
     );
   }
 
@@ -933,6 +935,15 @@ function resolveBody(body: BodyTemplate | undefined, sources: Sources): unknown 
       if (sources.before == null) throw new Error('No captured state to restore from');
       return invertJsonPatch(sources.request, sources.before);
   }
+}
+
+/** Whether any string value in a request body (a few levels deep) is one of `ids`. */
+function bodyMentions(body: unknown, ids: string[], depth = 0): boolean {
+  if (depth > 3 || body === null || body === undefined) return false;
+  if (typeof body === 'string' || typeof body === 'number') return ids.includes(String(body));
+  if (Array.isArray(body)) return body.some((x) => bodyMentions(x, ids, depth + 1));
+  if (typeof body === 'object') return Object.values(body).some((x) => bodyMentions(x, ids, depth + 1));
+  return false;
 }
 
 /** Fields that change on every write and say nothing about who changed what. */

@@ -801,3 +801,43 @@ describe('rate limits', () => {
     expect(m).toBe(1);
   });
 });
+
+describe('dependencies through request bodies', () => {
+  it('knows a later write that names the created id in its body depends on it', async () => {
+    const s = parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'x', version: '1' },
+      paths: {
+        '/boards': { post: { operationId: 'createBoard', responses: { '201': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } } } } } },
+        '/boards/{boardId}': { delete: { operationId: 'deleteBoard', responses: {} } },
+        '/cards': { post: { operationId: 'createCard', responses: { '201': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } } } } } },
+        '/cards/{cardId}': { delete: { operationId: 'deleteCard', responses: {} } },
+      },
+    });
+    let n = 0;
+    const f: typeof fetch = async (_u, init) =>
+      init?.method === 'POST' ? new Response(JSON.stringify({ id: `obj_${++n}abc` }), { status: 201 }) : new Response(null, { status: 204 });
+    const client = new UndoableClient({ spec: s, baseUrl: 'http://x', fetch: f });
+    const board = await client.call('createBoard', { body: { name: 'b' } });
+    const card = await client.call('createCard', { body: { boardId: (board.data as { id: string }).id, title: 'c' } });
+    expect(client.dependentsOf(board.entry!).map((e) => e.seq)).toEqual([card.entry!.seq]);
+    await expect(client.undo(board.entry)).rejects.toBeInstanceOf(DependencyError);
+  });
+
+  it('does not treat small numbers in bodies as references', async () => {
+    const s = parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'x', version: '1' },
+      paths: {
+        '/boards': { post: { operationId: 'createBoard', responses: { '201': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'integer' } } } } } } } } },
+        '/boards/{boardId}': { delete: { operationId: 'deleteBoard', responses: {} } },
+      },
+    });
+    let n = 0;
+    const f: typeof fetch = async (_u, init) => (init?.method === 'POST' ? new Response(JSON.stringify({ id: ++n }), { status: 201 }) : new Response(null, { status: 204 }));
+    const client = new UndoableClient({ spec: s, baseUrl: 'http://x', fetch: f });
+    const first = await client.call('createBoard', { body: { name: 'a' } });
+    await client.call('createBoard', { body: { name: 'b', position: 1 } });
+    expect(client.dependentsOf(first.entry!)).toEqual([]);
+  });
+});
