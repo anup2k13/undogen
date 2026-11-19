@@ -161,7 +161,7 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
       continue;
     }
     if (plan.reversibility === 'irreversible' || plan.reversibility === 'unknown') {
-      record('gated', `${plan.reversibility}: never executed; blocked at runtime unless approved`);
+      record('gated', 'never executed; blocked at runtime unless approved');
       continue;
     }
 
