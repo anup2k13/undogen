@@ -697,11 +697,43 @@ def _resolve_body(body: Optional[dict], sources: dict) -> Any:
             found, value = loose_get(before, k)
             if found:
                 out[k] = value
+            elif body.get("nullMissing"):
+                out[k] = None  # merge patch: null removes the key the call added
         return out
+    if kind == "before-json-patch":
+        return invert_json_patch(sources.get("request"), before)
     raise UndogenError(f"Unknown body template {kind}")
 
 
+def json_patch_members(patch: Any) -> Optional[List[str]]:
+    """Top-level members an RFC 6902 patch touches (targets, and the sources of move)."""
+    if not isinstance(patch, list) or not all(isinstance(o, dict) and isinstance(o.get("op"), str) and isinstance(o.get("path"), str) for o in patch):
+        return None
+    out: List[str] = []
+    for o in patch:
+        paths = [o["path"]] + ([o["from"]] if o["op"] == "move" and isinstance(o.get("from"), str) else [])
+        for p in paths:
+            member = "" if p == "" else (p.split("/") + [""])[1].replace("~1", "/").replace("~0", "~")
+            if member not in out:
+                out.append(member)
+    return out
+
+
+def invert_json_patch(patch: Any, before: Any) -> List[dict]:
+    members = json_patch_members(patch)
+    if members is None:
+        raise UndogenError("The request body is not a JSON Patch")
+    if "" in members:
+        return [{"op": "replace", "path": "", "value": before}]
+    prior = before if isinstance(before, dict) else {}
+    esc = lambda m: m.replace("~", "~0").replace("/", "~1")  # noqa: E731
+    return [{"op": "add", "path": f"/{esc(m)}", "value": prior[m]} if m in prior else {"op": "remove", "path": f"/{esc(m)}"} for m in members]
+
+
 def _expected_state(request: Any, response: Any, only_echoed: bool) -> dict:
+    patched = json_patch_members(request)
+    if patched is not None and isinstance(response, dict):
+        return {m: response.get(m) for m in patched if m}
     if not isinstance(request, dict):
         return {}
     res = response if isinstance(response, dict) else None

@@ -26,6 +26,7 @@ def describe_template(t: Optional[dict]) -> Optional[str]:
     text = {
         "before": "body: the captured state",
         "before-request-keys": "body: the captured values of the fields sent",
+        "before-json-patch": "body: a JSON Patch that puts back what the patch touched",
         "request": "body: the same request body",
     }.get(kind, f"body: {json.dumps(body.get('value'))}" if kind == "literal" else "")
     extra = "; ".join([*binds, text] if text else binds)

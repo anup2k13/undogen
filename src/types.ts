@@ -87,8 +87,13 @@ export interface ValueRef {
 export type BodyTemplate =
   /** Fields copied from the state captured before the original call. '*' = all fields. */
   | { from: 'before'; fields: string[] | '*' }
-  /** Copy from `before` exactly the keys that the original request body sent. */
-  | { from: 'before-request-keys' }
+  /**
+   * Copy from `before` exactly the keys that the original request body sent.
+   * `nullMissing` (JSON Merge Patch): keys that did not exist before are sent as null, which removes them.
+   */
+  | { from: 'before-request-keys'; nullMissing?: boolean }
+  /** The inverse of an RFC 6902 JSON Patch, computed from `before` for every member the patch touched. */
+  | { from: 'before-json-patch' }
   | { from: 'request' }
   /** A fixed body, e.g. { state: 'closed' } for soft deletes. */
   | { from: 'literal'; value: unknown };
@@ -104,7 +109,7 @@ export interface Declaration {
   reason?: string;
   inverse?: string;
   bindings?: Record<string, string>;
-  body?: 'before' | 'request' | 'before-request-keys' | { literal: unknown };
+  body?: 'before' | 'request' | 'before-request-keys' | 'before-json-patch' | { literal: unknown };
   /** Inverse to use when the capture found nothing (e.g. a PUT that created the resource). */
   inverseIfMissing?: string;
   /** Recorded by `undogen annotate` so a round-trip keeps the original strategy name. */

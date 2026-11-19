@@ -38,7 +38,8 @@ function describeTemplate(t: RequestTemplate): string {
     .map(([k, r]) => `${k} ← ${r.from}.${r.key}`);
   let body = '';
   if (t.body?.from === 'before') body = t.body.fields === '*' ? 'body ← before' : `body ← before.{${t.body.fields.join(',')}}`;
-  if (t.body?.from === 'before-request-keys') body = 'body ← before[keys sent]';
+  if (t.body?.from === 'before-request-keys') body = t.body.nullMissing ? 'body ← before[keys sent], null if new' : 'body ← before[keys sent]';
+  if (t.body?.from === 'before-json-patch') body = 'body ← inverse JSON Patch from before';
   if (t.body?.from === 'request') body = 'body ← request';
   if (t.body?.from === 'literal') body = `body = ${JSON.stringify(t.body.value)}`;
   return [`${t.method.toUpperCase()} ${t.path}`, ...binds, body].filter(Boolean).join('  ');

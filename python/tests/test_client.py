@@ -166,3 +166,21 @@ def test_multipart_bodies():
     msg = BytesParser(policy=HTTP).parsebytes(b"Content-Type: " + ctype.encode() + b"\r\n\r\n" + data)
     parts = [(p.get_param("name", header="content-disposition"), p.get_filename(), p.get_content()) for p in msg.iter_parts()]
     assert parts == [("caption", None, "hi"), ("tags", None, "a"), ("tags", None, "b"), ("meta", None, '{"x": 1}'), ("file", "a.txt", "hello")]
+
+
+def test_json_patch_inverse():
+    from undogen.client import invert_json_patch
+
+    patch = [
+        {"op": "replace", "path": "/title", "value": "new"},
+        {"op": "add", "path": "/tags/-", "value": "b"},
+        {"op": "add", "path": "/status", "value": "draft"},
+        {"op": "move", "from": "/a~1b", "path": "/c"},
+    ]
+    assert invert_json_patch(patch, {"title": "orig", "tags": ["a"], "a/b": 1}) == [
+        {"op": "add", "path": "/title", "value": "orig"},
+        {"op": "add", "path": "/tags", "value": ["a"]},
+        {"op": "remove", "path": "/status"},
+        {"op": "remove", "path": "/c"},
+        {"op": "add", "path": "/a~1b", "value": 1},
+    ]

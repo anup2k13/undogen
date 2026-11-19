@@ -31,6 +31,7 @@
 ### Specs
 - Swagger 2.0, external `$ref`s (fetched in parallel, with retries), `oneOf`/`anyOf`, OpenAPI 3.1 type arrays and `examples`.
 - Recursive schemas no longer cut off unrelated deep schemas: `$ref`s are memoised with cycle detection instead of a nesting-depth limit, and anything undogen can't use is reported in `warnings`.
+- JSON Patch (`application/json-patch+json`) PATCHes are undone with an inverse patch computed from the captured state; JSON Merge Patch undo removes added keys with `null`.
 - New shapes: `POST`-to-item updates (Stripe, Twilio), `.json` path suffixes (Twilio), RPC-style pairs (Slack), case- and separator-insensitive field matching.
 
 ### Breaking

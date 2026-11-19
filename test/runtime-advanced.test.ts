@@ -419,3 +419,82 @@ describe('restoreChildren: grandchildren', () => {
     }
   });
 });
+
+describe('JSON Patch and JSON Merge Patch', () => {
+  async function docServer() {
+    const { createServer } = await import('node:http');
+    const doc: Record<string, unknown> = { title: 'orig', tags: ['a'], meta: { owner: 'ann' } };
+    const srv = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : undefined;
+      if (req.method === 'PATCH' && /json-patch/.test(req.headers['content-type'] ?? '')) {
+        for (const op of body as Array<{ op: string; path: string; value?: unknown }>) {
+          const [key, ...rest] = op.path.slice(1).split('/');
+          if (rest.length) {
+            const arr = doc[key!] as unknown[];
+            if (op.op === 'add') arr.splice(rest[0] === '-' ? arr.length : Number(rest[0]), 0, op.value);
+            if (op.op === 'remove') arr.splice(Number(rest[0]), 1);
+            if (op.op === 'replace') arr[Number(rest[0])] = op.value;
+          } else if (op.op === 'remove') delete doc[key!];
+          else doc[key!] = op.value;
+        }
+      } else if (req.method === 'PATCH') {
+        for (const [k, v] of Object.entries(body as object)) if (v === null) delete doc[k]; else doc[k] = v; // merge patch
+      }
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(doc));
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    return { doc, url: `http://127.0.0.1:${(srv.address() as import('node:net').AddressInfo).port}`, close: () => new Promise((r) => srv.close(r)) };
+  }
+  const specFor = (type: string) =>
+    parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'Docs', version: '1' },
+      paths: {
+        '/docs/{docId}': {
+          get: { operationId: 'getDoc', responses: { '200': { description: '' } } },
+          patch: { operationId: 'patchDoc', requestBody: { content: { [type]: { schema: type.includes('json-patch') ? { type: 'array' } : { type: 'object' } } } }, responses: { '200': { description: '' } } },
+        },
+      },
+    });
+
+  it('inverts a JSON Patch from the captured state', async () => {
+    const api = await docServer();
+    try {
+      const client = new UndoableClient({ spec: specFor('application/json-patch+json'), baseUrl: api.url });
+      const res = await client.call('patchDoc', {
+        params: { docId: 'd1' },
+        body: [
+          { op: 'replace', path: '/title', value: 'new' },
+          { op: 'add', path: '/tags/-', value: 'b' },
+          { op: 'add', path: '/status', value: 'draft' },
+          { op: 'remove', path: '/meta' },
+        ],
+      });
+      expect(res.entry!.inverse!.body).toEqual([
+        { op: 'add', path: '/title', value: 'orig' },
+        { op: 'add', path: '/tags', value: ['a'] },
+        { op: 'remove', path: '/status' },
+        { op: 'add', path: '/meta', value: { owner: 'ann' } },
+      ]);
+      await client.undo();
+      expect(api.doc).toEqual({ title: 'orig', tags: ['a'], meta: { owner: 'ann' } });
+    } finally {
+      await api.close();
+    }
+  });
+
+  it('removes fields a merge patch added by sending null', async () => {
+    const api = await docServer();
+    try {
+      const client = new UndoableClient({ spec: specFor('application/merge-patch+json'), baseUrl: api.url });
+      await client.call('patchDoc', { params: { docId: 'd1' }, body: { title: 'new', status: 'draft' } });
+      expect(client.journal[0]!.inverse!.body).toEqual({ title: 'orig', status: null });
+      await client.undo();
+      expect(api.doc).toEqual({ title: 'orig', tags: ['a'], meta: { owner: 'ann' } });
+    } finally {
+      await api.close();
+    }
+  });
+});

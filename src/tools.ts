@@ -9,6 +9,7 @@ function describeTemplate(t: RequestTemplate): string {
   const body =
     t.body?.from === 'before' ? 'body: the captured state' :
     t.body?.from === 'before-request-keys' ? 'body: the captured values of the fields sent' :
+    t.body?.from === 'before-json-patch' ? 'body: a JSON Patch that puts back what the patch touched' :
     t.body?.from === 'request' ? 'body: the same request body' :
     t.body?.from === 'literal' ? `body: ${JSON.stringify(t.body.value)}` : '';
   const extra = [...binds, body].filter(Boolean).join('; ');

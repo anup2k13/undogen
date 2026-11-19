@@ -34,6 +34,8 @@ function declaredBody(body: BodyTemplate | undefined): Declaration['body'] | und
       return 'before';
     case 'before-request-keys':
       return 'before-request-keys';
+    case 'before-json-patch':
+      return 'before-json-patch';
     case 'request':
       return 'request';
     case 'literal':
@@ -62,7 +64,7 @@ function linkExpression(ref: ValueRef): string | undefined {
 /** An OpenAPI 3 Link to the inverse, if the inverse can be expressed as one. */
 export function toLink(plan: InversePlan): Record<string, unknown> | undefined {
   const inv = plan.inverse;
-  if (!inv || plan.capture || inv.body?.from === 'before' || inv.body?.from === 'before-request-keys') return undefined;
+  if (!inv || plan.capture || inv.body?.from === 'before' || inv.body?.from === 'before-request-keys' || inv.body?.from === 'before-json-patch') return undefined;
   const parameters: Record<string, string> = {};
   for (const [name, ref] of [...Object.entries(inv.bindings), ...Object.entries(inv.query ?? {})]) {
     const expr = linkExpression(ref);
@@ -160,7 +162,7 @@ export function toArazzo(spec: ApiSpec, analysis: Analysis, sourceUrl: string): 
     const body = plan.inverse.body;
     if (body?.from === 'literal') undo.requestBody = { payload: body.value };
     if (body?.from === 'request') undo.requestBody = { payload: '$inputs.body' };
-    if (body?.from === 'before' || body?.from === 'before-request-keys') {
+    if (body?.from === 'before' || body?.from === 'before-request-keys' || body?.from === 'before-json-patch') {
       undo.requestBody = { payload: Object.fromEntries(fields.map((f) => [f, `$steps.capture.outputs.${f}`])) };
     }
     steps.push(undo);

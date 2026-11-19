@@ -819,10 +819,42 @@ function resolveBody(body: BodyTemplate | undefined, sources: Sources): unknown 
       for (const k of keys) {
         const hit = looseGet(sources.before, k);
         if (hit.found) out[k] = hit.value;
+        else if (body.nullMissing) out[k] = null; // merge patch: null removes the key the call added
       }
       return out;
     }
+    case 'before-json-patch':
+      if (sources.before == null) throw new Error('No captured state to restore from');
+      return invertJsonPatch(sources.request, sources.before);
   }
+}
+
+const unescapePointer = (s: string) => s.replace(/~1/g, '/').replace(/~0/g, '~');
+const escapePointer = (s: string) => s.replace(/~/g, '~0').replace(/\//g, '~1');
+
+/** Top-level members an RFC 6902 patch touches (targets, and the sources of move). */
+export function jsonPatchMembers(patch: unknown): string[] | undefined {
+  if (!Array.isArray(patch) || !patch.every((o) => o && typeof o === 'object' && typeof o.op === 'string' && typeof o.path === 'string')) return undefined;
+  const out: string[] = [];
+  for (const o of patch as Array<{ op: string; path: string; from?: string }>) {
+    for (const p of [o.path, ...(o.op === 'move' && typeof o.from === 'string' ? [o.from] : [])]) {
+      const member = p === '' ? '' : unescapePointer(p.split('/')[1] ?? '');
+      if (!out.includes(member)) out.push(member);
+    }
+  }
+  return out;
+}
+
+/**
+ * The inverse of a JSON Patch: put back every top-level member it touched, as it was.
+ * `add` restores a member whether or not it still exists; members that did not exist are removed.
+ */
+export function invertJsonPatch(patch: unknown, before: unknown): unknown[] {
+  const members = jsonPatchMembers(patch);
+  if (!members) throw new Error('The request body is not a JSON Patch');
+  if (members.includes('')) return [{ op: 'replace', path: '', value: before }];
+  const prior = (before && typeof before === 'object' ? before : {}) as Record<string, unknown>;
+  return members.map((m) => (m in prior ? { op: 'add', path: `/${escapePointer(m)}`, value: prior[m] } : { op: 'remove', path: `/${escapePointer(m)}` }));
 }
 
 /**
@@ -832,6 +864,12 @@ function resolveBody(body: BodyTemplate | undefined, sources: Sources): unknown 
  */
 function expectedState(request: unknown, response: unknown, onlyEchoed: boolean): Record<string, unknown> {
   const out: Record<string, unknown> = {};
+  const patched = jsonPatchMembers(request);
+  if (patched && response && typeof response === 'object' && !Array.isArray(response)) {
+    // A JSON Patch: expect the members it touched to still look the way the response showed them.
+    for (const m of patched) if (m) out[m] = (response as Record<string, unknown>)[m];
+    return out;
+  }
   if (!request || typeof request !== 'object' || Array.isArray(request)) return out;
   const res = response && typeof response === 'object' && !Array.isArray(response) ? (response as Record<string, unknown>) : undefined;
   for (const [k, v] of Object.entries(request)) {

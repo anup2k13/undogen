@@ -158,6 +158,14 @@ function bindParams(targetPath: string, overrides: Record<string, ValueRef> = {}
   return bindings;
 }
 
+/** How to write a PATCH back: JSON Patch needs an inverse patch; merge patch removes added keys with null. */
+function patchBody(op: Operation): BodyTemplate {
+  const type = op.requestContentType ?? '';
+  if (/json-patch/i.test(type)) return { from: 'before-json-patch' };
+  if (/merge-patch/i.test(type)) return { from: 'before-request-keys', nullMissing: true };
+  return { from: 'before-request-keys' };
+}
+
 function writableFields(schema: Schema | undefined): string[] | '*' {
   if (!schema?.properties) return '*';
   return Object.entries(schema.properties)
@@ -368,13 +376,15 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
         ? { from: 'request' }
         : declared.body === 'before-request-keys'
           ? { from: 'before-request-keys' }
+          : declared.body === 'before-json-patch'
+            ? { from: 'before-json-patch' }
         : declared.body === 'before'
           ? { from: 'before', fields: writableFields(target.requestSchema) }
           : declared.body && typeof declared.body === 'object'
             ? { from: 'literal', value: declared.body.literal }
             : undefined;
     const getOp = index.find('get', op.path);
-    const needsCapture = declared.body === 'before' || declared.body === 'before-request-keys';
+    const needsCapture = declared.body === 'before' || declared.body === 'before-request-keys' || declared.body === 'before-json-patch';
     const lastSeg = segmentsOf(op.path).at(-1) ?? '';
     // Undoing a DELETE by POSTing it back re-creates the resource under a new id: track it.
     const identity =
@@ -493,7 +503,7 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
           method: op.method,
           path: op.path,
           bindings: bindParams(op.path),
-          body: op.method === 'patch' ? { from: 'before-request-keys' } : { from: 'before', fields: writableFields(op.requestSchema) },
+          body: op.method === 'patch' ? patchBody(op) : { from: 'before', fields: writableFields(op.requestSchema) },
         },
         reasons: [`Snapshot via ${getOp.id}, then write the old values back with ${op.id}`],
         caveats: ['Assumes the GET and the write use the same representation'],
@@ -584,7 +594,7 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
           method: op.method,
           path: op.path,
           bindings: bindParams(op.path),
-          body: op.method === 'patch' ? { from: 'before-request-keys' } : { from: 'before', fields: writableFields(op.requestSchema) },
+          body: op.method === 'patch' ? patchBody(op) : { from: 'before', fields: writableFields(op.requestSchema) },
         },
         inverseIfMissing: del && op.method === 'put'
           ? { operationId: del.id, method: 'delete', path: op.path, bindings: bindParams(op.path) }
@@ -672,7 +682,7 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
  */
 function finishPlan(p: InversePlan, op: Operation, index: Index): InversePlan {
   if (!p.check && p.inverse) {
-    if (p.capture && (p.strategy === 'restore-snapshot' || p.inverse.body?.from === 'before-request-keys')) {
+    if (p.capture && (p.strategy === 'restore-snapshot' || p.inverse.body?.from === 'before-request-keys' || p.inverse.body?.from === 'before-json-patch')) {
       p.check = p.capture;
     } else if (
       (p.inverse.method === 'delete' || p.strategy === 'soft-delete') &&
