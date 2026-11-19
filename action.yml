@@ -1,0 +1,99 @@
+name: undogen verify
+description: Prove that the undo operations compiled from your OpenAPI spec actually work, against a sandbox API.
+author: anup2k13
+branding:
+  icon: rotate-ccw
+  color: green
+
+inputs:
+  spec:
+    description: Path or URL of the OpenAPI 3.x / Swagger 2.0 document
+    required: true
+  base-url:
+    description: Sandbox server to test against. verify creates and deletes data — never point it at production.
+    required: true
+  fixtures:
+    description: Fixtures file (per-operation params, bodies, prepare steps, skips)
+    required: false
+  overrides:
+    description: Overrides file (declarations for operations undogen cannot infer)
+    required: false
+  headers:
+    description: 'Extra request headers, one "name: value" per line. Use secrets, e.g. "authorization: Bearer ${{ secrets.SANDBOX_TOKEN }}"'
+    required: false
+  only:
+    description: Comma-separated operationIds to verify (a trailing * matches a prefix)
+    required: false
+  ignore:
+    description: Comma-separated extra fields that may legitimately differ
+    required: false
+  report-dir:
+    description: Where to write report.json, report.md, badge.json, junit.xml and undogen.sarif
+    required: false
+    default: undogen-report
+  strict:
+    description: Also fail on inconclusive results
+    required: false
+    default: 'false'
+  restore-children:
+    description: Re-create child collections when undoing a delete
+    required: false
+    default: 'false'
+  scoped-only:
+    description: Only snapshot routes scoped to created resources (for shared sandboxes)
+    required: false
+    default: 'false'
+  redact:
+    description: Mask every value in written reports (secret-looking keys are always masked)
+    required: false
+    default: 'true'
+  args:
+    description: Any other arguments for `undogen verify`
+    required: false
+
+outputs:
+  verified:
+    description: Number of operations whose inverse was verified
+    value: ${{ steps.verify.outputs.verified }}
+  failed:
+    description: Number of operations whose inverse failed
+    value: ${{ steps.verify.outputs.failed }}
+  report-dir:
+    description: Directory with the reports
+    value: ${{ steps.verify.outputs.report-dir }}
+  sarif-file:
+    description: SARIF file, for github/codeql-action/upload-sarif
+    value: ${{ steps.verify.outputs.sarif-file }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 20
+    - name: Build undogen
+      shell: bash
+      run: |
+        cd "$GITHUB_ACTION_PATH"
+        npm ci --no-audit --no-fund --loglevel=error
+        npm run build --silent
+    - id: verify
+      name: undogen verify
+      shell: bash
+      env:
+        INPUT_SPEC: ${{ inputs.spec }}
+        INPUT_BASE_URL: ${{ inputs.base-url }}
+        INPUT_FIXTURES: ${{ inputs.fixtures }}
+        INPUT_OVERRIDES: ${{ inputs.overrides }}
+        INPUT_HEADERS: ${{ inputs.headers }}
+        INPUT_ONLY: ${{ inputs.only }}
+        INPUT_IGNORE: ${{ inputs.ignore }}
+        INPUT_REPORT_DIR: ${{ inputs.report-dir }}
+        INPUT_STRICT: ${{ inputs.strict }}
+        INPUT_RESTORE_CHILDREN: ${{ inputs.restore-children }}
+        INPUT_SCOPED_ONLY: ${{ inputs.scoped-only }}
+        INPUT_REDACT: ${{ inputs.redact }}
+        INPUT_ARGS: ${{ inputs.args }}
+        UNDOGEN_CLI: ${{ github.action_path }}/dist/cli.js
+        FORCE_COLOR: '1'
+      run: bash "$GITHUB_ACTION_PATH/scripts/action-verify.sh"
