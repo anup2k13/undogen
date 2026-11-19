@@ -40,11 +40,21 @@ class ToolDefinition:
     description: str
     input_schema: Dict[str, Any]
     annotations: Dict[str, Any]
-    #: Called with the tool arguments; returns a JSON-serialisable result.
-    execute: Callable[..., Any]
+    #: The trusted entry point: run(arguments, approved). `arguments` is the model's input as one dict;
+    #: `approved` must come from the integration's own human-approval step, never from the model.
+    run: Callable[[Dict[str, Any], bool], Any]
     operation_id: Optional[str] = None
     #: True when the operation is irreversible or unknown, so a human should approve each call.
     needs_approval: bool = False
+
+    def execute(self, **arguments: Any) -> Any:
+        """Call the tool with the model's arguments, without human approval."""
+        return self.run(dict(arguments), False)
+
+
+def _kw(func: Callable[..., Any]) -> Callable[[Dict[str, Any], bool], Any]:
+    """Adapt a keyword function to run(arguments, approved); the model's arguments can't reach `approved`."""
+    return lambda arguments, approved: func(**{k: v for k, v in (arguments or {}).items() if isinstance(k, str) and k.isidentifier()})
 
 
 def tool_name(operation_id: str, taken: Set[str]) -> str:
@@ -209,8 +219,9 @@ def _compact(client: UndoableClient, per_op: List["ToolDefinition"]) -> List["To
         t = find(operation)
         return {**brief(t), "input": t.input_schema, "annotations": t.annotations}
 
-    def call(operation: str = "", input: Optional[dict] = None, approved: bool = False, **_: Any) -> dict:
-        return find(operation).execute(approved=approved, **(input or {}))
+    def call(arguments: Dict[str, Any], approved: bool) -> dict:
+        given = arguments.get("input")
+        return find(arguments.get("operation")).run(dict(given) if isinstance(given, dict) else {}, approved)
 
     return [
         ToolDefinition(
@@ -218,21 +229,21 @@ def _compact(client: UndoableClient, per_op: List["ToolDefinition"]) -> List["To
             description=f"Find API operations by what they do ({len(per_op)} available). Returns names for undogen_describe and undogen_call, and whether each can be undone.",
             input_schema={"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]},
             annotations={"title": "Search operations", "readOnlyHint": True},
-            execute=search,
+            run=_kw(search),
         ),
         ToolDefinition(
             name="undogen_describe",
             description="The input schema of an operation found with undogen_search, and whether it can be undone. Makes no API calls.",
             input_schema={"type": "object", "properties": {"operation": {"type": "string"}}, "required": ["operation"]},
             annotations={"title": "Describe an operation", "readOnlyHint": True},
-            execute=describe,
+            run=_kw(describe),
         ),
         ToolDefinition(
             name="undogen_call",
             description="Call an operation by name with the input undogen_describe shows: { operation, input: { <path params>, query, headers, body } }. Writes are journaled and can be undone with undogen_undo.",
             input_schema={"type": "object", "properties": {"operation": {"type": "string"}, "input": {"type": "object"}}, "required": ["operation"]},
             annotations={"title": "Call an operation", "destructiveHint": True, "openWorldHint": True},
-            execute=call,
+            run=call,
             needs_approval=any(t.needs_approval for t in per_op),
         ),
     ]
@@ -260,17 +271,20 @@ def tool_definitions(
         reversible = op["method"] == "get" or (plan or {}).get("reversibility") == "reversible"
         risky = op["method"] != "get" and (plan or {}).get("reversibility") in ("irreversible", "unknown")
 
-        def execute(_op: dict = op, approved: bool = False, **args: Any) -> dict:
-            params = {p: args[p] for p in _op["pathParams"] if p in args}
-            # Only declared header parameters: a tool call must not override Authorization or other headers.
-            allowed = {h["name"].lower(): h["name"] for h in _op.get("headerParams") or []}
-            given = args.get("headers") if isinstance(args.get("headers"), dict) else {}
-            headers = {allowed[k.lower()]: str(v) for k, v in given.items() if k.lower() in allowed and v is not None} or None
-            res = client.call(_op["id"], params=params, body=args.get("body"), query=args.get("query"), headers=headers, approved=approved)
-            out = {"status": res["status"], "data": res["data"]}
-            if res.get("entry"):
-                out["journal"] = describe_entry(res["entry"])
-            return out
+        def make_run(_op: dict) -> Callable[[Dict[str, Any], bool], Any]:
+            def run(args: Dict[str, Any], approved: bool) -> dict:
+                params = {p: args[p] for p in _op["pathParams"] if p in args}
+                # Only declared header parameters: a tool call must not override Authorization or other headers.
+                allowed = {h["name"].lower(): h["name"] for h in _op.get("headerParams") or []}
+                given = args.get("headers") if isinstance(args.get("headers"), dict) else {}
+                headers = {allowed[k.lower()]: str(v) for k, v in given.items() if k.lower() in allowed and v is not None} or None
+                res = client.call(_op["id"], params=params, body=args.get("body"), query=args.get("query"), headers=headers, approved=approved)
+                out = {"status": res["status"], "data": res["data"]}
+                if res.get("entry"):
+                    out["journal"] = describe_entry(res["entry"])
+                return out
+
+            return run
 
         tools.append(
             ToolDefinition(
@@ -285,10 +299,11 @@ def tool_definitions(
                     "idempotentHint": op["method"] in ("get", "put", "delete"),
                     "openWorldHint": True,
                 },
-                execute=execute,
+                run=make_run(op),
                 needs_approval=risky,
             )
         )
+    per_operation = list(tools)  # undogen_preview looks names up here, compact or not
     if compact:
         tools = _compact(client, tools)
     if not undo_tools:
@@ -314,7 +329,7 @@ def tool_definitions(
         return {"entries": [describe_entry(e) for e in client.journal]}
 
     def preview(tool: str = "", **_: Any) -> dict:
-        match = next((t for t in tools if t.name == tool or t.operation_id == tool), None)
+        match = next((t for t in per_operation if t.name == tool or t.operation_id == tool), None)
         op = client.bundle.operations.get(match.operation_id if match and match.operation_id else tool)
         if op is None:
             raise UndogenError(f'Unknown tool or operation "{tool}"')
@@ -355,7 +370,7 @@ def tool_definitions(
                 "required": [],
             },
             annotations={"title": "Undo a write", "destructiveHint": True, "openWorldHint": True},
-            execute=undo,
+            run=_kw(undo),
         ),
         ToolDefinition(
             name="undogen_undo_all",
@@ -372,7 +387,7 @@ def tool_definitions(
                 "required": [],
             },
             annotations={"title": "Undo all writes", "destructiveHint": True, "openWorldHint": True},
-            execute=undo_all,
+            run=_kw(undo_all),
         ),
         ToolDefinition(
             name="undogen_checkpoint",
@@ -382,7 +397,7 @@ def tool_definitions(
             ),
             input_schema={"type": "object", "properties": {}, "required": []},
             annotations={"title": "Checkpoint", "readOnlyHint": True},
-            execute=lambda **_: {"checkpoint": client.checkpoint()},
+            run=lambda arguments, approved: {"checkpoint": client.checkpoint()},
         ),
         ToolDefinition(
             name="undogen_preview",
@@ -396,14 +411,14 @@ def tool_definitions(
                 "required": ["tool"],
             },
             annotations={"title": "Preview undo", "readOnlyHint": True},
-            execute=preview,
+            run=_kw(preview),
         ),
         ToolDefinition(
             name="undogen_journal",
             description="List the writes made so far, whether each can be undone, and how.",
             input_schema={"type": "object", "properties": {}, "required": []},
             annotations={"title": "Journal", "readOnlyHint": True},
-            execute=journal,
+            run=_kw(journal),
         ),
     ]
     return tools

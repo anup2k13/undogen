@@ -32,6 +32,8 @@ export interface ResolvedRequest {
   query?: Record<string, QueryValue>;
   body?: unknown;
   contentType?: string;
+  /** journalDetail 'minimal': salted hashes of id-like values in the body, for dependency checks without the body. */
+  bodyRefs?: string[];
 }
 
 /** Children of a deleted resource, captured so the undo can re-create them. */
@@ -487,7 +489,8 @@ export class UndoableClient {
         e.plan.strategy !== 'no-side-effects' &&
         e.inverse !== null &&
         ((e.request.params?.[param] !== undefined && ids.has(String(e.request.params[param]))) ||
-          (bodyIds.length > 0 && bodyMentions(e.request.body, bodyIds))),
+          (bodyIds.length > 0 && bodyMentions(e.request.body, bodyIds)) ||
+          (bodyIds.length > 0 && !!e.request.bodyRefs?.length && bodyIds.some((id) => e.request.bodyRefs!.includes(refHash(id, e.session))))),
     );
   }
 
@@ -707,7 +710,7 @@ export class UndoableClient {
       ...entry,
       // Conflict checks only compare values: keep hashes, not the values.
       check: entry.check ? { ...entry.check, expected: hashValues(entry.check.expected, entry.session) } : undefined,
-      request: { ...entry.request, body: undefined },
+      request: { ...entry.request, body: undefined, bodyRefs: bodyRefsOf(entry.request.body, entry.session) },
       response: { status: entry.response.status, data: undefined, headers: {} },
       before: undefined,
       undoResponse: entry.undoResponse ? { status: entry.undoResponse.status, data: undefined, headers: {} } : undefined,
@@ -935,6 +938,21 @@ function resolveBody(body: BodyTemplate | undefined, sources: Sources): unknown 
       if (sources.before == null) throw new Error('No captured state to restore from');
       return invertJsonPatch(sources.request, sources.before);
   }
+}
+
+const refHash = (id: string, salt: string) => createHash('sha256').update(`${salt}\u0000${id}`).digest('hex').slice(0, 32);
+
+/** Hashes of the id-like values (4+ characters) in a body, a few levels deep. */
+function bodyRefsOf(body: unknown, salt: string): string[] | undefined {
+  const out = new Set<string>();
+  const walk = (v: unknown, depth: number) => {
+    if (depth > 3 || v === null || v === undefined) return;
+    if ((typeof v === 'string' || typeof v === 'number') && String(v).length >= 4) out.add(refHash(String(v), salt));
+    else if (Array.isArray(v)) v.forEach((x) => walk(x, depth + 1));
+    else if (typeof v === 'object') Object.values(v).forEach((x) => walk(x, depth + 1));
+  };
+  walk(body, 0);
+  return out.size ? [...out] : undefined;
 }
 
 /** Whether any string value in a request body (a few levels deep) is one of `ids`. */

@@ -330,3 +330,38 @@ def test_dependencies_through_request_bodies(bundle_path, server_url):
     assert [e["seq"] for e in client.dependents_of(parent)] == [2]
     short = {**parent, "created": {"param": "boardId", "value": 1}}
     assert client.dependents_of(short) == []
+
+
+def test_retry_after_parsing():
+    from email.utils import format_datetime
+    from datetime import datetime, timedelta, timezone
+
+    from undogen.client import _retry_after
+
+    assert _retry_after("2") == 2.0
+    assert _retry_after("9999") == 60.0
+    soon = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=30), usegmt=True)
+    assert 25 <= _retry_after(soon) <= 31
+    assert _retry_after("not a date") is None
+
+
+def test_fingerprints_match_typescript_for_non_ascii(bundle_path):
+    import hashlib
+
+    from undogen.client import _stable_js
+
+    payload = {"operationId": "sendMessage", "params": {"ch": "C1"}, "query": {}, "body": {"text": "Grüße 👋", "B": 1, "a": [1.5, None]}}
+    py = hashlib.sha256(_stable_js(payload).encode()).hexdigest()[:32]
+    script = (
+        "import('./src/runtime.ts').then(m => { const c = require('node:crypto');"
+        f"process.stdout.write(c.createHash('sha256').update(m.stableStringify({json.dumps(payload, ensure_ascii=False)})).digest('hex').slice(0, 32)); }})"
+    )
+    ts = subprocess.run([str(TSX), "-e", script], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+    assert ts == py
+
+
+def test_minimal_journal_keeps_body_dependencies(bundle_path, server_url, tmp_path):
+    from undogen.client import _body_refs, _ref_hash
+
+    refs = _body_refs({"boardId": "obj_1abc", "n": 1, "nested": {"x": ["tag_9999"]}}, "s1")
+    assert set(refs) == {_ref_hash("obj_1abc", "s1"), _ref_hash("tag_9999", "s1")}

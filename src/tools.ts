@@ -314,7 +314,8 @@ export function toolDefinitions(client: UndoableClient, operations: Operation[],
       },
     });
   }
-  if (options.compact) tools.splice(0, tools.length, ...compactTools(client, [...tools]));
+  const perOperation = [...tools]; // undogen_preview looks names up here, compact or not
+  if (options.compact) tools.splice(0, tools.length, ...compactTools(client, perOperation));
   if (options.undoTools === false) return tools;
 
   const undoOptions = (args: Record<string, unknown>): UndoOptions => ({ force: args.force === true, cascade: args.cascade === true });
@@ -380,7 +381,7 @@ export function toolDefinitions(client: UndoableClient, operations: Operation[],
       annotations: { title: 'Preview undo', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
       async execute(args) {
         const wanted = String(args.tool ?? '');
-        const t = tools.find((x) => x.name === wanted || x.operationId === wanted);
+        const t = perOperation.find((x) => x.name === wanted || x.operationId === wanted);
         const op = t?.operationId ? client.operation(t.operationId) : client.operation(wanted);
         if (!op) throw new Error(`Unknown tool or operation "${wanted}"`);
         if (op.method === 'get') return { tool: t?.name ?? op.id, reversibility: 'read-only', undo: 'nothing to undo' };

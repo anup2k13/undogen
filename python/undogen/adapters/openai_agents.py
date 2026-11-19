@@ -23,6 +23,23 @@ from ..client import UndogenError, UndoableClient
 from ..tools import tool_definitions
 
 
+def _invoker(d, approved_by_sdk: bool):
+    """on_invoke_tool for one tool. `approved` comes only from the SDK's needs_approval step: the model's
+    arguments are passed on as one dict and can't set it."""
+
+    async def invoke(_ctx: Any, args_json: str) -> str:
+        try:
+            args = json.loads(args_json or "{}")
+            if not isinstance(args, dict):
+                args = {}
+            # The client is synchronous: run it in a thread so the agent's event loop keeps going.
+            return json.dumps(await asyncio.to_thread(d.run, args, approved_by_sdk))
+        except UndogenError as err:
+            return json.dumps({"error": type(err).__name__, "message": str(err)})
+
+    return invoke
+
+
 def to_openai_agents_tools(
     client: UndoableClient,
     only: Optional[List[str]] = None,
@@ -38,16 +55,7 @@ def to_openai_agents_tools(
     for d in tool_definitions(client, only=only, include_reads=include_reads, undo_tools=undo_tools, tags=tags, compact=compact):
         approval = needs_approval and d.needs_approval
 
-        async def invoke(_ctx: Any, args_json: str, _d=d, _approved=approval) -> str:
-            args = json.loads(args_json or "{}")
-            try:
-                # The SDK only invokes an approval-gated tool after a human approved it.
-                # The client is synchronous: run it in a thread so the agent's event loop keeps going.
-                kwargs = {"approved": True, **args} if _approved else args
-                result = await asyncio.to_thread(_d.execute, **kwargs)
-                return json.dumps(result)
-            except UndogenError as err:
-                return json.dumps({"error": type(err).__name__, "message": str(err)})
+        invoke = _invoker(d, approval)
 
         tools.append(
             FunctionTool(

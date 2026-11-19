@@ -409,7 +409,7 @@ export function nextLink(header: string | undefined, baseUrl: string): string | 
     const url = new URL(m[1]!, base);
     if (url.origin !== base.origin) return undefined;
     const prefix = base.pathname.replace(/\/$/, '');
-    if (!url.pathname.startsWith(prefix)) return undefined;
+    if (prefix && url.pathname !== prefix && !url.pathname.startsWith(prefix + '/')) return undefined; // /v1 must not match /v10
     return url.pathname.slice(prefix.length) + url.search;
   }
   return undefined;
@@ -424,7 +424,8 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
       out[i] = await fn(items[i]!);
     }
   };
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
+  const workers = Math.max(1, Math.min(Number.isFinite(limit) ? Math.floor(limit) : 1, items.length));
+  await Promise.all(Array.from({ length: workers }, worker));
   return out;
 }
 

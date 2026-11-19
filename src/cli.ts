@@ -171,6 +171,13 @@ async function write(file: string, text: string) {
   await writeFile(file, text);
 }
 
+function positiveInt(value: string | undefined, flag: string): number | undefined {
+  if (value === undefined) return undefined;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) throw new UsageError(`${flag} must be a whole number of at least 1`);
+  return n;
+}
+
 function needBaseUrl(values: Values): string {
   const url = values['base-url'];
   if (!url) throw new UsageError('this command needs --base-url (use a sandbox: undogen creates and deletes data)');
@@ -269,8 +276,8 @@ async function main(argv: string[]) {
         cleanup: !values.keep,
         scopedOnly: values['scoped-only'],
         checkConflicts: values['check-conflicts'],
-        concurrency: values.concurrency ? Number(values.concurrency) : undefined,
-        maxPages: values['max-pages'] ? Number(values['max-pages']) : undefined,
+        concurrency: positiveInt(values.concurrency, '--concurrency'),
+        maxPages: positiveInt(values['max-pages'], '--max-pages'),
         ignoreFields: [...DEFAULT_IGNORED_FIELDS, ...(list(values.ignore) ?? [])],
         only: ops.map((o) => o.id),
         onResult: (r) => console.log(formatResultLine(r, idW, pathW)),
@@ -341,9 +348,15 @@ async function main(argv: string[]) {
       const seq = values.seq ? Number(values.seq) : undefined;
       if (values.seq && !Number.isInteger(seq)) throw new UsageError('--seq must be a number');
       try {
-        await client.undo(seq, opts);
-        const e = seq ? client.journal.find((x) => x.seq === seq)! : [...client.journal].reverse().find((x) => x.status === 'undone')!;
-        console.log(c.green(`  ↺ #${e.seq} ${e.operationId}  ${describeEntry(e).undo}`));
+        // Resolve the target first, the way undo() does, so we report the entry that was undone.
+        const target = seq !== undefined ? client.journal.find((x) => x.seq === seq) : [...client.journal].reverse().find((x) => x.status !== 'undone');
+        if (!target) {
+          console.log(seq !== undefined ? c.red(`  ✗ No journal entry #${seq}`) : '  nothing to undo');
+          if (seq !== undefined) process.exitCode = 1;
+          return;
+        }
+        await client.undo(target, opts);
+        console.log(c.green(`  ↺ #${target.seq} ${target.operationId}  ${describeEntry(target).undo}`));
       } catch (err) {
         console.log(c.red(`  ✗ ${(err as Error).message}`));
         process.exitCode = 1;

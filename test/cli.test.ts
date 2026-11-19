@@ -132,3 +132,22 @@ describe('examples', () => {
     for (const key of Object.keys(wf.jobs.verify.steps[1].with)) expect(Object.keys(action.inputs)).toContain(key);
   });
 });
+
+describe('cli: review fixes', () => {
+  it('rejects a non-numeric --concurrency instead of taking empty snapshots', async () => {
+    const r = await run('verify', spec, '--base-url', server.url, '--concurrency', 'x');
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('--concurrency must be a whole number');
+  });
+
+  it('undo without --seq reports the entry it actually undid', async () => {
+    const journal = join(dir, 'which.jsonl');
+    const s = await loadSpec(spec);
+    const agent = await UndoableClient.open({ spec: s, baseUrl: server.url, store: new FileJournalStore(journal) });
+    const id = ((await agent.call('createTodo', { body: { title: 'which' } })).data as { id: string }).id;
+    await agent.call('updateTodo', { params: { todoId: id }, body: { done: true } });
+    await agent.undo(2); // #2 is already undone
+    const out = await run('undo', spec, '--base-url', server.url, '--journal', journal);
+    expect(out.stdout).toContain(`↺ #1 createTodo  DELETE /todos/${id}`);
+  });
+});

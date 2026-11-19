@@ -261,3 +261,11 @@ describe('analysisToHtml', () => {
     expect(data.rows[0].id).toBe('frob</script><img src=x onerror=alert(2)>');
   });
 });
+
+describe('nextLink boundaries', () => {
+  it('does not follow a link to a sibling base path (/v1 vs /v10)', async () => {
+    const { nextLink } = await import('../src/verify.js');
+    expect(nextLink('<https://h/v10/items?page=2>; rel="next"', 'https://h/v1')).toBeUndefined();
+    expect(nextLink('<https://h/v1/items?page=2>; rel="next"', 'https://h/v1')).toBe('/items?page=2');
+  });
+});

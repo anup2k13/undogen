@@ -46,3 +46,12 @@ committed, and pushed; this file records what was done and what is next.
 - **Report tests** (19 Nov): coverage showed `report.ts` at 28% (exercised only through CLI subprocesses); direct tests now cover redaction (secret keys always masked, credentials and secret query params stripped from the base URL, nested secrets, input not mutated), JUnit (counts, strict, XML escaping), SARIF line mapping, and terminal/Markdown output.
 - **Dependencies through bodies** (19 Nov, TS + Python): a later write that names a created resource's id in its body (`POST /cards {boardId}`) now counts as depending on it, so undoing the create raises DependencyError or cascades. Only string ids of 4+ characters are matched, so small numbers in bodies aren't mistaken for references (tested both ways).
 - **Typed calls** (19 Nov): `undogen types` generates `Operations` interfaces, `typed<Operations>(client)` type-checks operation ids, params, query, bodies and response data (a test compiles real usage with `@ts-expect-error` cases). Checked on six public APIs: all compile under `--strict`. Shared `$ref` schemas become named aliases (component names carried through resolution), shrinking Stripe's output from 25.7 MB to 1.2 MB; a typed-index-signature conflict found on GitHub's spec was fixed.
+- **Pre-merge code review of the whole branch** (19 Nov, 8 findings, all fixed with tests):
+  - Python tools: a model could skip human approval by adding `"approved": true` (or override the operation with `_op`) in its tool arguments. Tools now have a trusted `run(arguments, approved)`; approval comes only from the integration's own approval step (OpenAI Agents `needs_approval`), never from model input.
+  - Compact mode: `undogen_preview` rejected the sanitized names `undogen_search` returns (`issues_create`) — TS and Python.
+  - Minimal journals dropped request bodies, so body-referenced dependencies were lost after reloading; they now keep salted hashes of id-like body values (`bodyRefs`) — TS and Python.
+  - `undogen undo` without `--seq` could report a different entry than the one it undid.
+  - Python fingerprints escaped non-ASCII (`\u00fc`) while TS didn't, so replays of e.g. "Grüße" weren't recognised across runtimes; a test now compares both runtimes' hashes.
+  - Python ignored `Retry-After` when the header was lowercase, and didn't parse HTTP dates.
+  - `--concurrency x` made every snapshot empty (NaN workers), which could hide failed inverses; flags are validated and the worker count guarded.
+  - Pagination: `/v1` matched links under `/v10`.

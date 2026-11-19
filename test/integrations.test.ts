@@ -361,3 +361,18 @@ describe('tools for large APIs', () => {
     await expect(tools.undogen_call!.execute({ operation: 'nope' })).rejects.toThrow(/undogen_search/);
   });
 });
+
+describe('compact mode: preview by the names search returns', () => {
+  it('previews an operation whose tool name was sanitized (issues/create -> issues_create)', async () => {
+    const s = parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'x', version: '1' },
+      paths: { '/repos/{repo}/issues': { post: { operationId: 'issues/create', summary: 'Create an issue', responses: {} } } },
+    });
+    const client = new UndoableClient({ spec: s, baseUrl: 'http://x' });
+    const tools = Object.fromEntries(toolDefinitions(client, s.operations, { compact: true }).map((t) => [t.name, t]));
+    const found = (await tools.undogen_search!.execute({ query: 'create issue' })) as { results: Array<{ operation: string }> };
+    expect(found.results[0]!.operation).toBe('issues_create');
+    expect(await tools.undogen_preview!.execute({ tool: 'issues_create' })).toMatchObject({ tool: 'issues_create', operation: 'POST /repos/{repo}/issues' });
+  });
+});

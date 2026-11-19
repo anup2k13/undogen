@@ -181,6 +181,30 @@ def _stable(v: Any) -> str:
     return json.dumps(v, sort_keys=True, separators=(",", ":"))
 
 
+def _ref_hash(value: str, salt: str) -> str:
+    return hashlib.sha256(f"{salt}\u0000{value}".encode()).hexdigest()[:32]
+
+
+def _body_refs(body: Any, salt: str) -> Optional[List[str]]:
+    """Hashes of the id-like values (4+ characters) in a body: enough for dependency checks without the body."""
+    out: Dict[str, None] = {}
+
+    def walk(v: Any, depth: int) -> None:
+        if depth > 3 or v is None or isinstance(v, bool):
+            return
+        if isinstance(v, (str, int, float)) and len(str(v)) >= 4:
+            out[_ref_hash(str(v), salt)] = None
+        elif isinstance(v, list):
+            for x in v:
+                walk(x, depth + 1)
+        elif isinstance(v, dict):
+            for x in v.values():
+                walk(x, depth + 1)
+
+    walk(body, 0)
+    return list(out) or None
+
+
 def _body_mentions(body: Any, ids: set, depth: int = 0) -> bool:
     if depth > 3 or body is None or isinstance(body, bool):
         return False
@@ -307,8 +331,9 @@ class UndoableClient:
 
         fingerprint = None
         if plan["reversibility"] in ("irreversible", "unknown"):
+            # Same JSON as the TypeScript runtime (sorted keys, raw UTF-8), so replays are recognised across runtimes.
             fingerprint = hashlib.sha256(
-                _stable({"operationId": operation_id, "params": params, "query": query, "body": body}).encode()
+                _stable_js({"operationId": operation_id, "params": params, "query": query, "body": body}).encode()
             ).hexdigest()[:32]
             replay_of = next((e for e in self.journal if e.get("fingerprint") == fingerprint), None)
             if not approved:
@@ -447,6 +472,7 @@ class UndoableClient:
             and (
                 str((e["request"].get("params") or {}).get(param)) in ids
                 or (body_ids and _body_mentions(e["request"].get("body"), body_ids))
+                or (body_ids and any(_ref_hash(i, e.get("session", "")) in (e["request"].get("bodyRefs") or []) for i in body_ids))
             )
         ]
 
@@ -613,7 +639,8 @@ class UndoableClient:
                 rate_limited = status == 429 or (status == 403 and any(k.lower() == "retry-after" for k in hdrs))
                 transient = rate_limited or (status in (502, 503, 504) and can_retry)
                 if transient and attempt < self.retries:
-                    time.sleep(_retry_after(hdrs.get("Retry-After")) or self.retry_delay * 2**attempt)
+                    lower = {k.lower(): v for k, v in hdrs.items()}
+                    time.sleep(_retry_after(lower.get("retry-after")) or self.retry_delay * 2**attempt)
                     attempt += 1
                     continue
                 return _result(status, raw, hdrs)
@@ -632,6 +659,9 @@ class UndoableClient:
             self.store.save(entry)
             return
         slim = {**entry, "request": {**entry["request"], "body": None}, "response": {"status": entry["response"]["status"], "data": None, "headers": {}}}
+        refs = _body_refs(entry["request"].get("body"), entry["session"])
+        if refs:
+            slim["request"]["bodyRefs"] = refs
         if entry.get("check"):
             slim["check"] = {**entry["check"], "expected": _hash_values(entry["check"]["expected"], entry["session"])}
         slim.pop("before", None)
@@ -1001,9 +1031,17 @@ def _result(status: int, raw: bytes, headers: Dict[str, str]) -> dict:
 
 
 def _retry_after(value: Optional[str]) -> Optional[float]:
+    """Seconds to wait from a Retry-After header: a number of seconds or an HTTP date, capped at 60."""
     if not value:
         return None
     try:
         return min(max(float(value), 0.0), 60.0)
     except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+
+        when = parsedate_to_datetime(value)
+        return min(max((when - datetime.now(when.tzinfo or timezone.utc)).total_seconds(), 0.0), 60.0)
+    except (TypeError, ValueError):
         return None

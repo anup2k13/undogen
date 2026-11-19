@@ -20,6 +20,23 @@ from ..client import UndogenError, UndoableClient
 from ..tools import tool_definitions
 
 
+def _runners(d):
+    """Sync and async callables for one tool. The model's arguments arrive as keywords but are passed on
+    as one dict, never approved: LangChain has no approval step, so the client's allow_irreversible gate applies."""
+
+    def run(**kwargs: Any) -> str:
+        try:
+            return json.dumps(d.run(dict(kwargs), False))
+        except UndogenError as err:
+            return json.dumps({"error": type(err).__name__, "message": str(err)})
+
+    async def arun(**kwargs: Any) -> str:
+        # The client is synchronous: keep async agents (LangGraph) responsive.
+        return await asyncio.to_thread(run, **kwargs)
+
+    return run, arun
+
+
 def to_langchain_tools(
     client: UndoableClient,
     only: Optional[List[str]] = None,
@@ -32,17 +49,7 @@ def to_langchain_tools(
 
     tools = []
     for d in tool_definitions(client, only=only, include_reads=include_reads, undo_tools=undo_tools, tags=tags, compact=compact):
-
-        def run(_d=d, **kwargs: Any) -> str:
-            try:
-                return json.dumps(_d.execute(**kwargs))
-            except UndogenError as err:
-                return json.dumps({"error": type(err).__name__, "message": str(err)})
-
-        async def arun(_run=run, **kwargs: Any) -> str:
-            # The client is synchronous: keep async agents (LangGraph) responsive.
-            return await asyncio.to_thread(_run, **kwargs)
-
+        run, arun = _runners(d)
         tools.append(
             StructuredTool.from_function(
                 func=run,

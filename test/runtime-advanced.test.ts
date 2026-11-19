@@ -841,3 +841,29 @@ describe('dependencies through request bodies', () => {
     expect(client.dependentsOf(first.entry!)).toEqual([]);
   });
 });
+
+describe('review fixes (round 2)', () => {
+  it('a minimal journal still knows a write that names a created id in its body depends on it', async () => {
+    const s = parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'x', version: '1' },
+      paths: {
+        '/boards': { post: { operationId: 'createBoard', responses: { '201': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } } } } } },
+        '/boards/{boardId}': { delete: { operationId: 'deleteBoard', responses: {} } },
+        '/cards': { post: { operationId: 'createCard', responses: { '201': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } } } } } },
+        '/cards/{cardId}': { delete: { operationId: 'deleteCard', responses: {} } },
+      },
+    });
+    let n = 0;
+    const f: typeof fetch = async (_u, init) =>
+      init?.method === 'POST' ? new Response(JSON.stringify({ id: `obj_${++n}abc` }), { status: 201 }) : new Response(null, { status: 204 });
+    const path = join(dir, 'minimal-deps.jsonl');
+    const opts = { spec: s, baseUrl: 'http://x', fetch: f, store: new FileJournalStore(path), journalDetail: 'minimal' as const };
+    const first = await UndoableClient.open(opts);
+    const board = await first.call('createBoard', { body: { name: 'b' } });
+    await first.call('createCard', { body: { boardId: (board.data as { id: string }).id, title: 'private card' } });
+    const reopened = await UndoableClient.open(opts);
+    expect(reopened.journal[1]!.request.body).toBeUndefined();
+    await expect(reopened.undo(1)).rejects.toBeInstanceOf(DependencyError);
+  });
+});
