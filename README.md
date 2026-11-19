@@ -45,6 +45,8 @@ Both failures are real bugs, and nothing in the spec reveals them:
 
 Reading the spec, the compiler believes both inverses are correct. Only running them shows they aren't. That's why undogen has a verifier.
 
+**Contents:** [Try it](#try-it) · [See what's undoable](#1-see-whats-undoable-in-an-api) · [Prove it](#2-prove-the-inverses-against-a-sandbox) · [Undo for agents](#3-give-agents-an-undo-button) · [MCP](#4-put-undo-in-front-of-any-api-for-any-mcp-client) · [Python](#5-python-agents) · [CI](#6-gate-pull-requests-on-it) · [How it works](#how-the-compiler-works) · [Declaring inverses](#declaring-what-cant-be-inferred) · [Real APIs](#real-world-check) · [Limits](#limits)
+
 ## Try it
 
 More in [examples/](examples): a Claude Desktop config, a Python agent session, and a CI workflow.

@@ -5,7 +5,6 @@ committed, and pushed; this file records what was done and what is next.
 
 ## Backlog (highest value first)
 
-- [ ] README: table of contents (it has grown long)
 
 ## Done
 
@@ -30,3 +29,4 @@ committed, and pushed; this file records what was done and what is next.
 - **`undogen lint`** (19 Nov): per-operation fixes for API owners (11 rules: create without id / returning a list / without DELETE, write or delete without GET, action without counterpart, missing operationId, …), grouped output, `--fail-on`. Running it on GitHub found two more things: every CLI command crashed with EPIPE when piped into `head` (fixed), and 15 DELETE membership routes with a bodiless PUT counterpart (`remove-selected-repo-from-org-secret` ↔ `add-…`) were wrongly irreversible (now toggles; GitHub 64% undo derived).
 - **Envelope-aware undo** (19 Nov, TS + Python): `{data: {...}}` / JSON:API / Rails-style bodies are followed into the envelope, so undo writes back only the nested fields that were sent (not read-only `gid`/`created_at`, which an API may reject) and unrelated edits inside the envelope aren't conflicts. An envelope is a key that wraps the whole representation, so an object-valued field like `settings` beside other fields is still restored whole (tested both ways). PUTs with an envelope or no schema use "fields sent" (27 Asana, 14 GitHub, 6 Kubernetes plans).
 - **`verify --check-conflicts`** (19 Nov): repeats each verified operation, simulates a concurrent change (one written field changed through the API's own PATCH/PUT, or the action reversed), and requires the undo to refuse; `missed` fails the operation. On the demo: caught for creates, updates, replace and unarchive; not-applicable where nothing can change the written state. A test API with stale reads (a cache in front of GET) is correctly reported as missed. Also an Action input.
+- **README contents line** (19 Nov): links to every section, anchors validated against GitHub's slug rules.
