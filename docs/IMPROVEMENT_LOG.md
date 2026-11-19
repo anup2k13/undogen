@@ -5,7 +5,6 @@ committed, and pushed; this file records what was done and what is next.
 
 ## Backlog (highest value first)
 
-- [ ] Python client: multipart bodies; check Python 3.9 compatibility
 - [ ] JSON Patch (`application/json-patch+json`) PATCH operations
 - [ ] Examples: Claude Desktop config, Python agent script, GitHub workflow
 - [ ] Analyzer performance: avoid O(n²) lookups in `finishPlan`
@@ -18,3 +17,4 @@ committed, and pushed; this file records what was done and what is next.
 - **verify pagination + parallel snapshots** (19 Nov): list routes follow `Link: rel="next"` (same origin and base path only) up to `--max-pages`; snapshot GETs run with `--concurrency`. A test API with a side effect visible only on page 2 is verified with one page and failed with pagination.
 - **`undogen_preview` tool** (19 Nov, TS + Python + MCP): reversibility, capture, undo request, `needsApproval` and caveats for any tool, with no API calls. Also fixed a type error in the pagination test that vitest didn't catch (CI typecheck would have).
 - **Recursive child restore** (19 Nov, TS + Python): child plans nest up to three levels; capture walks each child's own collections and undo re-creates them under the re-created parents (id remapping links them). New three-level fixture API (`test/fixtures/projects-server.ts`): `verify --restore-children` now verifies both cascading deletes and leaves the API empty.
+- **Python: multipart bodies + 3.9 check** (19 Nov): multipart/form-data encoding (scalars, JSON for objects, `(filename, bytes, type)` files); the suite passes on Python 3.9.25 (installed with uv) as well as 3.13.

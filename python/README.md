@@ -36,4 +36,4 @@ from undogen.adapters.openai_agents import to_openai_agents_tools   # irreversib
 tools = to_langchain_tools(client)   # one tool per operation + undogen_undo, undogen_undo_all, undogen_journal
 ```
 
-Not supported in the Python client yet: multipart bodies (sent as JSON).
+Bodies can be JSON, form-encoded or multipart (pass files as `(filename, bytes, content_type)` tuples).

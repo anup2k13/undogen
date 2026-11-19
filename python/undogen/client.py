@@ -741,9 +741,37 @@ def _encode_body(body: Any, content_type: Optional[str]):
                 if item is not None:
                     pairs.append((k, json.dumps(item) if isinstance(item, (dict, list)) else _query_value(item)))
         return urllib.parse.urlencode(pairs).encode(), "application/x-www-form-urlencoded"
+    if "multipart/form-data" in ct:
+        return _multipart(body or {})
     if ct.startswith("text/"):
         return str(body).encode(), ct
     return json.dumps(body).encode(), ct if "json" in ct else "application/json"
+
+
+def _multipart(fields: dict):
+    """Encode a multipart/form-data body. Values may be scalars, dicts/lists (sent as JSON), bytes,
+    or (filename, bytes[, content_type]) tuples for files."""
+    boundary = "undogen-" + uuid.uuid4().hex
+    out = bytearray()
+    for name, value in fields.items():
+        for item in value if isinstance(value, list) and not isinstance(value, (bytes, bytearray)) else [value]:
+            if item is None:
+                continue
+            out += f"--{boundary}\r\n".encode()
+            if isinstance(item, tuple):
+                filename, data = item[0], item[1]
+                ctype = item[2] if len(item) > 2 else "application/octet-stream"
+                out += f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\nContent-Type: {ctype}\r\n\r\n'.encode()
+                out += data if isinstance(data, (bytes, bytearray)) else str(data).encode()
+            elif isinstance(item, (bytes, bytearray)):
+                out += f'Content-Disposition: form-data; name="{name}"; filename="{name}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode()
+                out += item
+            else:
+                text = json.dumps(item) if isinstance(item, (dict, list)) else _query_value(item)
+                out += f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode() + text.encode()
+            out += b"\r\n"
+    out += f"--{boundary}--\r\n".encode()
+    return bytes(out), f"multipart/form-data; boundary={boundary}"
 
 
 def _result(status: int, raw: bytes, headers: Dict[str, str]) -> dict:

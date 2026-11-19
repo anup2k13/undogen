@@ -307,7 +307,6 @@ The compiled plans are hypotheses. `verify` is what turns them into facts. Confi
 - Verification can only see state that the API exposes through `GET` routes. Lists are followed through `Link: rel="next"` pagination up to `--max-pages` (5); cursor tokens in response bodies are not followed.
 - Conflict detection compares the top-level fields the agent wrote. Changes made through other fields, or nested inside a field the agent didn't send, are not detected unless the API sends ETags.
 - `--restore-children` captures up to three levels (children, grandchildren, great-grandchildren) and only through list routes that return arrays.
-- The Python client sends multipart bodies as JSON.
 
 ## Roadmap
 

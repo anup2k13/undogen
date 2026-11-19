@@ -154,3 +154,15 @@ def test_restore_grandchildren(projects):
     np, nt = agent.remap_id("projectId", p), agent.remap_id("taskId", t)
     assert [x["title"] for x in get(f"{url}/projects/{np}/tasks")[1]] == ["design"]
     assert [x["title"] for x in get(f"{url}/projects/{np}/tasks/{nt}/notes")[1]] == ["use blue"]
+
+
+def test_multipart_bodies():
+    from email.parser import BytesParser
+    from email.policy import HTTP
+
+    from undogen.client import _encode_body
+
+    data, ctype = _encode_body({"caption": "hi", "tags": ["a", "b"], "meta": {"x": 1}, "file": ("a.txt", b"hello", "text/plain")}, "multipart/form-data")
+    msg = BytesParser(policy=HTTP).parsebytes(b"Content-Type: " + ctype.encode() + b"\r\n\r\n" + data)
+    parts = [(p.get_param("name", header="content-disposition"), p.get_filename(), p.get_content()) for p in msg.iter_parts()]
+    assert parts == [("caption", None, "hi"), ("tags", None, "a"), ("tags", None, "b"), ("meta", None, '{"x": 1}'), ("file", "a.txt", "hello")]
