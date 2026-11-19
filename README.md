@@ -215,12 +215,14 @@ The action writes the Markdown report to the job summary and exposes `verified`,
 | `PUT /things/{id}` or `PUT /settings` | `restore-snapshot` | `GET` before, then `PUT` the old writable fields (or `DELETE` if the `PUT` created it) |
 | `DELETE /things/{id}` | `recreate-from-snapshot` | `GET` before, then `POST /things` with the old writable fields (*compensable*: the id changes) |
 | `POST /things/{id}/archive` and `/unarchive` | `paired-action` | the counterpart (25+ verb pairs, plus `x` / `unx`) |
-| `PUT` and `DELETE` on `/things/{id}/star` | `toggle` | the opposite method |
+| `PUT` and `DELETE` on `/things/{id}/star`, or `POST`/`DELETE` on `…/selected_users` | `toggle` | the opposite method (with the same body, if it takes one) |
+| `POST /variables` whose request carries the id (`name`) | `delete-created` | `DELETE /variables/{request.name}` |
+| One-way transitions with no counterpart (`void`, `finalize`, `capture`, `delete-request`…) | — | **irreversible**, blocked at runtime |
 | `POST /things/{id}` with no `PUT`/`PATCH` (Stripe, Twilio) | `restore-snapshot` | `GET` before, then `POST` back the keys that were sent |
 | `POST /conversations.archive` and `/conversations.unarchive` (Slack RPC) | `paired-action` | the counterpart, with the same arguments |
 | `DELETE /things` (the whole collection) | — | **irreversible**, blocked at runtime |
 | Verbs like send, notify, charge, transfer, cancel, merge, dispatch… in the operation name or summary (`createAndSendInvoice`) | — | **irreversible**, blocked at runtime |
-| Verbs like render, preview, search, validate… | `no-side-effects` | nothing needed (verify proves state is unchanged) |
+| Verbs like render, preview, search, validate, list, check… | `no-side-effects` | nothing needed (verify proves state is unchanged) |
 
 Every plan comes with a confidence score, its reasons, and caveats. When undogen can't tell, it says `unknown` rather than guessing. Paths with format suffixes (`/Calls/{Sid}.json`) are matched structurally, and fields are matched ignoring case and separators (a form field `FriendlyName` restores from JSON `friendly_name`).
 
@@ -261,13 +263,13 @@ Three commands help fill the gaps:
 
 | API | Write operations | Undo derived | Irreversible (gated) | Unknown | Time |
 |---|---:|---:|---:|---:|---:|
-| GitHub REST | 614 | 57% | 136 | 130 | 3.4s |
-| Kubernetes (Swagger 2.0) | 586 | 82% | 91 | 17 | 1.2s |
-| DigitalOcean (hundreds of `$ref` files) | 448 | 58% | 80 | 107 | 9.1s |
-| Stripe | 339 | 39% | 101 | 106 | 2.5s |
-| Asana | 143 | 47% | 7 | 69 | 0.7s |
-| Twilio | 94 | 68% | 18 | 12 | 0.4s |
-| Slack (Swagger 2.0, RPC) | 94 | 26% | 1 | 69 | 0.4s |
+| GitHub REST | 614 | 62% | 146 | 89 | 4.9s |
+| Kubernetes (Swagger 2.0) | 586 | 82% | 91 | 17 | 1.5s |
+| DigitalOcean (hundreds of `$ref` files) | 448 | 60% | 89 | 92 | 9.6s |
+| Stripe | 339 | 39% | 135 | 72 | 3.4s |
+| Asana | 143 | 47% | 9 | 67 | 0.7s |
+| Twilio | 94 | 68% | 18 | 12 | 0.5s |
+| Slack (Swagger 2.0, RPC) | 94 | 26% | 11 | 59 | 0.4s |
 
 "Undo derived" is the share of write operations that get an inverse with zero hand-written code; the rest is either gated or explicitly flagged `unknown`. On GitHub, for example:
 

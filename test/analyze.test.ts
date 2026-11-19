@@ -399,3 +399,81 @@ describe('analyze: Stripe, Twilio, Slack and Kubernetes shapes', () => {
     expect(byId.deleteConfigMap!.reversibility).toBe('compensable');
   });
 });
+
+describe('analyze: patterns mined from GitHub and Stripe', () => {
+  const empty = { '201': { description: '', content: { 'application/json': { schema: { type: 'object', properties: {} } } } } };
+  const spec = parseSpec({
+    openapi: '3.0.3',
+    info: { title: 'Mined', version: '1' },
+    paths: {
+      '/orgs/{org}/variables': {
+        post: {
+          operationId: 'createVariable',
+          requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, value: { type: 'string' } } } } } },
+          responses: empty,
+        },
+      },
+      '/orgs/{org}/variables/{name}': { delete: { operationId: 'deleteVariable', responses: { '204': { description: '' } } } },
+      '/orgs/{org}/access/selected_users': {
+        post: { operationId: 'addUsers', requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { usernames: { type: 'array' } } } } } }, responses: { '204': { description: '' } } },
+        delete: { operationId: 'removeUsers', requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { usernames: { type: 'array' } } } } } }, responses: { '204': { description: '' } } },
+      },
+      '/orgs/{org}/attestations/bulk-list': { post: { operationId: 'listAttestationsBulk', responses: { '200': { description: '' } } } },
+      '/orgs/{org}/attestations/delete-request': { post: { operationId: 'deleteAttestationsBulk', responses: { '200': { description: '' } } } },
+      '/v1/invoices/{invoice}/void': { post: { operationId: 'PostInvoicesInvoiceVoid', responses: { '200': { description: '' } } } },
+      '/v1/reviews/{review}/approve': { post: { operationId: 'PostReviewsReviewApprove', responses: { '200': { description: '' } } } },
+      '/v1/reviews/{review}/unapprove': { post: { operationId: 'PostReviewsReviewUnapprove', responses: { '200': { description: '' } } } },
+    },
+  });
+  const byId = Object.fromEntries(analyze(spec).plans.map((p) => [p.operationId, p]));
+
+  it('binds a client-chosen identifier from the request', () => {
+    expect(byId.createVariable).toMatchObject({
+      reversibility: 'reversible',
+      strategy: 'delete-created',
+      inverse: { operationId: 'deleteVariable', bindings: { org: { from: 'params', key: 'org' }, name: { from: 'request', key: 'name' } } },
+    });
+  });
+
+  it('pairs POST and DELETE on the same route, passing the same body', () => {
+    expect(byId.addUsers).toMatchObject({ strategy: 'toggle', inverse: { operationId: 'removeUsers', body: { from: 'request' } } });
+    expect(byId.removeUsers!.inverse!.operationId).toBe('addUsers');
+  });
+
+  it('recognises read-only POSTs and one-way transitions', () => {
+    expect(byId.listAttestationsBulk!.strategy).toBe('no-side-effects');
+    expect(byId.deleteAttestationsBulk).toMatchObject({ reversibility: 'irreversible', reasons: ['"delete" is a one-way transition and the API offers no counterpart'] });
+    expect(byId.PostInvoicesInvoiceVoid!.reversibility).toBe('irreversible');
+  });
+
+  it('still pairs a one-way-sounding verb when the API has its counterpart', () => {
+    expect(byId.PostReviewsReviewApprove).toMatchObject({ strategy: 'paired-action', inverse: { operationId: 'PostReviewsReviewUnapprove' } });
+  });
+});
+
+describe('analyze: same-route pairs are not read-only and only get bodies they accept', () => {
+  const body = { content: { 'application/json': { schema: { type: 'object', properties: { access_token: { type: 'string' } } } } } };
+  const spec = parseSpec({
+    openapi: '3.0.3',
+    info: { title: 'x', version: '1' },
+    paths: {
+      '/applications/{client_id}/token': {
+        post: { operationId: 'apps/check-token', requestBody: body, responses: { '200': { description: '' } } },
+        delete: { operationId: 'apps/delete-token', requestBody: body, responses: { '204': { description: '' } } },
+      },
+      '/repos/{owner}/{repo}/issues/{issue_number}/lock': {
+        put: { operationId: 'issues/lock', requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { lock_reason: { type: 'string' } } } } } }, responses: { '204': { description: '' } } },
+        delete: { operationId: 'issues/unlock', responses: { '204': { description: '' } } },
+      },
+    },
+  });
+  const byId = Object.fromEntries(analyze(spec).plans.map((p) => [p.operationId, p]));
+  it('does not undo a token revocation with a token check', () => {
+    expect(byId['apps/check-token']!.strategy).toBe('no-side-effects');
+    expect(byId['apps/delete-token']!.reversibility).toBe('irreversible');
+  });
+  it('does not send a body to an inverse that takes none', () => {
+    expect(byId['issues/lock']).toMatchObject({ strategy: 'toggle', inverse: { operationId: 'issues/unlock' } });
+    expect(byId['issues/lock']!.inverse!.body).toBeUndefined();
+  });
+});

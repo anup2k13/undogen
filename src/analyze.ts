@@ -73,6 +73,16 @@ const NEGATIONS = new Set(['not', 'no', 'without', 'never', 'dont', 'doesn', 'do
 /** Verbs for POSTs that compute something and change nothing. */
 const SIDE_EFFECT_FREE_VERBS = new Set([
   'render', 'preview', 'search', 'query', 'validate', 'lint', 'estimate', 'simulate', 'compare', 'diff',
+  'list', 'lookup', 'check', 'count', 'calculate',
+]);
+
+/**
+ * State transitions with no way back, used only when nothing else matched (so
+ * approve still pairs with unapprove where the API has one): void, finalize, ...
+ */
+const ONE_WAY_VERBS = new Set([
+  'void', 'expire', 'finalize', 'capture', 'confirm', 'submit', 'reverse', 'reject', 'decline', 'fail',
+  'redact', 'complete', 'accept', 'approve', 'advance', 'migrate', 'delete', 'destroy', 'erase', 'revoke',
 ]);
 
 /** Values of a state/status field that mean "this is gone" for APIs without DELETE. */
@@ -234,6 +244,13 @@ function parseRef(s: string): ValueRef {
 /** The verb of an operationId, ignoring namespaces like "repos/create-webhook". */
 const verbOf = (op: Operation) => tokenize(op.id.split('/').pop() ?? op.id)[0] ?? '';
 
+/** A POST whose name says it only computes or reads (check-token, bulk-list, search). */
+function isReadOnlyPost(o: Operation): boolean {
+  if (o.method !== 'post') return false;
+  const last = segmentsOf(o.path).at(-1) ?? '';
+  return [...tokenize(last), verbOf(o)].flatMap(stems).some((t) => SIDE_EFFECT_FREE_VERBS.has(t));
+}
+
 /** Every word of the operationId (without namespace), e.g. createAndSendInvoice -> create, and, send, invoice. */
 const nameTokens = (op: Operation) => tokenize(op.id.split('/').pop() ?? op.id);
 
@@ -271,6 +288,20 @@ function flatItemDeleteOf(index: Index, opPath: string): Operation | undefined {
 function deleteCreatedPlan(op: Operation, del: Operation, confidenceBoost = 0, reason?: string): InversePlan {
   const newParam = paramName(segmentsOf(del.path).at(-1)!);
   const id = idFieldFor(newParam, op.responseSchema);
+  // The client often chooses the identifier itself (GitHub variables: POST {name, value}, DELETE …/{name}).
+  const chosen = !id.known ? idFieldFor(newParam, op.requestSchema) : undefined;
+  if (chosen?.known && !chosen.key.includes('.')) {
+    return plan(op, 'reversible', 'delete-created', 0.75 + confidenceBoost, {
+      inverse: {
+        operationId: del.id,
+        method: 'delete',
+        path: del.path,
+        bindings: bindParams(del.path, { [newParam]: { from: 'request', key: chosen.key } }),
+      },
+      reasons: [reason ?? `The client chooses the new resource's identifier (request.${chosen.key}); ${del.id} removes it`],
+      caveats: ['If a resource with that identifier already existed, the create may have updated it instead'],
+    });
+  }
   if (id.list || (!id.known && op.responseSchema?.properties)) {
     return plan(op, 'unknown', 'none', 0, {
       reasons: [
@@ -299,7 +330,20 @@ function deleteCreatedPlan(op: Operation, del: Operation, confidenceBoost = 0, r
 
 /** Compile the undo recipe for one mutating operation. */
 export function planOperation(op: Operation, index: Index, override?: Declaration, options: AnalyzeOptions = {}): InversePlan {
-  return finishPlan(basePlan(op, index, override, options), op, index);
+  return finishPlan(oneWay(basePlan(op, index, override, options), op), op, index);
+}
+
+/** An unknown POST/DELETE named after a one-way transition (void, finalize, delete-request…) is irreversible. */
+function oneWay(p: InversePlan, op: Operation): InversePlan {
+  if (p.reversibility !== 'unknown' || p.suggestion || p.strategy !== 'none' || op.method === 'patch' || op.method === 'put') return p;
+  const last = segmentsOf(op.path).at(-1) ?? '';
+  const words = [...(isParamSeg(last) ? [] : tokenize(last)), ...nameTokens(op)].flatMap(stems);
+  const verb = words.find((w) => ONE_WAY_VERBS.has(w));
+  if (!verb) return p;
+  return plan(op, 'irreversible', 'none', 0.6, {
+    reasons: [`"${verb}" is a one-way transition and the API offers no counterpart`],
+    caveats: ['Override with x-undogen or an overrides file if this operation is actually reversible'],
+  });
 }
 
 function basePlan(op: Operation, index: Index, override: Declaration | undefined, options: AnalyzeOptions): InversePlan {
@@ -458,23 +502,40 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
   }
 
   // 3. Action endpoints: archive/unarchive, star (PUT) / unstar (DELETE same path), ...
-  if (isAction) {
-    const sameRouteOpposite =
+  // 3a. Same route, opposite methods: PUT/DELETE …/star, or POST/DELETE …/selected_users with the same body.
+  if (!lastIsParam && !isCollection && op.method !== 'patch') {
+    const candidate =
       op.method === 'delete'
         ? index.find('put', op.path) ?? index.find('post', op.path)
         : index.find('delete', op.path);
+    // A read-only POST on the same route (GitHub's check-token) is not the way back from a DELETE.
+    const sameRouteOpposite = candidate && !isReadOnlyPost(candidate) ? candidate : undefined;
     if (sameRouteOpposite) {
-      return plan(op, 'reversible', 'toggle', 0.65, {
+      const acceptsBody = (o: Operation) => !!(o.requestSchema || o.requestExample !== undefined);
+      const sendsBody = acceptsBody(op) && acceptsBody(sameRouteOpposite);
+      return plan(op, 'reversible', 'toggle', isAction ? 0.65 : 0.55, {
         inverse: {
           operationId: sameRouteOpposite.id,
           method: sameRouteOpposite.method,
           path: op.path,
           bindings: bindParams(op.path),
+          body: sendsBody ? { from: 'request' } : undefined,
         },
-        reasons: [`${op.method.toUpperCase()} and ${sameRouteOpposite.method.toUpperCase()} on the same route toggle the same state`],
-        caveats: ['Only an inverse if the state actually changed (toggling an already-set flag is a no-op)'],
+        reasons: [
+          sendsBody
+            ? `${op.method.toUpperCase()} and ${sameRouteOpposite.method.toUpperCase()} on the same route add and remove what the body names`
+            : `${op.method.toUpperCase()} and ${sameRouteOpposite.method.toUpperCase()} on the same route toggle the same state`,
+        ],
+        caveats: [
+          sendsBody
+            ? 'Members that were already present before the call are removed by the undo too — verify it'
+            : 'Only an inverse if the state actually changed (toggling an already-set flag is a no-op)',
+        ],
       });
     }
+  }
+
+  if (isAction) {
     for (const counterpart of counterpartsOf(last.toLowerCase())) {
       const counterpartPath = `${parentPath}/${counterpart}`;
       const target = MUTATING.map((m) => index.find(m, counterpartPath)).find(Boolean);
