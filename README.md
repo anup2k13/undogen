@@ -9,10 +9,11 @@
 
 AI agents now call real APIs: they open issues, change settings, and delete records. Most "undo for agents" tools ask you to write an inverse for each tool by hand, and nobody checks that those inverses work. An undo button that silently does the wrong thing is worse than having none.
 
-undogen does two things:
+undogen does three things:
 
 1. **Compile.** It reads an OpenAPI spec and derives the undo for every write operation. A `POST` that creates something is undone by the matching `DELETE`. A `PATCH` snapshots the old values and writes them back. Paired actions like `archive`/`unarchive` undo each other, and endpoints that can't be called back (sending email, moving money) are flagged as irreversible.
 2. **Verify.** It runs each operation, then its compiled inverse, against a test server. It diffs the state before and after. An inverse is marked *verified* only when the state is equivalent again.
+3. **Guard.** A client (TypeScript, Python, or an MCP server in front of any API) journals every write with its inverse, refuses to undo over someone else's change, and blocks what can't be undone until a human approves it.
 
 ```
 $ undogen verify openapi.yaml --base-url http://localhost:4010
