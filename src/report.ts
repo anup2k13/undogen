@@ -220,36 +220,102 @@ export function toSarif(report: VerifyReport, specUri: string, specText?: string
 /** Keys whose values are never written to reports. */
 const SECRET_KEY = /token|secret|password|passwd|api[-_]?key|authorization|cookie|session|credential|private[-_]?key/i;
 
+/** Mask a value, keeping only its type and length. */
+function mask(v: unknown): unknown {
+  if (v === null || v === undefined || typeof v === 'boolean') return v;
+  if (typeof v === 'string') return `‹redacted string(${v.length})›`;
+  if (typeof v === 'number') return '‹redacted number›';
+  if (Array.isArray(v)) return v.map(mask);
+  if (typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, mask(x)]));
+  return '‹redacted›';
+}
+
+/** Mask values under secret-looking keys (with `all`, every value), at any depth. */
+function scrubValue(v: unknown, path: string, all: boolean): unknown {
+  const last = path.split(/[.[\]]/).filter(Boolean).at(-1) ?? '';
+  if (SECRET_KEY.test(last) || all) return mask(v);
+  if (Array.isArray(v)) return v.map((x, i) => scrubValue(x, `${path}[${i}]`, all));
+  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, scrubValue(x, `${path}.${k}`, all)]));
+  return v;
+}
+
+/** Where the JSON value opening at `start` closes (string-aware), or -1 if the text ends first. */
+function closingBracket(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === '\\') i++;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') inString = true;
+    else if (ch === '{' || ch === '[') depth++;
+    else if (ch === '}' || ch === ']') if (--depth === 0) return i;
+  }
+  return -1;
+}
+
+/**
+ * Scrub response bodies quoted in free text (a detail like `HTTP 400 {...}`):
+ * secret-looking keys are masked at any depth, and with `all` every body is.
+ * Bodies cut short by `...` are handled too: from the first secret-looking
+ * key (with `all`, from the opening bracket) to the end of the text is masked.
+ */
+function scrubText(text: string, all: boolean): string {
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i]!;
+    if (ch !== '{' && ch !== '[') {
+      out += ch;
+      i++;
+      continue;
+    }
+    const end = closingBracket(text, i);
+    if (end !== -1) {
+      const span = text.slice(i, end + 1);
+      let parsed: unknown;
+      let ok = true;
+      try {
+        parsed = JSON.parse(span);
+      } catch {
+        ok = false;
+      }
+      if (ok && parsed !== null && typeof parsed === 'object') {
+        out += all ? '‹redacted›' : JSON.stringify(scrubValue(parsed, '', false));
+        i = end + 1;
+        continue;
+      }
+      out += ch; // prose in brackets, like "[2 resources]"
+      i++;
+      continue;
+    }
+    const rest = text.slice(i);
+    if (!/^[{[]\s*["{[\d-]/.test(rest)) {
+      out += ch;
+      i++;
+      continue;
+    }
+    // A body cut short: nothing after the first secret-looking key can be trusted to be safe.
+    if (all) return out + '‹redacted›';
+    const secret = /"([^"\\]{1,64})"\s*:/g;
+    let m: RegExpExecArray | null;
+    while ((m = secret.exec(rest))) {
+      if (SECRET_KEY.test(m[1]!)) return out + rest.slice(0, m.index + m[0].length) + '"‹redacted›"';
+    }
+    return out + rest;
+  }
+  return out;
+}
+
 /**
  * Remove sensitive data from a report before it is stored or shared.
  * Values under secret-looking keys are always masked; with `all`, every
  * value in the diffs is masked (only types and lengths remain), and
  * credentials in the base URL are dropped.
  */
-/** Mask secret-looking JSON values quoted in free text; with `all`, every quoted JSON object or array. */
-function scrubText(text: string, all: boolean): string {
-  let out = text.replace(/"([^"\\]{1,64})"\s*:\s*("(?:[^"\\]|\\.)*"|-?[\w.+-]+)/g, (m, key: string) => (SECRET_KEY.test(key) ? `"${key}":"‹redacted›"` : m));
-  if (all) out = out.replace(/[{[][\s\S]*[}\]]/g, '‹redacted›');
-  return out;
-}
-
 export function redactReport(report: VerifyReport, options: { all?: boolean } = {}): VerifyReport {
-  const mask = (v: unknown): unknown => {
-    if (v === null || v === undefined || typeof v === 'boolean') return v;
-    if (typeof v === 'string') return `‹redacted string(${v.length})›`;
-    if (typeof v === 'number') return '‹redacted number›';
-    if (Array.isArray(v)) return v.map(mask);
-    if (typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, mask(x)]));
-    return '‹redacted›';
-  };
-  const scrub = (v: unknown, path: string): unknown => {
-    const last = path.split(/[.[\]]/).filter(Boolean).at(-1) ?? '';
-    if (SECRET_KEY.test(last)) return mask(v);
-    if (options.all) return mask(v);
-    if (Array.isArray(v)) return v.map((x, i) => scrub(x, `${path}[${i}]`));
-    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, scrub(x, `${path}.${k}`)]));
-    return v;
-  };
+  const scrub = (v: unknown, path: string) => scrubValue(v, path, !!options.all);
   let baseUrl = report.baseUrl;
   try {
     const u = new URL(report.baseUrl);

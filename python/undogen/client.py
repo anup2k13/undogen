@@ -19,6 +19,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -450,10 +451,9 @@ class UndoableClient:
             except UndogenError:
                 pass
         if inverse and template and (inverse["method"] == "delete" or plan["strategy"] == "soft-delete"):
-            for name, ref in template["bindings"].items():
-                if ref["from"] in ("response", "location") and inverse["params"].get(name) is not None:
-                    entry["created"] = {"param": name, "value": inverse["params"][name]}
-                    break
+            created_by = _created_binding(template)
+            if created_by and inverse["params"].get(created_by) is not None:
+                entry["created"] = {"param": created_by, "value": inverse["params"][created_by]}
         self.journal.append(entry)
         self._persist(entry)
         return {**response, "entry": entry}
@@ -954,6 +954,18 @@ HASHED = "$undogenSha256"
 def _stable_js(v: Any) -> str:
     """JSON like the TypeScript stableStringify (sorted keys, no spaces), so hashes match across runtimes."""
     return json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _created_binding(template: dict) -> Optional[str]:
+    """The parameter naming the resource a create made (same rule as TypeScript's createdBinding)."""
+    params = re.findall(r"\{([^}]+)\}", template["path"])
+    ref = template["bindings"].get(params[-1]) if params else None
+    if ref and ref["from"] in ("response", "request", "location"):
+        return params[-1]
+    for name, r in template["bindings"].items():
+        if r["from"] in ("response", "location"):
+            return name
+    return None
 
 
 def _hash_values(expected: dict, salt: str) -> dict:

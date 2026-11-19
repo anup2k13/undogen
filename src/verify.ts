@@ -1,5 +1,5 @@
 import { analyze } from './analyze.js';
-import { ConflictError, fillPath, getPath, UndoableClient, VOLATILE_FIELDS, type CallInput, type HttpResult } from './runtime.js';
+import { ConflictError, createdBinding, fillPath, getPath, idFromLocation, UndoableClient, VOLATILE_FIELDS, type CallInput, type HttpResult } from './runtime.js';
 import type { ApiSpec, InversePlan, Operation, RequestTemplate, Reversibility, Schema, Strategy } from './types.js';
 import { structuralPath } from './spec.js';
 import { VERSION } from './version.js';
@@ -365,7 +365,7 @@ export function arranger(raw: UndoableClient, spec: ApiSpec, planById: Map<strin
       throw new SetupError(`setup: ${creator.id} returned HTTP ${res.status} ${short(res.data)} — add a fixture body`);
     }
     // The new id comes from the response, the request (client-chosen ids) or the Location header.
-    const binding = Object.entries(plan.inverse!.bindings).find(([, b]) => b.from === 'response' || b.from === 'request' || b.from === 'location');
+    const binding = createdBinding(plan.inverse!);
     if (!binding) throw new SetupError(`setup: ${creator.id} has no binding for the created id`);
     const [param, ref] = binding;
     const location = res.headers['location'];
@@ -375,7 +375,7 @@ export function arranger(raw: UndoableClient, spec: ApiSpec, planById: Map<strin
         : ref.from === 'request'
           ? getPath(body, ref.key)
           : location
-            ? decodeURIComponent(new URL(location, 'http://x').pathname.split('/').filter(Boolean).at(-1) ?? '') || undefined
+            ? idFromLocation(location)
             : undefined;
     if (id === undefined) throw new SetupError(`setup: ${creator.id}: no id at ${ref.from}${ref.key ? '.' + ref.key : ''}`);
     created.push({ remove: plan.inverse!, params: { ...pool, [param]: id as Scalar } });

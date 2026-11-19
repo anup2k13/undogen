@@ -91,9 +91,13 @@ async function fetchText(uri: string, options: LoadOptions, checkRedirectsAgains
     let permanent: Error | undefined;
     try {
       const res = await (options.fetch ?? fetch)(url, checkRedirectsAgainst ? { redirect: 'manual' } : undefined);
+      if (checkRedirectsAgainst && (res.type === 'opaqueredirect' || res.status === 0)) {
+        // Browsers and some fetch implementations hide manual redirects' targets.
+        throw new RefusedRef('it redirects, and this fetch implementation does not say where to (use --trust-refs, or Node.js)');
+      }
       if (checkRedirectsAgainst && res.status >= 300 && res.status < 400 && res.headers.get('location')) {
         const next = new URL(res.headers.get('location')!, url).href;
-        const reason = refusedRef(next, checkRedirectsAgainst);
+        const reason = refusedRef(next, checkRedirectsAgainst, options.trustRefs);
         if (reason) throw new RefusedRef(`it redirects to ${next}: ${reason}`);
         if (++hops > 5) throw new RefusedRef('too many redirects');
         url = next;

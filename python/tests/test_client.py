@@ -415,3 +415,12 @@ def test_agent_tools_act_on_their_own_session(bundle_path, server_url, tmp_path)
     assert get(f"{server_url}/todos/{kept}")[0] == 200
     with pytest.raises(Exception, match="earlier session"):
         tools["undogen_undo"].execute(seq=1)
+
+
+def test_created_binding_matches_typescript():
+    from undogen.client import _created_binding
+
+    r = lambda f, k: {"from": f, "key": k}  # noqa: E731
+    assert _created_binding({"path": "/orgs/{orgId}/keys/{keyId}", "bindings": {"orgId": r("request", "org"), "keyId": r("response", "id")}}) == "keyId"
+    assert _created_binding({"path": "/buckets/{name}", "bindings": {"name": r("request", "name")}}) == "name"
+    assert _created_binding({"path": "/chat.delete", "bindings": {"channel": r("request", "channel"), "ts": r("response", "ts")}}) == "ts"

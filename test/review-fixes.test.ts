@@ -232,8 +232,27 @@ describe('redacted reports', () => {
 
   it('masks secrets quoted in details', () => {
     const r = redactReport(report).results[0]!;
-    expect(r.detail).toBe('setup: createThing returned HTTP 400 {"error":"bad","api_key":"‹redacted›","n":3} — add a fixture body');
-    expect(r.conflictCheck!.detail).toBe('saw {"password":"‹redacted›","name":"x"}');
+    expect(r.detail).toBe('setup: createThing returned HTTP 400 {"error":"bad","api_key":"‹redacted string(9)›","n":3} — add a fixture body');
+    expect(r.conflictCheck!.detail).toBe('saw {"password":"‹redacted string(7)›","name":"x"}');
+  });
+
+  const withDetail = (detail: string) => ({ ...report, results: [{ ...report.results[0]!, detail }] });
+
+  it('masks a secret whose value is an object', () => {
+    const r = redactReport(withDetail('HTTP 400 {"credentials":{"user":"admin","pass":"hunter2"},"ok":false}')).results[0]!;
+    expect(r.detail).not.toContain('hunter2');
+    expect(r.detail).toContain('"ok":false');
+  });
+
+  it('masks a body cut short by verify ("...")', () => {
+    const cut = 'setup: createKey returned HTTP 400 {"error":"bad","api_key":"sk-live-abcdef...';
+    expect(redactReport(withDetail(cut)).results[0]!.detail).toBe('setup: createKey returned HTTP 400 {"error":"bad","api_key":"‹redacted›"');
+    expect(redactReport(withDetail(cut), { all: true }).results[0]!.detail).toBe('setup: createKey returned HTTP 400 ‹redacted›');
+  });
+
+  it('keeps prose in brackets', () => {
+    const d = 'state restored [2 resources]; conflict check: HTTP 409 {"msg":"x"}';
+    expect(redactReport(withDetail(d), { all: true }).results[0]!.detail).toBe('state restored [2 resources]; conflict check: HTTP 409 ‹redacted›');
   });
 
   it('masks every quoted body with all', () => {
@@ -276,5 +295,61 @@ describe('external $refs that redirect', () => {
     const spec = await loadSpec('https://vendor.example/api/openapi.json', { fetch: f });
     expect(fetched).toEqual(['https://vendor.example/api/openapi.json', 'https://vendor.example/api/schemas.json']);
     expect(spec.warnings).toEqual([expect.stringMatching(/^External \$ref schemas\.json#\/Thing was not loaded: it redirects to http:\/\/169\.254\.169\.254\/latest\/meta-data: .*same origin/)]);
+  });
+});
+
+describe('review fixes (round 3)', () => {
+  it('reads the created id from the delete route’s last parameter, not a parent bound from the request', async () => {
+    const { createdBinding, idFromLocation } = await import('../src/runtime.js');
+    expect(
+      createdBinding({ path: '/orgs/{orgId}/keys/{keyId}', bindings: { orgId: { from: 'request', key: 'org' }, keyId: { from: 'response', key: 'id' } } })?.[0],
+    ).toBe('keyId');
+    expect(createdBinding({ path: '/buckets/{name}', bindings: { name: { from: 'request', key: 'name' } } })?.[0]).toBe('name');
+    expect(createdBinding({ path: '/chat.delete', bindings: { channel: { from: 'request', key: 'channel' }, ts: { from: 'response', key: 'ts' } } })?.[0]).toBe('ts');
+    expect(idFromLocation('/things/50%')).toBe('50%'); // malformed escape: kept as sent
+    expect(idFromLocation('/things/a%20b')).toBe('a b');
+  });
+
+  it('knows later calls depend on a resource whose id the client chose', async () => {
+    const s = parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'x', version: '1' },
+      paths: {
+        '/buckets': { post: { operationId: 'createBucket', requestBody: { content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } } } } }, responses: { '204': { description: '' } } } },
+        '/buckets/{name}': { delete: { operationId: 'deleteBucket', responses: { '204': { description: '' } } } },
+        '/buckets/{name}/objects': { post: { operationId: 'putObject', responses: { '201': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } } } } } },
+        '/buckets/{name}/objects/{objectId}': { delete: { operationId: 'deleteObject', responses: { '204': { description: '' } } } },
+      },
+    });
+    const f: typeof fetch = async (_u, init) => (init?.method === 'POST' ? json({ id: 'obj1' }, 201) : new Response(null, { status: 204 }));
+    const c = new UndoableClient({ spec: s, baseUrl: 'http://x', fetch: f });
+    await c.call('createBucket', { body: { name: 'b1' } });
+    await c.call('putObject', { params: { name: 'b1' } });
+    expect(c.journal[0]!.created).toEqual({ param: 'name', value: 'b1' });
+    await expect(c.undo(1)).rejects.toBeInstanceOf(DependencyError);
+  });
+
+  it('agent tools see a persisted journal before their first call', async () => {
+    const path = join(dir, 'ready.jsonl');
+    const opts = { spec: todo, baseUrl: server.url, store: new FileJournalStore(path) };
+    const earlier = await UndoableClient.open(opts);
+    await earlier.call('createTodo', { body: { title: 'yesterday' } });
+    const fresh = new UndoableClient(opts); // not opened: the journal loads in the background
+    const [undo] = toolDefinitions(fresh, todo.operations, { only: [] }).filter((t) => t.name === 'undogen_undo');
+    await expect(undo!.execute({ seq: 1 })).rejects.toThrow(/earlier session/);
+  });
+
+  it('refuses a ref whose redirect target is hidden (opaque redirect)', async () => {
+    const remote = {
+      openapi: '3.0.3',
+      info: { title: 'Remote', version: '1' },
+      paths: { '/things': { post: { operationId: 'createThing', requestBody: { content: { 'application/json': { schema: { $ref: 'schemas.json#/Thing' } } } }, responses: {} } } },
+    };
+    const f: typeof fetch = async (u) => {
+      if (String(u).endsWith('/openapi.json')) return json(remote);
+      return Object.defineProperty(new Response(null, { status: 200 }), 'type', { value: 'opaqueredirect' });
+    };
+    const spec = await loadSpec('https://vendor.example/api/openapi.json', { fetch: f });
+    expect(spec.warnings).toEqual([expect.stringMatching(/does not say where to/)]);
   });
 });

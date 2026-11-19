@@ -1,5 +1,5 @@
 import { analyze } from './analyze.js';
-import { fillPath, UndoableClient } from './runtime.js';
+import { fillPath, idFromLocation, UndoableClient } from './runtime.js';
 import type { ApiSpec, Declaration, InversePlan } from './types.js';
 import { arranger, synthesize, type Created, type Fixtures } from './verify.js';
 
@@ -134,8 +134,8 @@ export async function learn(options: LearnOptions): Promise<LearnResult> {
 export function candidateIds(data: unknown, location?: string): Array<{ binding: string; value: string | number }> {
   const out: Array<{ binding: string; value: string | number; score: number }> = [];
   if (location) {
-    const last = new URL(location, 'http://x').pathname.split('/').filter(Boolean).at(-1);
-    if (last) out.push({ binding: 'location', value: decodeURIComponent(last), score: -1 });
+    const id = idFromLocation(location);
+    if (id) out.push({ binding: 'location', value: id, score: -1 });
   }
   const walk = (node: unknown, prefix: string, depth: number) => {
     if (!node || typeof node !== 'object' || Array.isArray(node) || depth > 2) return;

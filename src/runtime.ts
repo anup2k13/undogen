@@ -461,7 +461,7 @@ export class UndoableClient {
       }
     }
     if (inverse && template && (inverse.method === 'delete' || plan.strategy === 'soft-delete')) {
-      const createdBy = Object.entries(template.bindings).find(([, ref]) => ref.from === 'response' || ref.from === 'location');
+      const createdBy = createdBinding(template);
       if (createdBy && inverse.params?.[createdBy[0]] !== undefined) {
         entry.created = { param: createdBy[0], value: inverse.params[createdBy[0]]! };
       }
@@ -857,12 +857,34 @@ export function getPath(obj: unknown, dotted: string): unknown {
   return cur;
 }
 
+/** The last path segment of a Location header, decoded (as sent, if it isn't valid percent-encoding). */
+export function idFromLocation(location: string): string | undefined {
+  const last = new URL(location, 'http://x').pathname.split('/').filter(Boolean).at(-1);
+  if (!last) return undefined;
+  try {
+    return decodeURIComponent(last) || undefined;
+  } catch {
+    return last;
+  }
+}
+
+/**
+ * The binding that names the resource a create made: the inverse route's last
+ * path parameter, when it comes from the response, the request (a client-chosen
+ * id) or the Location header; otherwise the first response or Location binding
+ * (RPC deletes that take the id in the body).
+ */
+export function createdBinding(template: Pick<RequestTemplate, 'path' | 'bindings'>): [string, ValueRef] | undefined {
+  const last = [...template.path.matchAll(/\{([^}]+)\}/g)].at(-1)?.[1];
+  const ref = last ? template.bindings[last] : undefined;
+  if (last && ref && (ref.from === 'response' || ref.from === 'request' || ref.from === 'location')) return [last, ref];
+  return Object.entries(template.bindings).find(([, r]) => r.from === 'response' || r.from === 'location');
+}
+
 function lookup(ref: ValueRef, sources: Sources): unknown {
   if (ref.from === 'location') {
     const loc = sources.responseHeaders?.['location'];
-    if (!loc) return undefined;
-    const pathname = new URL(loc, 'http://x').pathname;
-    return decodeURIComponent(pathname.split('/').filter(Boolean).at(-1) ?? '') || undefined;
+    return loc ? idFromLocation(loc) : undefined;
   }
   return getPath(sources[ref.from], ref.key);
 }

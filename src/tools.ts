@@ -335,6 +335,7 @@ export function toolDefinitions(client: UndoableClient, operations: Operation[],
       },
       annotations: { title: 'Undo a write', destructiveHint: true, idempotentHint: false, openWorldHint: true },
       async execute(args) {
+        await client.ready(); // a persisted journal may still be loading
         // Agents act on their own session only: a persisted journal also holds earlier sessions' writes.
         const mine = client.journal.filter((e) => e.session === client.session);
         const seq = typeof args.seq === 'number' ? args.seq : undefined;
@@ -420,6 +421,7 @@ export function toolDefinitions(client: UndoableClient, operations: Operation[],
       inputSchema: { type: 'object', properties: {} },
       annotations: { title: 'Journal', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
       async execute() {
+        await client.ready();
         return { entries: client.journal.filter((e) => e.session === client.session).map(describeEntry) };
       },
     },
