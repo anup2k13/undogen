@@ -237,6 +237,8 @@ export function parseSpec(input: string | object, options: ParseOptions = {}): A
         path,
         summary: op.summary,
         description: op.description,
+        tags: Array.isArray(op.tags) ? op.tags.filter((t: unknown): t is string => typeof t === 'string') : [],
+        ...(op.deprecated === true ? { deprecated: true } : {}),
         pathParams: pathParamsOf(path),
         queryParams: toParameters(params, 'query'),
         headerParams: toParameters(params, 'header'),

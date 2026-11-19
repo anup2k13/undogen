@@ -51,6 +51,13 @@ export interface ToolOptions {
   includeReads?: boolean;
   /** Add undogen_undo, undogen_undo_all and undogen_journal. Default true. */
   undoTools?: boolean;
+  /** Only operations with one of these OpenAPI tags. */
+  tags?: string[];
+  /**
+   * Instead of one tool per operation (too many for large APIs), expose undogen_search,
+   * undogen_describe and undogen_call, plus the undo tools.
+   */
+  compact?: boolean;
 }
 
 /** Tool names must match ^[a-zA-Z0-9_-]{1,64}$ for most agent frameworks. */
@@ -135,6 +142,124 @@ function declaredHeaders(op: Operation, given: unknown): Record<string, string> 
   return Object.keys(out).length ? out : undefined;
 }
 
+const STOPWORDS = new Set(['a', 'an', 'the', 'to', 'of', 'for', 'in', 'on', 'by', 'and', 'or', 'with', 'from', 'my', 'all', 'this', 'that', 'it', 'is', 'be', 'as', 'at', 'into', 'some', 'new']);
+const stem = (w: string) => {
+  let x = w.replace(/(ies)$/, 'y').replace(/(sses|ches|shes|xes)$/, (m) => m.slice(0, -2)).replace(/([^s])s$/, '$1');
+  if (x.length > 4) x = x.replace(/(ing|ed)$/, '');
+  if (x.length > 3) x = x.replace(/e$/, ''); // close/closed/closing -> clos
+  return x;
+};
+const searchWords = (s: string) =>
+  s
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w.length > 1 && !STOPWORDS.has(w))
+    .map(stem);
+
+/**
+ * Ranks operations for a free-text query: words are weighted by where they occur
+ * (summary and name over tags, path and description) and by how rare they are (IDF),
+ * with a bonus when the summary contains the whole query.
+ */
+function searchIndex(client: UndoableClient, tools: ToolDefinition[]): (query: string) => ToolDefinition[] {
+  const docs = tools.map((t) => {
+    const op = client.operation(t.operationId!)!;
+    const fields: Array<[string[], number]> = [
+      [searchWords(op.summary ?? ''), 3],
+      [searchWords(op.id.split('/').pop() ?? op.id), 3],
+      [searchWords(op.tags.join(' ')), 2],
+      [searchWords(op.path.replace(/\{[^}]+\}/g, ' ')), 1],
+      [searchWords((op.description ?? '').slice(0, 300)), 0.5],
+    ];
+    const weight = new Map<string, number>();
+    for (const [ws, w] of fields) for (const x of ws) weight.set(x, Math.max(weight.get(x) ?? 0, w));
+    return { t, weight, summary: (op.summary ?? '').toLowerCase(), deprecated: !!op.deprecated };
+  });
+  const df = new Map<string, number>();
+  for (const d of docs) for (const w of d.weight.keys()) df.set(w, (df.get(w) ?? 0) + 1);
+  const idf = (w: string) => Math.log(1 + docs.length / (df.get(w) ?? docs.length));
+  return (query) => {
+    const q = [...new Set(searchWords(query))];
+    const phrase = query.toLowerCase().trim();
+    return docs
+      .map((d) => {
+        let score = 0;
+        for (const w of q) {
+          const exact = d.weight.get(w);
+          if (exact) score += exact * idf(w);
+          else if (w.length >= 4) {
+            const partial = [...d.weight.entries()].find(([x]) => x.startsWith(w) || (x.length >= 4 && w.startsWith(x)));
+            if (partial) score += partial[1] * idf(partial[0]) * 0.5;
+          }
+        }
+        if (phrase && d.summary.includes(phrase)) score += 10;
+        return { t: d.t, score: d.deprecated ? score * 0.3 : score };
+      })
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .map((x) => x.t);
+  };
+}
+
+/** Three tools that reach every operation: search, describe, call. */
+function compactTools(client: UndoableClient, perOperation: ToolDefinition[]): ToolDefinition[] {
+  const byKey = new Map<string, ToolDefinition>();
+  for (const t of perOperation) {
+    byKey.set(t.name, t);
+    if (t.operationId) byKey.set(t.operationId, t);
+  }
+  const find = (name: unknown) => {
+    const t = byKey.get(String(name ?? ''));
+    if (!t) throw new Error(`Unknown operation "${String(name)}". Use undogen_search to find one.`);
+    return t;
+  };
+  const index = searchIndex(client, perOperation);
+  const summary = (t: ToolDefinition) => {
+    const op = client.operation(t.operationId!)!;
+    return { operation: t.name, route: `${op.method.toUpperCase()} ${op.path}`, description: t.description };
+  };
+  return [
+    {
+      name: 'undogen_search',
+      description: `Find API operations by what they do (${perOperation.length} available). Returns names to pass to undogen_describe and undogen_call, and whether each can be undone.`,
+      inputSchema: {
+        type: 'object',
+        properties: { query: { type: 'string', description: 'What you want to do, e.g. "close an issue"' }, limit: { type: 'integer', description: 'Default 10' } },
+        required: ['query'],
+      },
+      annotations: { title: 'Search operations', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+      async execute(args) {
+        const limit = typeof args.limit === 'number' ? args.limit : 10;
+        return { results: index(String(args.query ?? '')).slice(0, limit).map((t) => summary(t)) };
+      },
+    },
+    {
+      name: 'undogen_describe',
+      description: 'The input schema of an operation found with undogen_search, and whether it can be undone. Makes no API calls.',
+      inputSchema: { type: 'object', properties: { operation: { type: 'string' } }, required: ['operation'] },
+      annotations: { title: 'Describe an operation', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+      async execute(args) {
+        const t = find(args.operation);
+        return { ...summary(t), input: t.inputSchema, annotations: t.annotations };
+      },
+    },
+    {
+      name: 'undogen_call',
+      description: 'Call an operation by name with the input undogen_describe shows: { operation, input: { <path params>, query, headers, body } }. Writes are journaled and can be undone with undogen_undo.',
+      inputSchema: {
+        type: 'object',
+        properties: { operation: { type: 'string' }, input: { type: 'object', description: 'Path parameters, plus query, headers and body as described' } },
+        required: ['operation'],
+      },
+      annotations: { title: 'Call an operation', destructiveHint: true, openWorldHint: true },
+      async execute(args) {
+        return find(args.operation).execute((args.input ?? {}) as Record<string, unknown>);
+      },
+    },
+  ];
+}
+
 /** Summarise a journal entry for an agent: what ran and what undo would do. */
 export function describeEntry(e: JournalEntry) {
   return {
@@ -160,6 +285,7 @@ export function toolDefinitions(client: UndoableClient, operations: Operation[],
   for (const op of operations) {
     if (op.method === 'get' && options.includeReads === false) continue;
     if (!matchesOnly(op.id, options.only)) continue;
+    if (options.tags?.length && !op.tags.some((t) => options.tags!.some((w) => w.toLowerCase() === t.toLowerCase()))) continue;
     const plan = client.planFor(op.id);
     const reversible = op.method === 'get' || plan?.reversibility === 'reversible';
     tools.push({
@@ -188,6 +314,7 @@ export function toolDefinitions(client: UndoableClient, operations: Operation[],
       },
     });
   }
+  if (options.compact) tools.splice(0, tools.length, ...compactTools(client, [...tools]));
   if (options.undoTools === false) return tools;
 
   const undoOptions = (args: Record<string, unknown>): UndoOptions => ({ force: args.force === true, cascade: args.cascade === true });

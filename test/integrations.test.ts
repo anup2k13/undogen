@@ -330,3 +330,34 @@ describe('security', () => {
     await rm(d, { recursive: true, force: true });
   });
 });
+
+describe('tools for large APIs', () => {
+  const tagged = parseSpec({
+    openapi: '3.0.3',
+    info: { title: 'x', version: '1' },
+    paths: {
+      '/issues': { post: { operationId: 'createIssue', tags: ['issues'], summary: 'Create an issue', responses: {} } },
+      '/issues/{n}/close': { post: { operationId: 'closeIssue', tags: ['issues'], summary: 'Close an issue', responses: {} } },
+      '/pulls': { post: { operationId: 'createPull', tags: ['pulls'], summary: 'Open a pull request', responses: {} } },
+    },
+  });
+
+  it('filters by OpenAPI tags', () => {
+    const client = new UndoableClient({ spec: tagged, baseUrl: 'http://x' });
+    expect(toolDefinitions(client, tagged.operations, { tags: ['Issues'], undoTools: false }).map((t) => t.name)).toEqual(['createIssue', 'closeIssue']);
+  });
+
+  it('compact mode: search, describe and call reach every operation through three tools', async () => {
+    const client = new UndoableClient({ spec, baseUrl: server.url });
+    const tools = Object.fromEntries(toolDefinitions(client, spec.operations, { compact: true }).map((t) => [t.name, t]));
+    expect(Object.keys(tools)).toEqual(['undogen_search', 'undogen_describe', 'undogen_call', 'undogen_undo', 'undogen_undo_all', 'undogen_checkpoint', 'undogen_preview', 'undogen_journal']);
+    const found = (await tools.undogen_search!.execute({ query: 'archive a todo' })) as { results: Array<{ operation: string }> };
+    expect(found.results[0]!.operation).toBe('archiveTodo');
+    const described = (await tools.undogen_describe!.execute({ operation: 'createTodo' })) as { input: { required: string[] } };
+    expect(described.input.required).toEqual(['body']);
+    const created = (await tools.undogen_call!.execute({ operation: 'createTodo', input: { body: { title: 'compact' } } })) as { data: { id: string } };
+    await tools.undogen_undo!.execute({});
+    expect((await fetch(`${server.url}/todos/${created.data.id}`)).status).toBe(404);
+    await expect(tools.undogen_call!.execute({ operation: 'nope' })).rejects.toThrow(/undogen_search/);
+  });
+});

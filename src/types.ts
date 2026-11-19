@@ -31,6 +31,10 @@ export interface Operation {
   path: string;
   summary?: string;
   description?: string;
+  /** OpenAPI tags, e.g. ["issues"]. */
+  tags: string[];
+  /** Marked deprecated in the description. */
+  deprecated?: boolean;
   pathParams: string[];
   /** Query parameters (path-level and operation-level, merged). */
   queryParams: Parameter[];

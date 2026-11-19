@@ -58,6 +58,8 @@ ${c.bold('mcp')}
   --journal <file>       Persist the journal (undo after restarts; blocks replays of irreversible calls)
   --irreversible <mode>  ask (default: ask the human via MCP elicitation), allow, or deny
   --no-reads             Don't expose GET operations as tools
+  --tags <a,b>           Only operations with these OpenAPI tags
+  --compact              Three tools (search, describe, call) instead of one per operation, for large APIs
 
 ${c.bold('diff')}
   --markdown             Print a Markdown summary (for pull request comments)
@@ -98,6 +100,7 @@ const OPTIONS = {
   journal: { type: 'string' },
   irreversible: { type: 'string' },
   'no-reads': { type: 'boolean' },
+  tags: { type: 'string' },
   seq: { type: 'string' },
   after: { type: 'string' },
   all: { type: 'boolean' },
@@ -306,6 +309,8 @@ async function main(argv: string[]) {
         store: values.journal ? new FileJournalStore(values.journal) : undefined,
         only,
         includeReads: !values['no-reads'],
+        tags: list(values.tags),
+        compact: values.compact,
         irreversible: mode as 'ask' | 'allow' | 'deny',
       });
       await server.connect(new StdioServerTransport());
