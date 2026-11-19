@@ -335,3 +335,67 @@ describe('analyze: runtime support fields', async () => {
     expect(byId.patchJob).toMatchObject({ capture: { path: '/jobs/{jobId}' }, inverse: { body: { from: 'before-request-keys' } } });
   });
 });
+
+describe('analyze: Stripe, Twilio, Slack and Kubernetes shapes', () => {
+  const ok = { '200': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { sid: { type: 'string' }, id: { type: 'string' } } } } } } };
+  const spec = parseSpec({
+    openapi: '3.0.3',
+    info: { title: 'Shapes', version: '1' },
+    paths: {
+      '/v1/customers': { post: { operationId: 'PostCustomers', responses: ok } },
+      '/v1/customers/{customer}': {
+        get: { operationId: 'GetCustomer', responses: ok },
+        post: { operationId: 'PostCustomersCustomer', responses: ok },
+        delete: { operationId: 'DeleteCustomer', responses: ok },
+      },
+      '/2010-04-01/Accounts/{AccountSid}/Calls.json': { post: { operationId: 'CreateCall2', responses: ok } },
+      '/2010-04-01/Accounts/{AccountSid}/Queues.json': { post: { operationId: 'CreateQueue', responses: ok } },
+      '/2010-04-01/Accounts/{AccountSid}/Queues/{Sid}.json': {
+        get: { operationId: 'FetchQueue', responses: ok },
+        post: { operationId: 'UpdateQueue', responses: ok },
+        delete: { operationId: 'DeleteQueue', responses: ok },
+      },
+      '/conversations.archive': { post: { operationId: 'conversations_archive', responses: ok } },
+      '/conversations.unarchive': { post: { operationId: 'conversations_unarchive', responses: ok } },
+      '/pins.add': { post: { operationId: 'pins_add', responses: ok } },
+      '/pins.remove': { post: { operationId: 'pins_remove', responses: ok } },
+      '/api/v1/namespaces/{namespace}/configmaps': {
+        post: { operationId: 'createConfigMap', responses: ok },
+        delete: { operationId: 'deleteCollectionConfigMap', responses: ok },
+      },
+      '/api/v1/namespaces/{namespace}/configmaps/{name}': {
+        get: { operationId: 'readConfigMap', responses: ok },
+        delete: { operationId: 'deleteConfigMap', responses: ok },
+      },
+    },
+  });
+  const byId = Object.fromEntries(analyze(spec).plans.map((p) => [p.operationId, p]));
+
+  it('treats POST to an item as an update (Stripe style)', () => {
+    expect(byId.PostCustomersCustomer).toMatchObject({
+      strategy: 'restore-snapshot',
+      capture: { path: '/v1/customers/{customer}' },
+      inverse: { method: 'post', body: { from: 'before-request-keys' } },
+      inverseIfMissing: { method: 'delete' },
+    });
+  });
+
+  it('understands .json path suffixes (Twilio style)', () => {
+    expect(byId.CreateQueue).toMatchObject({
+      strategy: 'delete-created',
+      inverse: { path: '/2010-04-01/Accounts/{AccountSid}/Queues/{Sid}.json', bindings: { AccountSid: { from: 'params', key: 'AccountSid' }, Sid: { from: 'response', key: 'sid' } } },
+    });
+    expect(byId.UpdateQueue!.strategy).toBe('restore-snapshot');
+    expect(byId.DeleteQueue!.strategy).toBe('recreate-from-snapshot');
+  });
+
+  it('pairs RPC-style methods and passes the same arguments (Slack style)', () => {
+    expect(byId.conversations_archive).toMatchObject({ strategy: 'paired-action', inverse: { operationId: 'conversations_unarchive', body: { from: 'request' } } });
+    expect(byId.pins_remove!.inverse!.operationId).toBe('pins_add');
+  });
+
+  it('gates deleting a whole collection (Kubernetes deletecollection)', () => {
+    expect(byId.deleteCollectionConfigMap).toMatchObject({ reversibility: 'irreversible' });
+    expect(byId.deleteConfigMap!.reversibility).toBe('compensable');
+  });
+});

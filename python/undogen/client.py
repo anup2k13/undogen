@@ -638,6 +638,23 @@ class UndoableClient:
         }
 
 
+def _loose_key(k: str) -> str:
+    return k.lower().replace("_", "").replace("-", "").replace(" ", "")
+
+
+def loose_get(obj: Any, key: str):
+    """(found, value), tolerating case/separator differences (FriendlyName vs friendly_name)."""
+    if not isinstance(obj, dict):
+        return False, None
+    if key in obj:
+        return True, obj[key]
+    want = _loose_key(key)
+    for k, v in obj.items():
+        if _loose_key(k) == want:
+            return True, v
+    return False, None
+
+
 def _resolve_body(body: Optional[dict], sources: dict) -> Any:
     if not body:
         return None
@@ -654,8 +671,12 @@ def _resolve_body(body: Optional[dict], sources: dict) -> Any:
         return before if fields == "*" else {k: before[k] for k in fields if isinstance(before, dict) and k in before}
     if kind == "before-request-keys":
         req = sources.get("request")
-        keys = list(req.keys()) if isinstance(req, dict) else []
-        return {k: before[k] for k in keys if isinstance(before, dict) and k in before}
+        out = {}
+        for k in list(req.keys()) if isinstance(req, dict) else []:
+            found, value = loose_get(before, k)
+            if found:
+                out[k] = value
+        return out
     raise UndogenError(f"Unknown body template {kind}")
 
 
@@ -665,20 +686,21 @@ def _expected_state(request: Any, response: Any, only_echoed: bool) -> dict:
     res = response if isinstance(response, dict) else None
     out = {}
     for k, v in request.items():
-        if res is not None and k in res:
-            out[k] = res[k]
+        found, value = loose_get(res, k)
+        if found:
+            out[k] = value
         elif not only_echoed:
             out[k] = v
     return out
 
 
 def _compare(expected: dict, current: Any) -> List[dict]:
-    cur = current if isinstance(current, dict) else {}
-    return [
-        {"field": k, "expected": v, "actual": cur.get(k)}
-        for k, v in expected.items()
-        if _stable(cur.get(k)) != _stable(v)
-    ]
+    out = []
+    for k, v in expected.items():
+        actual = loose_get(current, k)[1]
+        if _stable(actual) != _stable(v):
+            out.append({"field": k, "expected": v, "actual": actual})
+    return out
 
 
 def _query_value(v: Any) -> str:

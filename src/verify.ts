@@ -1,6 +1,7 @@
 import { analyze } from './analyze.js';
 import { fillPath, getPath, UndoableClient, type CallInput, type HttpResult } from './runtime.js';
 import type { ApiSpec, InversePlan, Operation, RequestTemplate, Reversibility, Schema, Strategy } from './types.js';
+import { structuralPath } from './spec.js';
 import { VERSION } from './version.js';
 
 export interface FixtureStep {
@@ -173,10 +174,10 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
       // 1. Arrange: real resources for every path param, plus children to expose cascades.
       const pool: Record<string, Scalar> = { ...(fixture.params ?? {}) };
       await ensure(op.path, pool, created);
-      const root = itemRootOf(op.path);
+      const root = itemRootOf(structuralPath(op.path));
       if (seedChildren && root) {
         for (const c of creators) {
-          if (!c.path.startsWith(root + '/')) continue;
+          if (!structuralPath(c.path).startsWith(root + '/')) continue;
           if (!c.pathParams.every((p) => pool[p] !== undefined)) continue;
           const child = childParamOf(c.path, spec);
           if (child && pool[child] === undefined) pool[child] = await create(c, pool, created);
@@ -291,12 +292,12 @@ export function arranger(raw: UndoableClient, spec: ApiSpec, planById: Map<strin
 
   /** Make sure every path param of `path` refers to a real resource, creating parents first. */
   const ensure = async (path: string, pool: Record<string, Scalar>, created: Created[]) => {
-    const segs = path.split('/').filter(Boolean);
+    const segs = structuralPath(path).split('/').filter(Boolean);
     for (let i = 0; i < segs.length; i++) {
       const m = /^\{(.+)\}$/.exec(segs[i]!);
       if (!m || pool[m[1]!] !== undefined) continue;
       const collection = '/' + segs.slice(0, i).join('/');
-      const creator = creators.find((c) => c.path === collection);
+      const creator = creators.find((c) => structuralPath(c.path) === structuralPath(collection));
       if (!creator) throw new SetupError(`setup: no way to create {${m[1]}} (no POST ${collection}) — add fixture params`);
       pool[m[1]!] = await create(creator, pool, created);
     }
@@ -329,7 +330,8 @@ function itemRootOf(path: string): string | undefined {
 }
 
 function childParamOf(collectionPath: string, spec: ApiSpec): string | undefined {
-  const item = spec.operations.find((o) => parentOf(o.path) === collectionPath && /\{[^}]+\}$/.test(o.path));
+  const target = structuralPath(collectionPath);
+  const item = spec.operations.find((o) => parentOf(structuralPath(o.path)) === target && /\{[^}]+\}$/.test(structuralPath(o.path)));
   return item?.pathParams.at(-1);
 }
 

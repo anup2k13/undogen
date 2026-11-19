@@ -730,6 +730,21 @@ function resolveQuery(template: RequestTemplate, sources: Sources): Record<strin
   return Object.keys(out).length ? out : undefined;
 }
 
+const looseKey = (k: string) => k.toLowerCase().replace(/[-_\s]/g, '');
+
+/**
+ * Read a field, tolerating case and separator differences: APIs like Twilio take
+ * form fields as FriendlyName but return JSON as friendly_name.
+ */
+export function looseGet(obj: unknown, key: string): { found: boolean; value?: unknown } {
+  if (!obj || typeof obj !== 'object') return { found: false };
+  const o = obj as Record<string, unknown>;
+  if (key in o) return { found: true, value: o[key] };
+  const want = looseKey(key);
+  const match = Object.keys(o).find((k) => looseKey(k) === want);
+  return match === undefined ? { found: false } : { found: true, value: o[match] };
+}
+
 function pick(obj: unknown, keys: string[]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   if (!obj || typeof obj !== 'object') return out;
@@ -750,7 +765,12 @@ function resolveBody(body: BodyTemplate | undefined, sources: Sources): unknown 
     case 'before-request-keys': {
       if (sources.before == null) throw new Error('No captured state to restore from');
       const keys = sources.request && typeof sources.request === 'object' ? Object.keys(sources.request) : [];
-      return pick(sources.before, keys);
+      const out: Record<string, unknown> = {};
+      for (const k of keys) {
+        const hit = looseGet(sources.before, k);
+        if (hit.found) out[k] = hit.value;
+      }
+      return out;
     }
   }
 }
@@ -765,7 +785,8 @@ function expectedState(request: unknown, response: unknown, onlyEchoed: boolean)
   if (!request || typeof request !== 'object' || Array.isArray(request)) return out;
   const res = response && typeof response === 'object' && !Array.isArray(response) ? (response as Record<string, unknown>) : undefined;
   for (const [k, v] of Object.entries(request)) {
-    if (res && k in res) out[k] = res[k];
+    const hit = looseGet(res, k);
+    if (hit.found) out[k] = hit.value;
     else if (!onlyEchoed) out[k] = v;
   }
   return out;
@@ -775,7 +796,8 @@ function compareExpected(expected: Record<string, unknown>, current: unknown): C
   const cur = current && typeof current === 'object' ? (current as Record<string, unknown>) : {};
   const out: Conflict[] = [];
   for (const [field, value] of Object.entries(expected)) {
-    if (stableStringify(cur[field]) !== stableStringify(value)) out.push({ field, expected: value, actual: cur[field] });
+    const actual = looseGet(cur, field).value;
+    if (stableStringify(actual) !== stableStringify(value)) out.push({ field, expected: value, actual });
   }
   return out;
 }

@@ -12,6 +12,7 @@ import type {
   Schema,
   ValueRef,
 } from './types.js';
+import { structuralPath } from './spec.js';
 
 /** Action endpoints that undo each other: POST /x/{id}/archive <-> POST /x/{id}/unarchive. */
 const ACTION_PAIRS: Array<[string, string]> = [
@@ -40,6 +41,8 @@ const ACTION_PAIRS: Array<[string, string]> = [
   ['approve', 'unapprove'],
   ['like', 'unlike'],
   ['mark', 'unmark'],
+  ['invite', 'kick'],
+  ['join', 'leave'],
 ];
 
 /** Verbs whose effects leave the system boundary or cannot be called back. */
@@ -81,7 +84,8 @@ const stems = (t: string) => [t, t.replace(/es$/, ''), t.replace(/s$/, '')];
 const MUTATING: HttpMethod[] = ['post', 'put', 'patch', 'delete'];
 
 const isParamSeg = (seg: string) => /^\{[^}]+\}$/.test(seg);
-const segmentsOf = (path: string) => path.split('/').filter(Boolean);
+/** Segments of the structural path (format suffixes like .json removed). */
+const segmentsOf = (path: string) => structuralPath(path).split('/').filter(Boolean);
 const paramName = (seg: string) => seg.slice(1, -1);
 const joinPath = (segs: string[]) => '/' + segs.join('/');
 
@@ -101,15 +105,20 @@ interface Index {
 }
 
 function buildIndex(spec: ApiSpec): Index {
-  const byKey = new Map(spec.operations.map((o) => [`${o.method} ${o.path}`, o]));
+  const byKey = new Map<string, Operation>();
+  for (const o of spec.operations) {
+    const key = `${o.method} ${structuralPath(o.path)}`;
+    if (!byKey.has(key)) byKey.set(key, o);
+  }
   const paths = new Set(spec.operations.map((o) => o.path));
   return {
     ops: spec.operations,
-    find: (method, path) => byKey.get(`${method} ${path}`),
+    find: (method, path) => byKey.get(`${method} ${structuralPath(path)}`),
     hasItemChild: (path) => {
+      const target = structuralPath(path);
       for (const p of paths) {
         const segs = segmentsOf(p);
-        if (segs.length && isParamSeg(segs[segs.length - 1]!) && joinPath(segs.slice(0, -1)) === path) return true;
+        if (segs.length && isParamSeg(segs[segs.length - 1]!) && joinPath(segs.slice(0, -1)) === target) return true;
       }
       return false;
     },
@@ -118,9 +127,10 @@ function buildIndex(spec: ApiSpec): Index {
 
 /** Find the path that addresses a single item of `collectionPath`, e.g. /todos -> /todos/{todoId}. */
 function itemPathOf(index: Index, collectionPath: string): string | undefined {
+  const target = structuralPath(collectionPath);
   for (const op of index.ops) {
     const segs = segmentsOf(op.path);
-    if (segs.length && isParamSeg(segs[segs.length - 1]!) && joinPath(segs.slice(0, -1)) === collectionPath) {
+    if (segs.length && isParamSeg(segs[segs.length - 1]!) && joinPath(segs.slice(0, -1)) === target) {
       return op.path;
     }
   }
@@ -366,6 +376,32 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
     });
   }
 
+  // 1b. RPC-style APIs (Slack): POST /conversations.archive <-> POST /conversations.unarchive, same arguments.
+  const rpc = op.method === 'post' && !lastIsParam ? /^(.+)\.([A-Za-z]+)$/.exec(last) : null;
+  if (rpc) {
+    const [, noun, verb] = rpc as unknown as [string, string, string];
+    for (const counterpart of counterpartsOf(verb.toLowerCase())) {
+      const target = index.ops.find(
+        (o) => o.method === 'post' && segmentsOf(o.path).at(-1)?.toLowerCase() === `${noun}.${counterpart}`.toLowerCase() && joinPath(segmentsOf(o.path).slice(0, -1)) === parentPath,
+      );
+      if (target) {
+        return plan(op, 'reversible', 'paired-action', 0.55, {
+          inverse: { operationId: target.id, method: 'post', path: target.path, bindings: bindParams(target.path), body: { from: 'request' } },
+          reasons: [`RPC method "${verb}" is paired with "${segmentsOf(target.path).at(-1)}"`],
+          caveats: ['Assumes the counterpart takes the same arguments', 'Paired actions are inverses only if they reset every field the action touched — verify it'],
+        });
+      }
+    }
+  }
+
+  // 1c. DELETE on a collection removes every item: no single request can bring them back.
+  if (op.method === 'delete' && isCollection) {
+    return plan(op, 'irreversible', 'none', 0.7, {
+      reasons: ['Deletes every item in a collection; re-creating them all is not a safe inverse'],
+      caveats: ['Declare an inverse with x-undogen if your API supports restoring the collection'],
+    });
+  }
+
   // 2. POST to a collection creates a resource -> delete what was created.
   if (op.method === 'post' && isCollection) {
     const itemPath = itemPathOf(index, op.path)!;
@@ -497,6 +533,18 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
       });
     }
 
+    // 4b. POST to an item updates it (Stripe, Twilio): snapshot it first, POST the old values back.
+    if (op.method === 'post' && getOp && !index.find('put', op.path) && !index.find('patch', op.path)) {
+      const del = index.find('delete', op.path);
+      return plan(op, 'reversible', 'restore-snapshot', 0.6, {
+        capture: getTemplate(getOp),
+        inverse: { operationId: op.id, method: 'post', path: op.path, bindings: bindParams(op.path), body: { from: 'before-request-keys' } },
+        inverseIfMissing: del ? { operationId: del.id, method: 'delete', path: del.path, bindings: bindParams(del.path) } : undefined,
+        reasons: [`POST to an item updates it (no PUT/PATCH): snapshot via ${getOp.id}, POST the old values back`],
+        caveats: ['Assumes POST updates only the fields it is sent (Stripe-style partial update)', 'Nested and form-encoded fields are matched by name, ignoring case and separators'],
+      });
+    }
+
     // 5. DELETE an item -> snapshot it first, re-create it from the snapshot.
     if (op.method === 'delete') {
       if (!getOp) {
@@ -595,7 +643,7 @@ function childPlansOf(index: Index, itemPath: string): ChildPlan[] {
   for (const list of index.ops) {
     if (list.method !== 'get') continue;
     const segs = segmentsOf(list.path);
-    if (joinPath(segs.slice(0, -1)) !== itemPath || isParamSeg(segs.at(-1)!)) continue;
+    if (joinPath(segs.slice(0, -1)) !== structuralPath(itemPath) || isParamSeg(segs.at(-1)!)) continue;
     const create = index.find('post', list.path);
     const childItem = itemPathOf(index, list.path);
     if (!create || !childItem) continue;

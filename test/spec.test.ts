@@ -120,7 +120,7 @@ describe('OpenAPI parsing details', () => {
       paths: { '/nodes': { post: { requestBody: { content: { 'application/json': { schema: { $ref: '#/components/schemas/Node' } } } }, responses: {} } } },
     });
     expect(spec.operations[0]!.requestSchema!.properties!.name).toEqual({ type: 'string' });
-    expect(spec.warnings).toEqual(['Circular $ref #/components/schemas/Node was truncated where it recurses']);
+    expect(spec.warnings).toEqual(['1 recursive schema(s) truncated where they recurse (Node); harmless for analysis']);
   });
 
   it('keeps deeply nested schemas that the old depth limit silently dropped', () => {

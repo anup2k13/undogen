@@ -281,3 +281,66 @@ describe('transport', () => {
     await expect(client.call('createItem', { query: { 'api-version': '1' }, body: {} })).rejects.toThrow(/timed out after 20ms/);
   });
 });
+
+describe('Twilio-style APIs', () => {
+  it('restores form-encoded PascalCase fields from snake_case JSON, through .json routes', async () => {
+    const { createServer } = await import('node:http');
+    const queues = new Map<string, { sid: string; friendly_name: string; max_size: number }>();
+    let n = 0;
+    const srv = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const form = Object.fromEntries(new URLSearchParams(Buffer.concat(chunks).toString()));
+      const m = /^\/Accounts\/AC1\/Queues(?:\/(\w+))?\.json$/.exec(req.url ?? '');
+      const send = (status: number, body?: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(body ? JSON.stringify(body) : undefined);
+      if (!m) return send(404);
+      if (!m[1] && req.method === 'POST') {
+        const q = { sid: `QU${++n}`, friendly_name: form.FriendlyName ?? '', max_size: Number(form.MaxSize ?? 100) };
+        queues.set(q.sid, q);
+        return send(201, q);
+      }
+      const q = queues.get(m[1] ?? '');
+      if (!q) return send(404);
+      if (req.method === 'GET') return send(200, q);
+      if (req.method === 'POST') {
+        if (form.FriendlyName !== undefined) q.friendly_name = form.FriendlyName;
+        if (form.MaxSize !== undefined) q.max_size = Number(form.MaxSize);
+        return send(200, q);
+      }
+      if (req.method === 'DELETE') {
+        queues.delete(q.sid);
+        return send(204);
+      }
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${(srv.address() as import('node:net').AddressInfo).port}`;
+    const form = { 'application/x-www-form-urlencoded': { schema: { type: 'object', properties: { FriendlyName: { type: 'string' }, MaxSize: { type: 'integer' } } } } };
+    const ok = { '200': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { sid: { type: 'string' } } } } } } };
+    const twilio = parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'Twilio-ish', version: '1' },
+      paths: {
+        '/Accounts/{AccountSid}/Queues.json': { post: { operationId: 'CreateQueue', requestBody: { content: form }, responses: { '201': ok['200'] } } },
+        '/Accounts/{AccountSid}/Queues/{Sid}.json': {
+          get: { operationId: 'FetchQueue', responses: ok },
+          post: { operationId: 'UpdateQueue', requestBody: { content: form }, responses: ok },
+          delete: { operationId: 'DeleteQueue', responses: { '204': { description: '' } } },
+        },
+      },
+    });
+    try {
+      const client = new UndoableClient({ spec: twilio, baseUrl: url });
+      const created = await client.call('CreateQueue', { params: { AccountSid: 'AC1' }, body: { FriendlyName: 'support', MaxSize: 10 } });
+      const sid = (created.data as { sid: string }).sid;
+      const upd = await client.call('UpdateQueue', { params: { AccountSid: 'AC1', Sid: sid }, body: { FriendlyName: 'sales' } });
+      expect(upd.entry!.inverse!.body).toEqual({ FriendlyName: 'support' });
+      expect(upd.entry!.check!.expected).toEqual({ FriendlyName: 'sales' });
+      await client.undo();
+      expect(queues.get(sid)!.friendly_name).toBe('support');
+      await client.undo();
+      expect(queues.size).toBe(0);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});

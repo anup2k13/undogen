@@ -36,34 +36,75 @@ async function fetchDocument(uri: string, options: LoadOptions): Promise<unknown
   if (uri.startsWith('file:')) {
     text = await readFile(fileURLToPath(uri), 'utf8');
   } else {
-    const res = await (options.fetch ?? fetch)(uri);
-    if (!res.ok) throw new Error(`Could not fetch ${uri}: HTTP ${res.status}`);
-    text = await res.text();
+    text = await fetchText(uri, options);
   }
   return parseYaml(text, { maxAliasCount: -1 });
 }
 
-async function loadExternalRefs(node: unknown, base: string, documents: Map<string, unknown>, options: LoadOptions): Promise<void> {
-  const pending: Array<{ uri: string }> = [];
-  const walk = (n: unknown) => {
-    if (Array.isArray(n)) return n.forEach(walk);
-    if (!n || typeof n !== 'object') return;
-    for (const [k, v] of Object.entries(n)) {
-      if (k === '$ref' && typeof v === 'string' && !v.startsWith('#')) {
-        const uri = stripHash(new URL(v, base).href);
-        if (!documents.has(uri)) {
-          documents.set(uri, null); // reserve, so cycles between files terminate
-          pending.push({ uri });
-        }
-      } else walk(v);
+/** GET a document, retrying transient failures (multi-file specs mean many requests). */
+async function fetchText(uri: string, options: LoadOptions, attempts = 4): Promise<string> {
+  for (let i = 0; ; i++) {
+    try {
+      const res = await (options.fetch ?? fetch)(uri);
+      if (res.ok) return await res.text();
+      if (i + 1 >= attempts || (res.status !== 429 && res.status < 500)) throw new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      if (i + 1 >= attempts) {
+        const e = err as Error & { cause?: { code?: string; message?: string } };
+        const cause = e.cause?.code ?? e.cause?.message;
+        throw new Error(`Could not fetch ${uri}: ${e.message}${cause ? ` (${cause})` : ''}`);
+      }
     }
-  };
-  walk(node);
-  for (const { uri } of pending) {
-    const doc = await fetchDocument(uri, options);
-    documents.set(uri, doc);
-    await loadExternalRefs(doc, uri, documents, options);
+    await new Promise((r) => setTimeout(r, 250 * 2 ** i));
   }
+}
+
+/** Load every document reachable through external $refs, with one global limit on concurrent fetches. */
+async function loadExternalRefs(root: unknown, rootUri: string, documents: Map<string, unknown>, options: LoadOptions): Promise<void> {
+  const LIMIT = 8;
+  const queue: string[] = [];
+  const discover = (node: unknown, base: string) => {
+    const walk = (n: unknown) => {
+      if (Array.isArray(n)) return n.forEach(walk);
+      if (!n || typeof n !== 'object') return;
+      for (const [k, v] of Object.entries(n)) {
+        if (k === '$ref' && typeof v === 'string' && !v.startsWith('#')) {
+          const uri = stripHash(new URL(v, base).href);
+          if (!documents.has(uri)) {
+            documents.set(uri, null); // reserve, so each file is fetched once
+            queue.push(uri);
+          }
+        } else walk(v);
+      }
+    };
+    walk(node);
+  };
+  discover(root, rootUri);
+  let active = 0;
+  await new Promise<void>((resolve, reject) => {
+    let failed = false;
+    const pump = () => {
+      if (failed) return;
+      if (!queue.length && !active) return resolve();
+      while (active < LIMIT && queue.length) {
+        const uri = queue.shift()!;
+        active++;
+        fetchDocument(uri, options).then(
+          (doc) => {
+            documents.set(uri, doc);
+            discover(doc, uri);
+            active--;
+            pump();
+          },
+          (err) => {
+            failed = true;
+            reject(err);
+          },
+        );
+      }
+    };
+    pump();
+  });
 }
 
 const stripHash = (uri: string) => uri.split('#')[0]!;
@@ -80,6 +121,7 @@ export function parseSpec(input: string | object, options: ParseOptions = {}): A
   if (!documents.has(stripHash(baseUri))) documents.set(stripHash(baseUri), doc);
 
   const warnings = new Set<string>();
+  const recursive = new Set<string>();
   const memo = new Map<string, unknown>();
   const stack = new Set<string>();
 
@@ -105,7 +147,7 @@ export function parseSpec(input: string | object, options: ParseOptions = {}): A
       const key = `${docUri}#${fragment}`;
       if (memo.has(key)) return memo.get(key);
       if (stack.has(key)) {
-        warnings.add(`Circular $ref ${ref} was truncated where it recurses`);
+        recursive.add(ref);
         return {};
       }
       const target = documents.get(docUri);
@@ -194,12 +236,27 @@ export function parseSpec(input: string | object, options: ParseOptions = {}): A
     }
   }
 
+  if (recursive.size) {
+    const names = [...recursive].map((r) => r.split('/').at(-1)).slice(0, 3).join(', ');
+    warnings.add(
+      `${recursive.size} recursive schema(s) truncated where they recurse (${names}${recursive.size > 3 ? ', …' : ''}); harmless for analysis`,
+    );
+  }
   return {
     title: doc.info?.title ?? 'Untitled API',
     version: String(doc.info?.version ?? '0.0.0'),
     operations,
     warnings: [...warnings],
   };
+}
+
+/**
+ * A path without format suffixes, for structural matching: Twilio-style
+ * /Accounts/{Sid}/Calls.json and /Accounts/{Sid}/Calls/{CallSid}.json become
+ * /Accounts/{Sid}/Calls and /Accounts/{Sid}/Calls/{CallSid}.
+ */
+export function structuralPath(path: string): string {
+  return path.replace(/\.(json|xml)(?=\/|$)/gi, '');
 }
 
 export function pathParamsOf(path: string): string[] {
