@@ -119,6 +119,23 @@ await client.undoAll();  // saga-style rollback of the whole session, newest fir
 
 Each journal entry stores the *concrete* inverse request, resolved at call time. The journal is plain JSON: you can persist it, audit it, or replay the rollback later from another process.
 
+#### Safe undo: never clobber someone else's change
+
+Undo is only safe if nobody touched the resource after the agent. Say an agent renames a ticket and a teammate then marks it done: a naive undo writes back the old snapshot and silently erases the teammate's change.
+
+undogen remembers how each resource looked right after the agent's write. Before undoing, it reads the resource again. If anything changed (timestamps and etags excepted), it refuses and tells you exactly what:
+
+```ts
+await client.undo();
+// UndoConflictError: Refusing to undo #2 (updateTodo): /todos/t1 changed after the write
+//   ($.done: false -> true). Pass { force: true } to overwrite those changes.
+
+err.diffs;                                // [{ path: '$.done', before: false, after: true, ... }]
+await client.undo(entry, { force: true }); // when you really mean it
+```
+
+A created resource that someone already deleted counts as undone, and nothing gets sent.
+
 ## How the compiler works
 
 | Pattern in the spec | Strategy | Inverse |
@@ -194,7 +211,6 @@ The compiled plans are hypotheses. `verify` is what turns them into facts.
 - MCP proxy mode: put verified undo in front of any MCP server built from an OpenAPI spec
 - Learning bindings from verification runs (turning `unknown` into `verified` automatically)
 - Persistent journals and multi-process rollback
-- Concurrency checks: detect when an undo would overwrite someone else's change made after the agent's
 - Swagger 2.0, external `$ref`s, GraphQL mutations
 
 ## Development

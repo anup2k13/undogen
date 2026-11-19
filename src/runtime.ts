@@ -1,4 +1,5 @@
 import { analyze } from './analyze.js';
+import { DEFAULT_IGNORED_FIELDS, diffValues, type StateDiff } from './diff.js';
 import type { ApiSpec, BodyTemplate, HttpMethod, InversePlan, Operation, RequestTemplate, ValueRef } from './types.js';
 
 export interface CallInput {
@@ -33,8 +34,18 @@ export interface JournalEntry {
   inverse: ResolvedRequest | null;
   /** Why `inverse` is null, if it is. */
   inverseError?: string;
+  /**
+   * Safe-undo guard: the resource as it looked right after this write.
+   * Undo compares it with the live state and refuses if someone changed it since.
+   */
+  guard?: { path: string; after: unknown };
   undone: boolean;
   undoResponse?: HttpResult;
+}
+
+export interface UndoOptions {
+  /** Undo even if the resource changed after the agent's write (overwrites those changes). */
+  force?: boolean;
 }
 
 export class IrreversibleOperationError extends Error {
@@ -54,6 +65,22 @@ export class UndoError extends Error {
   }
 }
 
+/** Someone (or something) changed the resource after the agent's write; undoing would clobber it. */
+export class UndoConflictError extends UndoError {
+  constructor(entry: JournalEntry, public readonly diffs: StateDiff[]) {
+    const detail = diffs
+      .slice(0, 3)
+      .map((d) => `${d.path}: ${JSON.stringify(d.before)} -> ${JSON.stringify(d.after)}`)
+      .join('; ');
+    super(
+      `Refusing to undo #${entry.seq} (${entry.operationId}): ${entry.guard?.path} changed after the write (${detail}). ` +
+        'Pass { force: true } to overwrite those changes.',
+      entry,
+    );
+    this.name = 'UndoConflictError';
+  }
+}
+
 export interface ClientOptions {
   spec: ApiSpec;
   baseUrl: string;
@@ -66,6 +93,8 @@ export interface ClientOptions {
    * a function lets a human or policy engine approve case by case.
    */
   allowIrreversible?: boolean | ((op: Operation, plan: InversePlan, input: CallInput) => boolean | Promise<boolean>);
+  /** Fields that may change without counting as a conflict (default: timestamps, etags). */
+  ignoreFields?: string[];
 }
 
 /**
@@ -141,6 +170,18 @@ export class UndoableClient {
       inverseError = 'No inverse for this operation';
     }
 
+    // Remember what the resource looks like now, so undo can detect later changes.
+    let guard: JournalEntry['guard'];
+    if (plan.guard && inverse) {
+      try {
+        const guardPath = resolvePath(plan.guard, sources);
+        const after = await this.request('get', guardPath);
+        if (after.status < 300) guard = { path: guardPath, after: after.data ?? {} };
+      } catch {
+        /* no guard: undo still works, just without conflict detection */
+      }
+    }
+
     const entry: JournalEntry = {
       seq: ++this.seq,
       at: new Date().toISOString(),
@@ -151,6 +192,7 @@ export class UndoableClient {
       plan: { reversibility: plan.reversibility, strategy: plan.strategy, confidence: plan.confidence },
       inverse,
       inverseError,
+      guard,
       undone: false,
     };
     this.journal.push(entry);
@@ -158,7 +200,7 @@ export class UndoableClient {
   }
 
   /** Undo one entry (default: the most recent one not yet undone). */
-  async undo(entry?: JournalEntry): Promise<HttpResult> {
+  async undo(entry?: JournalEntry, options: UndoOptions = {}): Promise<HttpResult> {
     const target = entry ?? [...this.journal].reverse().find((e) => !e.undone);
     if (!target) throw new Error('Nothing to undo');
     if (target.undone) throw new UndoError(`Entry #${target.seq} is already undone`, target);
@@ -168,6 +210,21 @@ export class UndoableClient {
     }
     if (!target.inverse) {
       throw new UndoError(`Entry #${target.seq} (${target.operationId}) cannot be undone: ${target.inverseError}`, target);
+    }
+    if (target.guard && !options.force) {
+      const live = await this.request('get', target.guard.path);
+      if (live.status === 404) {
+        if (target.inverse.method === 'delete') {
+          // Already gone: the undo's goal is reached without touching anything.
+          target.undone = true;
+          target.undoResponse = live;
+          return live;
+        }
+        throw new UndoConflictError(target, [{ resource: `GET ${target.guard.path}`, path: 'status', before: 200, after: 404 }]);
+      }
+      const ignore = new Set(this.options.ignoreFields ?? DEFAULT_IGNORED_FIELDS);
+      const diffs = diffValues(target.guard.after, live.data ?? {}, { ignore }, `GET ${target.guard.path}`);
+      if (diffs.length) throw new UndoConflictError(target, diffs);
     }
     const res = await this.request(target.inverse.method, target.inverse.path, { body: target.inverse.body });
     target.undoResponse = res;
@@ -183,13 +240,13 @@ export class UndoableClient {
   }
 
   /** Undo everything in reverse order (a saga rollback). Continues past failures and reports them. */
-  async undoAll(): Promise<{ undone: JournalEntry[]; failed: Array<{ entry: JournalEntry; error: Error }> }> {
+  async undoAll(options: UndoOptions = {}): Promise<{ undone: JournalEntry[]; failed: Array<{ entry: JournalEntry; error: Error }> }> {
     const undone: JournalEntry[] = [];
     const failed: Array<{ entry: JournalEntry; error: Error }> = [];
     for (const entry of [...this.journal].reverse()) {
       if (entry.undone) continue;
       try {
-        await this.undo(entry);
+        await this.undo(entry, options);
         undone.push(entry);
       } catch (error) {
         failed.push({ entry, error: error as Error });

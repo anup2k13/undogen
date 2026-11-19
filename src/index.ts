@@ -4,6 +4,8 @@ export {
   UndoableClient,
   IrreversibleOperationError,
   UndoError,
+  UndoConflictError,
+  type UndoOptions,
   type CallInput,
   type ClientOptions,
   type HttpResult,
@@ -12,7 +14,6 @@ export {
 } from './runtime.js';
 export {
   verify,
-  diffStates,
   synthesize,
   DEFAULT_IGNORED_FIELDS,
   type Fixture,
@@ -23,5 +24,6 @@ export {
   type VerifyOptions,
   type VerifyReport,
 } from './verify.js';
+export { diffStates, diffValues } from './diff.js';
 export { formatAnalysis, toMarkdown, toBadge } from './report.js';
 export type * from './types.js';

@@ -107,6 +107,11 @@ export interface InversePlan {
   inverse?: RequestTemplate;
   /** Alternate inverse when the capture found nothing (e.g. PUT that created a resource). */
   inverseIfMissing?: RequestTemplate;
+  /**
+   * Read used for safe undo: the state it returns right after the write is
+   * remembered, and undo refuses to run if someone else has changed it since.
+   */
+  guard?: RequestTemplate;
   reasons: string[];
   caveats: string[];
 }

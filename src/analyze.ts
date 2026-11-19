@@ -488,6 +488,22 @@ export function planOperation(op: Operation, index: Index, override?: Declaratio
   });
 }
 
+/** Pick the read that tells whether the resource changed after the agent's write. */
+function guardFor(p: InversePlan, index: Index): RequestTemplate | undefined {
+  if (p.strategy === 'restore-snapshot') return p.capture;
+  if ((p.strategy === 'delete-created' || p.strategy === 'soft-delete') && p.inverse) {
+    const get = index.find('get', p.inverse.path);
+    if (get) return { operationId: get.id, method: 'get', path: p.inverse.path, bindings: p.inverse.bindings };
+  }
+  if (p.strategy === 'paired-action' || p.strategy === 'toggle') {
+    const segs = segmentsOf(p.path);
+    const root = joinPath(segs.slice(0, -1));
+    const get = segs.length > 1 && isParamSeg(segs.at(-2)!) ? index.find('get', root) : undefined;
+    if (get) return { operationId: get.id, method: 'get', path: root, bindings: bindParams(root) };
+  }
+  return undefined;
+}
+
 export interface AnalyzeOptions {
   /** Declarations for specs you don't control, keyed by operationId. */
   overrides?: Record<string, Declaration>;
@@ -502,7 +518,11 @@ export function analyze(spec: ApiSpec, options: AnalyzeOptions = {}): Analysis {
   }
   const plans = spec.operations
     .filter((o) => o.method !== 'get')
-    .map((o) => planOperation(o, index, options.overrides?.[o.id]));
+    .map((o) => planOperation(o, index, options.overrides?.[o.id]))
+    .map((p) => {
+      const guard = guardFor(p, index);
+      return guard ? { ...p, guard } : p;
+    });
   const summary = {
     reversible: 0,
     compensable: 0,

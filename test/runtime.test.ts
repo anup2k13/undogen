@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { IrreversibleOperationError, loadSpec, UndoableClient, UndoError, type ApiSpec } from '../src/index.js';
+import { IrreversibleOperationError, loadSpec, UndoableClient, UndoConflictError, UndoError, type ApiSpec } from '../src/index.js';
 import { startTodoServer } from '../examples/todo-api/server.js';
 
 let server: Awaited<ReturnType<typeof startTodoServer>>;
@@ -74,5 +74,56 @@ describe('UndoableClient', () => {
     expect(failed).toEqual([]);
     expect(undone.map((e) => e.operationId)).toEqual(['updateTodo', 'createComment', 'createTodo']);
     expect((await client.call('getTodo', { params: { todoId: id } })).status).toBe(404);
+  });
+
+  describe('safe undo', () => {
+    const human = () => newClient(); // a second actor changing things behind the agent's back
+
+    it('refuses to undo a PATCH when someone changed the record afterwards, and reports what changed', async () => {
+      const agent = newClient();
+      const id = ((await agent.call('createTodo', { body: { title: 'draft' } })).data as { id: string }).id;
+      const patched = await agent.call('updateTodo', { params: { todoId: id }, body: { title: 'agent title' } });
+      await human().request('patch', `/todos/${id}`, { body: { done: true } });
+
+      const err = await agent.undo(patched.entry).catch((e) => e);
+      expect(err).toBeInstanceOf(UndoConflictError);
+      expect(err.diffs).toEqual([{ resource: `GET /todos/${id}`, path: '$.done', before: false, after: true }]);
+      // Nothing was overwritten.
+      expect((await agent.call('getTodo', { params: { todoId: id } })).data).toMatchObject({ title: 'agent title', done: true });
+    });
+
+    it('undoes anyway with { force: true }', async () => {
+      const agent = newClient();
+      const id = ((await agent.call('createTodo', { body: { title: 'draft' } })).data as { id: string }).id;
+      const patched = await agent.call('updateTodo', { params: { todoId: id }, body: { title: 'agent title' } });
+      await human().request('patch', `/todos/${id}`, { body: { done: true } });
+      await agent.undo(patched.entry, { force: true });
+      expect((await agent.call('getTodo', { params: { todoId: id } })).data).toMatchObject({ title: 'draft', done: true });
+    });
+
+    it('refuses to delete a created record that someone has since edited', async () => {
+      const agent = newClient();
+      const id = ((await agent.call('createTodo', { body: { title: 'mine' } })).data as { id: string }).id;
+      await human().request('patch', `/todos/${id}`, { body: { title: 'now theirs' } });
+      await expect(agent.undo()).rejects.toBeInstanceOf(UndoConflictError);
+      expect((await agent.call('getTodo', { params: { todoId: id } })).status).toBe(200);
+    });
+
+    it('treats a created record that is already gone as undone', async () => {
+      const agent = newClient();
+      const id = ((await agent.call('createTodo', { body: { title: 'temp' } })).data as { id: string }).id;
+      await human().request('delete', `/todos/${id}`);
+      const res = await agent.undo();
+      expect(res.status).toBe(404);
+      expect(agent.journal[0]!.undone).toBe(true);
+    });
+
+    it('ignores timestamps when comparing', async () => {
+      const agent = newClient();
+      const id = ((await agent.call('createTodo', { body: { title: 't' } })).data as { id: string }).id;
+      const patched = await agent.call('updateTodo', { params: { todoId: id }, body: { title: 'u' } });
+      await human().request('patch', `/todos/${id}`, { body: {} }); // only bumps updatedAt
+      await expect(agent.undo(patched.entry)).resolves.toMatchObject({ status: 200 });
+    });
   });
 });
