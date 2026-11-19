@@ -4,7 +4,7 @@
 
 ### Safety
 - Path parameters `.`, `..` and empty are refused, so a tool call can't reach a different route than the approved operation (found in a security review; reproduced as `DELETE …/members/..` deleting the parent project without approval).
-- A spec loaded from a URL only follows `$ref`s on its own origin, never local files or other hosts (`--trust-refs` to allow); reserved header parameters (`Authorization`, `Cookie`, …) are ignored and configured headers always win; MCP approval prompts show the concrete request.
+- A spec loaded from a URL only follows `$ref`s on its own origin (every redirect hop is checked), never local files or other hosts (`--trust-refs` to allow); reserved header parameters (`Authorization`, `Cookie`, …) are ignored and configured headers always win; MCP approval prompts show the concrete request.
 - **Conflict detection.** Before undoing, the client re-reads the state a call produced and refuses (`ConflictError`) if someone changed a field the agent wrote; `If-Match` is sent when the API provides ETags. `{ force: true }` overrides. Paired actions and toggles are checked by reading the state before and after the call: the fields it changed must still be as it left them, and a toggle that changed nothing is undone by doing nothing.
 - A `PUT` that created a singleton (its `GET` was 404 before) is undone with the `DELETE` on the same route; it used to fail with "No captured state".
 - **Verify can no longer pass a no-op.** A snapshot between the operation and its undo must show a change; otherwise the result is `inconclusive`. Previously an operation that changed nothing was reported as `verified`.
@@ -14,6 +14,7 @@
 
 ### Runtime
 - CLI output piped into a command that closes early (`| head`) no longer crashes with EPIPE.
+- Agent undo tools act on the agent's own session only; earlier sessions in a persisted journal are left to `undogen undo --journal`. Weak ETags are never sent as `If-Match`.
 - Journal files are created readable by their owner only (0600); `journalDetail: 'minimal'` stores only what undo needs (conflict-check values as salted hashes). Agent tools accept only the header parameters an operation declares, so a tool call cannot replace the configured credentials.
 - Persistent journals (`JournalStore`, `FileJournalStore`, `UndoableClient.open()`), undo by seq, `undogen undo` and `undogen journal`.
 - `FileJournalStore.compact()` and `undogen journal --compact` shrink a journal to the latest version of each entry.

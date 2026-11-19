@@ -550,7 +550,8 @@ export class UndoableClient {
         if (conflicts.length) return this.conflict(target, conflicts, current);
       }
       const etag = current.headers['etag'];
-      if (etag && checkPath === inverse.path) headers['if-match'] = etag;
+      // If-Match uses strong comparison (RFC 9110): a weak W/ validator would always fail with 412.
+      if (etag && !etag.startsWith('W/') && checkPath === inverse.path) headers['if-match'] = etag;
     }
 
     const idemHeader = this.options.idempotencyHeader ?? 'Idempotency-Key';
@@ -603,15 +604,21 @@ export class UndoableClient {
   }
 
   async undoAll(
-    opts: Omit<UndoOptions, 'cascade'> & { /** Only entries after this checkpoint (seq). */ after?: number } = {},
+    opts: Omit<UndoOptions, 'cascade'> & {
+      /** Only entries after this checkpoint (seq). */
+      after?: number;
+      /** Only entries made by this session (a persisted journal holds earlier sessions too). */
+      session?: string;
+    } = {},
   ): Promise<{ undone: JournalEntry[]; failed: Array<{ entry: JournalEntry; error: Error }> }> {
     await this.ready();
     const undone: JournalEntry[] = [];
     const failed: Array<{ entry: JournalEntry; error: Error }> = [];
-    const { after, ...undoOpts } = opts;
+    const { after, session, ...undoOpts } = opts;
     for (const entry of [...this.journal].reverse()) {
       if (entry.status === 'undone') continue;
       if (after !== undefined && entry.seq <= after) continue;
+      if (session !== undefined && entry.session !== session) continue;
       try {
         await this.undo(entry, undoOpts);
         undone.push(entry);
@@ -640,6 +647,8 @@ export class UndoableClient {
     const base = typeof this.options.headers === 'function' ? await this.options.headers() : this.options.headers;
     // Configured headers (credentials) always win over per-call ones, whatever their case.
     const headers = mergeHeaders({ accept: 'application/json' }, opts.headers, base);
+    // The body's own content type wins over a configured one (and multipart must set its own boundary).
+    for (const k of Object.keys(headers)) if (k.toLowerCase() === 'content-type' && opts.body !== undefined) delete headers[k];
     const encoded = encodeBody(opts.body, opts.contentType);
     if (encoded.contentType) headers['content-type'] = encoded.contentType;
     const outgoing: OutgoingRequest = { method: method.toUpperCase(), url, headers, body: encoded.body };
@@ -711,7 +720,8 @@ export class UndoableClient {
       ...entry,
       // Conflict checks only compare values: keep hashes, not the values.
       check: entry.check ? { ...entry.check, expected: hashValues(entry.check.expected, entry.session) } : undefined,
-      request: { ...entry.request, body: undefined, bodyRefs: bodyRefsOf(entry.request.body, entry.session) },
+      // A reloaded minimal entry has no body any more: keep the refs it was saved with.
+      request: { ...entry.request, body: undefined, bodyRefs: entry.request.body !== undefined ? bodyRefsOf(entry.request.body, entry.session) : entry.request.bodyRefs },
       response: { status: entry.response.status, data: undefined, headers: {} },
       before: undefined,
       undoResponse: entry.undoResponse ? { status: entry.undoResponse.status, data: undefined, headers: {} } : undefined,
@@ -1098,9 +1108,15 @@ const HASHED = '$undogenSha256';
 function hashValues(expected: Record<string, unknown>, salt: string): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(expected)) {
-    out[k] = isPlainObject(v) && !(HASHED in v) ? hashValues(v, salt) : { [HASHED]: createHash('sha256').update(salt + stableStringify(v)).digest('hex') };
+    if (isPlainObject(v) && HASHED in v) out[k] = v; // already hashed (an entry saved again)
+    else out[k] = isPlainObject(v) ? hashValues(v, salt) : { [HASHED]: createHash('sha256').update(salt + stableStringify(v)).digest('hex') };
   }
   return out;
+}
+
+/** Whether a (hashed) expected value holds hash leaves at any depth, so it must be compared leaf by leaf. */
+function containsHash(v: unknown): boolean {
+  return isPlainObject(v) && (HASHED in v || Object.values(v).some(containsHash));
 }
 
 function compareExpected(expected: Record<string, unknown>, current: unknown, prefix = '', salt = ''): Conflict[] {
@@ -1112,7 +1128,7 @@ function compareExpected(expected: Record<string, unknown>, current: unknown, pr
     if (isPlainObject(value) && HASHED in value) {
       const h = createHash('sha256').update(salt + stableStringify(actual)).digest('hex');
       if (h !== value[HASHED]) out.push({ field: prefix + field, expected: '(hidden: journalDetail is minimal)', actual });
-    } else if (nested.has(field) || (isPlainObject(value) && Object.values(value).some((x) => isPlainObject(x) && HASHED in x))) {
+    } else if (nested.has(field) || containsHash(value)) {
       out.push(...compareExpected(value as Record<string, unknown>, actual, `${prefix}${field}.`, salt));
     } else if (stableStringify(actual) !== stableStringify(value)) out.push({ field: prefix + field, expected: value, actual });
   }

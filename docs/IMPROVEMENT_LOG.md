@@ -60,3 +60,12 @@ committed, and pushed; this file records what was done and what is next.
   - External `$ref`s: a spec served from a URL could `$ref` `file:///…` or cloud metadata, and the contents became request bodies that `verify` POSTed. Remote specs now only follow same-origin refs (`--trust-refs` to opt out); refused refs are warnings.
   - Reserved header parameters (`Authorization`, `Cookie`, `Accept`, `Content-Type`) are no longer taken from specs, and configured headers win case-insensitively (TS + Python).
   - MCP approval prompts show the resolved request, query and masked body instead of the path template.
+- **High-effort re-review of the branch** (19–20 Nov): ten findings, all fixed with tests that fail before the fix (9 TS, 2 Python):
+  - Minimal journals: an entry reloaded and saved again (e.g. after a conflict) had its hashes hashed again, so every later undo reported a false conflict; and its `bodyRefs` were dropped, losing body dependencies. Hashed leaves are kept as they are, refs carried over, and nested hashed values compared leaf by leaf (TS + Python).
+  - `$ref` redirects: a same-origin ref that redirected to another origin (e.g. cloud metadata) was followed. Ref fetches now follow redirects by hand and check every hop.
+  - `verify`/`learn` setup with a creator whose id is chosen by the client (`POST /buckets {name}`) failed; the id is now read from the request or `Location` as the plan says.
+  - Weak ETags (`W/"…"`) were sent as `If-Match`, which always fails with 412; only strong ones are sent (TS + Python).
+  - A configured `Content-Type` spelled differently from the encoded body's could send two; the body's type wins.
+  - MCP/agent `undo_all`, `undo` and `journal` acted on every session in a persisted journal; they now act on the agent's own session (a person uses `undogen undo --journal` for earlier ones) (TS + Python).
+  - `--redact` left secrets in result details that quote a response body (`HTTP 400 {"api_key": …}`); details are scrubbed too, and with `--redact` all quoted bodies are masked.
+  - `learn` now says when it left a resource in the sandbox because no candidate id could find it.

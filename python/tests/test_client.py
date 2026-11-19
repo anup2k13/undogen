@@ -382,3 +382,36 @@ def test_configured_headers_win(bundle_path, server_url):
     client = UndoableClient(bundle_path, server_url, headers={"authorization": "Bearer configured"}, before_request=lambda r: sent.append(dict(r.headers)))
     client.request("get", "/todos", headers={"Authorization": "Bearer attacker"})
     assert sent[0] == {"accept": "application/json", "authorization": "Bearer configured"}
+
+
+def test_minimal_journal_saved_again_is_not_hashed_twice(bundle_path, server_url, tmp_path):
+    path = str(tmp_path / "resave.jsonl")
+    other = UndoableClient(bundle_path, server_url)
+    tid = other.call("createTodo", body={"title": "original"})["data"]["id"]
+    agent = UndoableClient(bundle_path, server_url, store=FileJournalStore(path), journal_detail="minimal")
+    agent.call("updateTodo", params={"todoId": tid}, body={"title": "by the agent"})
+
+    other.call("updateTodo", params={"todoId": tid}, body={"title": "someone else"})
+    second = UndoableClient(bundle_path, server_url, store=FileJournalStore(path), journal_detail="minimal")
+    with pytest.raises(ConflictError):
+        second.undo(1)  # saves the already-hashed entry again
+    assert "by the agent" not in open(path).read()
+
+    other.call("updateTodo", params={"todoId": tid}, body={"title": "by the agent"})
+    third = UndoableClient(bundle_path, server_url, store=FileJournalStore(path), journal_detail="minimal")
+    third.undo(1)
+    assert get(f"{server_url}/todos/{tid}")[1]["title"] == "original"
+
+
+def test_agent_tools_act_on_their_own_session(bundle_path, server_url, tmp_path):
+    path = str(tmp_path / "sessions.jsonl")
+    earlier = UndoableClient(bundle_path, server_url, store=FileJournalStore(path))
+    kept = earlier.call("createTodo", body={"title": "earlier session"})["data"]["id"]
+    now = UndoableClient(bundle_path, server_url, store=FileJournalStore(path))
+    now.call("createTodo", body={"title": "this session"})
+    tools = {t.name: t for t in tool_definitions(now, only=[])}
+    assert len(tools["undogen_journal"].execute()["entries"]) == 1
+    assert len(tools["undogen_undo_all"].execute()["undone"]) == 1
+    assert get(f"{server_url}/todos/{kept}")[0] == 200
+    with pytest.raises(Exception, match="earlier session"):
+        tools["undogen_undo"].execute(seq=1)

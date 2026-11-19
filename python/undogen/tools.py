@@ -310,23 +310,29 @@ def tool_definitions(
         return tools
 
     def undo(seq: Optional[int] = None, force: bool = False, cascade: bool = False, **_: Any) -> dict:
+        # Agents act on their own session only: a persisted journal also holds earlier sessions' writes.
+        mine = [e for e in client.journal if e.get("session") == client.session]
         entry = (
-            next((e for e in client.journal if e["seq"] == seq), None)
+            next((e for e in mine if e["seq"] == seq), None)
             if seq is not None
-            else next((e for e in reversed(client.journal) if e["status"] != "undone"), None)
+            else next((e for e in reversed(mine) if e["status"] != "undone"), None)
         )
-        res = client.undo(entry if entry is not None else seq, force=force, cascade=cascade)
+        if entry is None:
+            if seq is not None and any(e["seq"] == seq for e in client.journal):
+                raise UndogenError(f"Entry #{seq} belongs to an earlier session; a person can undo it with `undogen undo --journal`")
+            raise UndogenError(f"No journal entry #{seq} in this session" if seq is not None else "Nothing to undo in this session")
+        res = client.undo(entry, force=force, cascade=cascade)
         return {"status": res["status"], **({"journal": describe_entry(entry)} if entry else {})}
 
     def undo_all(force: bool = False, to: Optional[int] = None, **_: Any) -> dict:
-        r = client.undo_all(force=force, after=to)
+        r = client.undo_all(force=force, after=to, session=client.session)
         return {
             "undone": [describe_entry(e) for e in r["undone"]],
             "failed": [{**describe_entry(f["entry"]), "error": str(f["error"])} for f in r["failed"]],
         }
 
     def journal(**_: Any) -> dict:
-        return {"entries": [describe_entry(e) for e in client.journal]}
+        return {"entries": [describe_entry(e) for e in client.journal if e.get("session") == client.session]}
 
     def preview(tool: str = "", **_: Any) -> dict:
         match = next((t for t in per_operation if t.name == tool or t.operation_id == tool), None)

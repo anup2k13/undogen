@@ -335,9 +335,20 @@ export function toolDefinitions(client: UndoableClient, operations: Operation[],
       },
       annotations: { title: 'Undo a write', destructiveHint: true, idempotentHint: false, openWorldHint: true },
       async execute(args) {
+        // Agents act on their own session only: a persisted journal also holds earlier sessions' writes.
+        const mine = client.journal.filter((e) => e.session === client.session);
         const seq = typeof args.seq === 'number' ? args.seq : undefined;
-        const entry = seq !== undefined ? client.journal.find((e) => e.seq === seq) : [...client.journal].reverse().find((e) => e.status !== 'undone');
-        const res = await client.undo(entry ?? seq, undoOptions(args));
+        const entry = seq !== undefined ? mine.find((e) => e.seq === seq) : [...mine].reverse().find((e) => e.status !== 'undone');
+        if (!entry) {
+          throw new Error(
+            seq !== undefined && client.journal.some((e) => e.seq === seq)
+              ? `Entry #${seq} belongs to an earlier session; a person can undo it with \`undogen undo --journal\``
+              : seq !== undefined
+                ? `No journal entry #${seq} in this session`
+                : 'Nothing to undo in this session',
+          );
+        }
+        const res = await client.undo(entry, undoOptions(args));
         return { status: res.status, ...(entry ? { journal: describeEntry(entry) } : {}) };
       },
     },
@@ -355,7 +366,7 @@ export function toolDefinitions(client: UndoableClient, operations: Operation[],
       annotations: { title: 'Undo all writes', destructiveHint: true, idempotentHint: true, openWorldHint: true },
       async execute(args) {
         const after = typeof args.to === 'number' ? args.to : undefined;
-        const { undone, failed } = await client.undoAll({ force: args.force === true, after });
+        const { undone, failed } = await client.undoAll({ force: args.force === true, after, session: client.session });
         return { undone: undone.map(describeEntry), failed: failed.map((f) => ({ ...describeEntry(f.entry), error: f.error.message })) };
       },
     },
@@ -405,11 +416,11 @@ export function toolDefinitions(client: UndoableClient, operations: Operation[],
     },
     {
       name: 'undogen_journal',
-      description: 'List the writes made so far, whether each can be undone, and how.',
+      description: 'List the writes made in this session, whether each can be undone, and how.',
       inputSchema: { type: 'object', properties: {} },
       annotations: { title: 'Journal', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
       async execute() {
-        return { entries: client.journal.map(describeEntry) };
+        return { entries: client.journal.filter((e) => e.session === client.session).map(describeEntry) };
       },
     },
   );

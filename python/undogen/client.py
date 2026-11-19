@@ -536,7 +536,8 @@ class UndoableClient:
                 if conflicts:
                     return self._conflict(target, conflicts, current)
             etag = current["headers"].get("etag")
-            if etag and check_path == inverse["path"]:
+            # If-Match uses strong comparison: a weak W/ validator would always fail with 412.
+            if etag and not etag.startswith("W/") and check_path == inverse["path"]:
                 headers["if-match"] = etag
 
         if self.idempotency_header:
@@ -581,13 +582,16 @@ class UndoableClient:
         """Undo every entry made after `checkpoint`, newest first."""
         return self.undo_all(force=force, after=checkpoint)
 
-    def undo_all(self, *, force: bool = False, after: Optional[int] = None) -> dict:
-        """Undo everything (or everything after a checkpoint), newest first. Continues past failures and reports them."""
+    def undo_all(self, *, force: bool = False, after: Optional[int] = None, session: Optional[str] = None) -> dict:
+        """Undo everything (or everything after a checkpoint, or one session's writes), newest first.
+        Continues past failures and reports them."""
         undone, failed = [], []
         for entry in reversed(list(self.journal)):
             if entry["status"] == "undone":
                 continue
             if after is not None and entry["seq"] <= after:
+                continue
+            if session is not None and entry.get("session") != session:
                 continue
             try:
                 self.undo(entry, force=force)
@@ -955,11 +959,17 @@ def _stable_js(v: Any) -> str:
 def _hash_values(expected: dict, salt: str) -> dict:
     out = {}
     for k, v in expected.items():
-        if isinstance(v, dict) and HASHED not in v:
+        if isinstance(v, dict) and HASHED in v:
+            out[k] = v  # already hashed (an entry saved again)
+        elif isinstance(v, dict):
             out[k] = _hash_values(v, salt)
         else:
             out[k] = {HASHED: hashlib.sha256((salt + _stable_js(v)).encode()).hexdigest()}
     return out
+
+
+def _contains_hash(v: Any) -> bool:
+    return isinstance(v, dict) and (HASHED in v or any(_contains_hash(x) for x in v.values()))
 
 
 def _compare(expected: dict, current: Any, prefix: str = "", salt: str = "") -> List[dict]:
@@ -971,7 +981,7 @@ def _compare(expected: dict, current: Any, prefix: str = "", salt: str = "") -> 
         if isinstance(v, dict) and HASHED in v:
             if hashlib.sha256((salt + _stable_js(actual)).encode()).hexdigest() != v[HASHED]:
                 out.append({"field": prefix + k, "expected": "(hidden: journal_detail is minimal)", "actual": actual})
-        elif k in nested or (isinstance(v, dict) and any(isinstance(x, dict) and HASHED in x for x in v.values())):
+        elif k in nested or _contains_hash(v):
             out.extend(_compare(v, actual, f"{prefix}{k}.", salt))
         elif _stable(actual) != _stable(v):
             out.append({"field": prefix + k, "expected": v, "actual": actual})

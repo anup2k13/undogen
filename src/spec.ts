@@ -53,12 +53,20 @@ export function refusedRef(uri: string, rootUri: string, trust = false): string 
   return undefined;
 }
 
-async function fetchDocument(uri: string, options: LoadOptions): Promise<unknown> {
+/** A referenced document that may not be loaded (e.g. its URL redirects to another origin). */
+class RefusedRef extends Error {}
+
+/**
+ * `rootUri` is set when loading a document referenced by the spec: redirects are then
+ * checked against the same origin rule as the $ref itself, so a same-origin URL can't
+ * redirect to a metadata endpoint.
+ */
+async function fetchDocument(uri: string, options: LoadOptions, rootUri?: string): Promise<unknown> {
   let text: string;
   if (uri.startsWith('file:')) {
     text = await readFile(fileURLToPath(uri), 'utf8');
   } else {
-    text = await fetchText(uri, options);
+    text = await fetchText(uri, options, rootUri && !options.trustRefs ? rootUri : undefined);
   }
   return parseText(text);
 }
@@ -77,19 +85,32 @@ function parseText(text: string): unknown {
 }
 
 /** GET a document, retrying transient failures (multi-file specs mean many requests). */
-async function fetchText(uri: string, options: LoadOptions, attempts = 4): Promise<string> {
-  for (let i = 0; ; i++) {
+async function fetchText(uri: string, options: LoadOptions, checkRedirectsAgainst?: string, attempts = 4): Promise<string> {
+  let url = uri;
+  for (let i = 0, hops = 0; ; i++) {
+    let permanent: Error | undefined;
     try {
-      const res = await (options.fetch ?? fetch)(uri);
+      const res = await (options.fetch ?? fetch)(url, checkRedirectsAgainst ? { redirect: 'manual' } : undefined);
+      if (checkRedirectsAgainst && res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+        const next = new URL(res.headers.get('location')!, url).href;
+        const reason = refusedRef(next, checkRedirectsAgainst);
+        if (reason) throw new RefusedRef(`it redirects to ${next}: ${reason}`);
+        if (++hops > 5) throw new RefusedRef('too many redirects');
+        url = next;
+        i--;
+        continue;
+      }
       if (res.ok) return await res.text();
-      if (i + 1 >= attempts || (res.status !== 429 && res.status < 500)) throw new Error(`HTTP ${res.status}`);
+      if (i + 1 >= attempts || (res.status !== 429 && res.status < 500)) permanent = new Error(`HTTP ${res.status}`);
     } catch (err) {
+      if (err instanceof RefusedRef) throw err;
       if (i + 1 >= attempts) {
         const e = err as Error & { cause?: { code?: string; message?: string } };
         const cause = e.cause?.code ?? e.cause?.message;
         throw new Error(`Could not fetch ${uri}: ${e.message}${cause ? ` (${cause})` : ''}`);
       }
     }
+    if (permanent) throw new Error(`Could not fetch ${uri}: ${permanent.message}`);
     await new Promise((r) => setTimeout(r, 250 * 2 ** i));
   }
 }
@@ -132,7 +153,7 @@ async function loadExternalRefs(
       while (active < LIMIT && queue.length) {
         const uri = queue.shift()!;
         active++;
-        fetchDocument(uri, options).then(
+        fetchDocument(uri, options, rootUri).then(
           (doc) => {
             documents.set(uri, doc);
             discover(doc, uri);
@@ -140,6 +161,11 @@ async function loadExternalRefs(
             pump();
           },
           (err) => {
+            if (err instanceof RefusedRef) {
+              refused.set(uri, err.message); // reported as a warning, like any refused $ref
+              active--;
+              return pump();
+            }
             failed = true;
             reject(err);
           },

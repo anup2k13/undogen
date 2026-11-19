@@ -364,9 +364,20 @@ export function arranger(raw: UndoableClient, spec: ApiSpec, planById: Map<strin
     if (res.status >= 300) {
       throw new SetupError(`setup: ${creator.id} returned HTTP ${res.status} ${short(res.data)} — add a fixture body`);
     }
-    const [param, ref] = Object.entries(plan.inverse!.bindings).find(([, b]) => b.from === 'response')!;
-    const id = getPath(res.data, ref.key);
-    if (id === undefined) throw new SetupError(`setup: ${creator.id} response has no "${ref.key}"`);
+    // The new id comes from the response, the request (client-chosen ids) or the Location header.
+    const binding = Object.entries(plan.inverse!.bindings).find(([, b]) => b.from === 'response' || b.from === 'request' || b.from === 'location');
+    if (!binding) throw new SetupError(`setup: ${creator.id} has no binding for the created id`);
+    const [param, ref] = binding;
+    const location = res.headers['location'];
+    const id =
+      ref.from === 'response'
+        ? getPath(res.data, ref.key)
+        : ref.from === 'request'
+          ? getPath(body, ref.key)
+          : location
+            ? decodeURIComponent(new URL(location, 'http://x').pathname.split('/').filter(Boolean).at(-1) ?? '') || undefined
+            : undefined;
+    if (id === undefined) throw new SetupError(`setup: ${creator.id}: no id at ${ref.from}${ref.key ? '.' + ref.key : ''}`);
     created.push({ remove: plan.inverse!, params: { ...pool, [param]: id as Scalar } });
     return id as Scalar;
   };

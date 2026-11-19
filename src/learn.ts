@@ -95,7 +95,11 @@ export async function learn(options: LearnOptions): Promise<LearnResult> {
         }
       }
       if (!found) {
-        note({ operationId: op.id, outcome: 'not-learned', detail: `none of ${candidates.length} candidate value(s) read the new resource back` });
+        note({
+          operationId: op.id,
+          outcome: 'not-learned',
+          detail: `none of ${candidates.length} candidate value(s) read the new resource back; the resource it created is left in the sandbox (no id to delete it by)`,
+        });
         continue;
       }
       const params = { ...pool, [param]: found.value };

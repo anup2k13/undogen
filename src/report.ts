@@ -226,6 +226,13 @@ const SECRET_KEY = /token|secret|password|passwd|api[-_]?key|authorization|cooki
  * value in the diffs is masked (only types and lengths remain), and
  * credentials in the base URL are dropped.
  */
+/** Mask secret-looking JSON values quoted in free text; with `all`, every quoted JSON object or array. */
+function scrubText(text: string, all: boolean): string {
+  let out = text.replace(/"([^"\\]{1,64})"\s*:\s*("(?:[^"\\]|\\.)*"|-?[\w.+-]+)/g, (m, key: string) => (SECRET_KEY.test(key) ? `"${key}":"‹redacted›"` : m));
+  if (all) out = out.replace(/[{[][\s\S]*[}\]]/g, '‹redacted›');
+  return out;
+}
+
 export function redactReport(report: VerifyReport, options: { all?: boolean } = {}): VerifyReport {
   const mask = (v: unknown): unknown => {
     if (v === null || v === undefined || typeof v === 'boolean') return v;
@@ -258,6 +265,9 @@ export function redactReport(report: VerifyReport, options: { all?: boolean } = 
     baseUrl,
     results: report.results.map((r) => ({
       ...r,
+      // Details can quote response bodies (e.g. a 400 error): scrub them too.
+      detail: scrubText(r.detail, !!options.all),
+      ...(r.conflictCheck ? { conflictCheck: { ...r.conflictCheck, detail: scrubText(r.conflictCheck.detail, !!options.all) } } : {}),
       diffs: r.diffs.map((d) => ({
         ...d,
         before: d.path === 'status' ? d.before : scrub(d.before, d.path),
