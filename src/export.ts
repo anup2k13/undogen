@@ -40,6 +40,8 @@ function declaredBody(body: BodyTemplate | undefined): Declaration['body'] | und
       return 'request';
     case 'literal':
       return { literal: body.value };
+    case 'fields':
+      return { fields: Object.fromEntries(Object.entries(body.fields).map(([k, r]) => [k, r.from === 'location' ? 'location' : `${r.from}.${r.key}`])) };
     default:
       return undefined;
   }

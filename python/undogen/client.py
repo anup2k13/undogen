@@ -746,6 +746,15 @@ def _resolve_body(body: Optional[dict], sources: dict) -> Any:
         return req
     if kind == "literal":
         return body.get("value")
+    if kind == "fields":
+        out = {}
+        for k, ref in body["fields"].items():
+            if ref["from"] == "location":
+                continue
+            v = get_path(sources.get(ref["from"]), ref["key"])
+            if v is not None:
+                out[k] = v
+        return out
     before = sources.get("before")
     if before is None:
         raise UndogenError("No captured state to restore from")

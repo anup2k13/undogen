@@ -258,3 +258,11 @@ def test_envelope_restore_and_check():
     assert _compare(expected, {"data": {"name": "theirs"}}) == [{"field": "data.name", "expected": "new", "actual": "theirs"}]
     # a field holding an object next to other fields is not an envelope: restored and compared whole
     assert _restore_sent({"settings": {"a": 2}}, {"id": 1, "settings": {"a": 1, "b": 1}}, False) == {"settings": {"a": 1, "b": 1}}
+
+
+def test_fields_body_template():
+    from undogen.client import _resolve_body
+
+    body = {"from": "fields", "fields": {"channel": {"from": "response", "key": "channel"}, "ts": {"from": "response", "key": "ts"}, "as_user": {"from": "request", "key": "as_user"}}}
+    sources = {"response": {"channel": "C1", "ts": "1.2"}, "request": {"text": "hi"}}
+    assert _resolve_body(body, sources) == {"channel": "C1", "ts": "1.2"}

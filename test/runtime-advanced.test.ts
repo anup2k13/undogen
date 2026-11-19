@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  analyze,
   ConflictError,
   DependencyError,
   FileJournalStore,
@@ -690,6 +691,69 @@ describe('envelopes vs object-valued fields', () => {
       expect(user.settings).toEqual({ theme: 'light' });
       await client.undo();
       expect(user.settings).toEqual({ theme: 'dark', lang: 'en' });
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+describe('RPC create/delete with body arguments (Slack style)', () => {
+  it('deletes a posted message with channel and ts from the response, and a reminder by response.reminder.id', async () => {
+    const { createServer } = await import('node:http');
+    const messages = new Map<string, string>();
+    const reminders = new Set<string>();
+    const calls: Array<[string, Record<string, string>]> = [];
+    let n = 0;
+    const srv = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const form = Object.fromEntries(new URLSearchParams(Buffer.concat(chunks).toString()));
+      const method = (req.url ?? '').slice(1);
+      calls.push([method, form]);
+      const send = (b: object) => res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true, ...b }));
+      if (method === 'chat.postMessage') {
+        const ts = `17000000.00${++n}`;
+        messages.set(`${form.channel}/${ts}`, form.text!);
+        return send({ channel: form.channel, ts, message: { text: form.text } });
+      }
+      if (method === 'chat.delete') return send({ deleted: messages.delete(`${form.channel}/${form.ts}`) });
+      if (method === 'reminders.add') {
+        const id = `Rm${++n}`;
+        reminders.add(id);
+        return send({ reminder: { id, text: form.text } });
+      }
+      if (method === 'reminders.delete') return send({ deleted: reminders.delete(form.reminder!) });
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const form = (...names: string[]) => names.map((name) => ({ name, in: 'formData', type: 'string', required: true }));
+    const s = parseSpec({
+      swagger: '2.0',
+      info: { title: 'Slack-ish', version: '1' },
+      consumes: ['application/x-www-form-urlencoded'],
+      paths: {
+        '/chat.postMessage': { post: { operationId: 'chat_postMessage', parameters: form('channel', 'text'), responses: { '200': { description: '', schema: { type: 'object', properties: { channel: { type: 'string' }, ts: { type: 'string' }, message: { type: 'object' } } } } } } },
+        '/chat.delete': { post: { operationId: 'chat_delete', parameters: form('channel', 'ts'), responses: { '200': { description: '' } } } },
+        '/reminders.add': { post: { operationId: 'reminders_add', parameters: form('text', 'time'), responses: { '200': { description: '', schema: { type: 'object', properties: { reminder: { type: 'object', properties: { id: { type: 'string' } } } } } } } } },
+        '/reminders.delete': { post: { operationId: 'reminders_delete', parameters: form('reminder'), responses: { '200': { description: '' } } } },
+      },
+    });
+    try {
+      const plans = Object.fromEntries(analyze(s).plans.map((p) => [p.operationId, p]));
+      expect(plans.chat_postMessage).toMatchObject({ reversibility: 'compensable', inverse: { operationId: 'chat_delete' } });
+      const client = new UndoableClient({ spec: s, baseUrl: `http://127.0.0.1:${(srv.address() as import('node:net').AddressInfo).port}` });
+      await client.call('chat_postMessage', { body: { channel: 'C1', text: 'hello' } });
+      await client.call('reminders_add', { body: { text: 'standup', time: 'in 5 minutes' } });
+      expect(messages.size).toBe(1);
+      expect(reminders.size).toBe(1);
+      const { failed } = await client.undoAll();
+      expect(failed).toEqual([]);
+      expect(messages.size).toBe(0);
+      expect(reminders.size).toBe(0);
+      expect(calls.slice(-2)).toEqual([
+        ['reminders.delete', { reminder: 'Rm2' }],
+        ['chat.delete', { ts: '17000000.001', channel: 'C1' }],
+      ]);
     } finally {
       await new Promise((r) => srv.close(r));
     }

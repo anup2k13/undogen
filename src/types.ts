@@ -97,7 +97,9 @@ export type BodyTemplate =
   /** The original request body; with `fields`, only those top-level fields (what the target accepts). */
   | { from: 'request'; fields?: string[] }
   /** A fixed body, e.g. { state: 'closed' } for soft deletes. */
-  | { from: 'literal'; value: unknown };
+  | { from: 'literal'; value: unknown }
+  /** A body assembled field by field, e.g. Slack chat.delete { channel: response.channel, ts: response.ts }. */
+  | { from: 'fields'; fields: Record<string, ValueRef> };
 
 /**
  * How a spec author (x-undogen) or a third party (overrides file) declares
@@ -110,7 +112,7 @@ export interface Declaration {
   reason?: string;
   inverse?: string;
   bindings?: Record<string, string>;
-  body?: 'before' | 'request' | 'before-request-keys' | 'before-json-patch' | { literal: unknown };
+  body?: 'before' | 'request' | 'before-request-keys' | 'before-json-patch' | { literal: unknown } | { fields: Record<string, string> };
   /** Inverse to use when the capture found nothing (e.g. a PUT that created the resource). */
   inverseIfMissing?: string;
   /** Recorded by `undogen annotate` so a round-trip keeps the original strategy name. */

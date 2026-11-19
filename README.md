@@ -249,6 +249,7 @@ $ undogen diff v1.yaml v2.yaml
 | One-way transitions with no counterpart (`void`, `finalize`, `capture`, `delete-request`…) | — | **irreversible**, blocked at runtime |
 | `POST /things/{id}` with no `PUT`/`PATCH` (Stripe, Twilio) | `restore-snapshot` | `GET` before, then `POST` back the keys that were sent |
 | `POST /conversations.archive` and `/conversations.unarchive` (Slack RPC) | `paired-action` | the counterpart, with the same arguments |
+| `POST /chat.postMessage` with a `/chat.delete` (RPC create) | `delete-created` | `chat.delete` with `channel` and `ts` taken from the response |
 | `DELETE /things` (the whole collection) | — | **irreversible**, blocked at runtime |
 | Verbs like send, notify, charge, transfer, cancel, merge, dispatch… in the operation name or summary (`createAndSendInvoice`) | — | **irreversible**, blocked at runtime |
 | Verbs like render, preview, search, validate, list, check… | `no-side-effects` | nothing needed (verify proves state is unchanged) |
@@ -300,7 +301,7 @@ Four commands help fill the gaps:
 | Stripe | 339 | 39% | 135 | 72 | 0.5s |
 | Asana | 143 | 73% | 9 | 29 | 0.8s |
 | Twilio | 94 | 68% | 18 | 12 | 0.1s |
-| Slack (Swagger 2.0, RPC) | 94 | 26% | 11 | 59 | 0.1s |
+| Slack (Swagger 2.0, RPC) | 94 | 32% | 11 | 53 | 0.1s |
 
 "Undo derived" is the share of write operations that get an inverse with zero hand-written code; the rest is either gated or explicitly flagged `unknown`. On GitHub, for example:
 

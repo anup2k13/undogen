@@ -890,6 +890,14 @@ function resolveBody(body: BodyTemplate | undefined, sources: Sources): unknown 
       return body.fields ? pick(sources.request, body.fields) : sources.request;
     case 'literal':
       return body.value;
+    case 'fields': {
+      const out: Record<string, unknown> = {};
+      for (const [k, ref] of Object.entries(body.fields)) {
+        const v = lookup(ref, sources);
+        if (v !== undefined) out[k] = v;
+      }
+      return out;
+    }
     case 'before':
       if (sources.before == null) throw new Error('No captured state to restore from');
       return body.fields === '*' ? sources.before : pick(sources.before, body.fields);

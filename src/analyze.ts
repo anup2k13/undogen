@@ -451,9 +451,11 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
             ? { from: 'before-json-patch' }
         : declared.body === 'before'
           ? { from: 'before', fields: writableFields(target.requestSchema) }
-          : declared.body && typeof declared.body === 'object'
-            ? { from: 'literal', value: declared.body.literal }
-            : undefined;
+          : declared.body && typeof declared.body === 'object' && 'fields' in declared.body
+            ? { from: 'fields', fields: Object.fromEntries(Object.entries(declared.body.fields).map(([k, v]) => [k, parseRef(v)])) }
+            : declared.body && typeof declared.body === 'object' && 'literal' in declared.body
+              ? { from: 'literal', value: declared.body.literal }
+              : undefined;
     const getOp = index.find('get', op.path);
     const needsCapture = declared.body === 'before' || declared.body === 'before-request-keys' || declared.body === 'before-json-patch';
     const lastSeg = segmentsOf(op.path).at(-1) ?? '';
@@ -517,6 +519,8 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
         });
       }
     }
+    const created = rpcCreatePlan(op, index, parentPath, noun, verb);
+    if (created) return created;
   }
 
   // 1c. DELETE on a collection removes every item: no single request can bring them back.
@@ -799,6 +803,60 @@ function finishPlan(p: InversePlan, op: Operation, index: Index): InversePlan {
     if (verb) p.caveats.push(`The description mentions "${verb}": side effects like that cannot be called back by any inverse`);
   }
   return p;
+}
+
+/** RPC verbs that create something, and the RPC methods that take it away again (strongest first). */
+const RPC_CREATE = /^(create|add|post|upload|open|insert|new)/i;
+const RPC_REMOVE: Array<[string, Reversibility]> = [
+  ['delete', 'reversible'], ['remove', 'reversible'], ['archive', 'compensable'], ['disable', 'compensable'], ['close', 'compensable'],
+];
+
+/**
+ * RPC creates (Slack chat.postMessage, reminders.add, files.upload) undone by the RPC method that
+ * removes what they made, with its arguments assembled from the response (and the original request):
+ * chat.delete { channel: response.channel, ts: response.ts }, reminders.delete { reminder: response.reminder.id }.
+ */
+function rpcCreatePlan(op: Operation, index: Index, parentPath: string, noun: string, verb: string): InversePlan | undefined {
+  if (!RPC_CREATE.test(verb)) return undefined;
+  for (const [remove, reversibility] of RPC_REMOVE) {
+    const target = index.find('post', `${parentPath === '/' ? '' : parentPath}/${noun}.${remove}`);
+    const params = target?.requestSchema?.properties;
+    if (!target || !params) continue;
+    const response = op.responseSchema?.properties ?? {};
+    const sent = op.requestSchema?.properties ?? {};
+    const fields: Record<string, ValueRef> = {};
+    let fromResponse = 0;
+    for (const name of Object.keys(params)) {
+      if (name === 'token') continue;
+      const r = response[name];
+      // An object (or Slack's tuple-style items: [{...}]) carries the id inside; a declared scalar is the id itself.
+      const obj = r?.properties ? r : Array.isArray(r?.items) ? (r!.items as unknown as Schema[])[0] : undefined;
+      const idKey = obj?.properties?.id ? 'id' : obj?.properties?.[`${name}_id`] ? `${name}_id` : undefined;
+      const scalar = r && typeof r.type === 'string' && ['string', 'integer', 'number'].includes(r.type);
+      if (idKey) {
+        fields[name] = { from: 'response', key: `${name}.${idKey}` };
+        fromResponse++;
+      } else if (scalar) {
+        fields[name] = { from: 'response', key: name };
+        fromResponse++;
+      } else if (name in sent && !r) {
+        fields[name] = { from: 'request', key: name };
+      }
+    }
+    const required = target.requestSchema?.required ?? [];
+    if (!fromResponse || required.some((r) => r !== 'token' && !(r in fields))) continue;
+    const posted = /^post|^me/i.test(verb);
+    return plan(op, posted ? 'compensable' : reversibility, 'delete-created', 0.5, {
+      inverse: { operationId: target.id, method: 'post', path: target.path, bindings: bindParams(target.path), body: { from: 'fields', fields } },
+      reasons: [`RPC "${noun}.${verb}" is undone by "${noun}.${remove}", with arguments from its response`],
+      caveats: [
+        ...(posted ? ['People may already have seen what was posted; deleting it does not unsend notifications'] : []),
+        ...(reversibility === 'compensable' ? [`"${remove}" hides what was created rather than deleting it`] : []),
+        'Arguments are matched by name between the response and the counterpart — verify it',
+      ],
+    });
+  }
+  return undefined;
 }
 
 /** Child collections of an item route that can be listed and re-created: /todos/{todoId}/comments. */
