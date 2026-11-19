@@ -288,3 +288,22 @@ def test_minimal_journal_is_undone_by_the_typescript_cli(bundle_path, server_url
     )
     assert f"#1 createTodo  DELETE /todos/{tid}" in out.stdout, out.stdout + out.stderr
     assert get(f"{server_url}/todos/{tid}")[0] == 404
+
+
+def test_python_cli_lists_and_undoes(bundle_path, server_url, tmp_path, capsys):
+    from undogen.__main__ import main
+
+    path = str(tmp_path / "cli.jsonl")
+    client = UndoableClient(bundle_path, server_url, store=FileJournalStore(path))
+    tid = client.call("createTodo", body={"title": "py cli"})["data"]["id"]
+    client.call("updateTodo", params={"todoId": tid}, body={"done": True})
+
+    assert main(["journal", "--journal", path]) == 0
+    assert "#2    active    updateTodo" in capsys.readouterr().out
+    assert main(["undo", bundle_path, "--base-url", server_url, "--journal", path]) == 0
+    assert f"#2 updateTodo  PATCH /todos/{tid}" in capsys.readouterr().out
+    assert main(["undo", bundle_path, "--base-url", server_url, "--journal", path, "--all"]) == 0
+    assert f"#1 createTodo  DELETE /todos/{tid}" in capsys.readouterr().out
+    assert get(f"{server_url}/todos/{tid}")[0] == 404
+    assert main(["journal", "--journal", path, "--compact"]) == 0
+    assert "4 lines -> 2 entries" in capsys.readouterr().out
