@@ -49,6 +49,8 @@ ${c.bold('verify')}
   --scoped-only          Only snapshot routes scoped to created resources (for shared sandboxes)
   --keep                 Keep the resources verify created (default: delete them afterwards)
   --no-seed              Don't seed child resources (disables cascade detection)
+  --concurrency <n>      Parallel GETs per snapshot (default 4)
+  --max-pages <n>        Pages to follow (Link rel=next) for list routes (default 5)
 
 ${c.bold('mcp')}
   --journal <file>       Persist the journal (undo after restarts; blocks replays of irreversible calls)
@@ -82,6 +84,8 @@ const OPTIONS = {
   'scoped-only': { type: 'boolean' },
   keep: { type: 'boolean' },
   'no-seed': { type: 'boolean' },
+  concurrency: { type: 'string' },
+  'max-pages': { type: 'string' },
   'restore-children': { type: 'boolean' },
   journal: { type: 'string' },
   irreversible: { type: 'string' },
@@ -241,6 +245,8 @@ async function main(argv: string[]) {
         seedChildren: !values['no-seed'],
         cleanup: !values.keep,
         scopedOnly: values['scoped-only'],
+        concurrency: values.concurrency ? Number(values.concurrency) : undefined,
+        maxPages: values['max-pages'] ? Number(values['max-pages']) : undefined,
         ignoreFields: [...DEFAULT_IGNORED_FIELDS, ...(list(values.ignore) ?? [])],
         only: ops.map((o) => o.id),
         onResult: (r) => console.log(formatResultLine(r, idW, pathW)),

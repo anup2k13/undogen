@@ -45,6 +45,10 @@ export interface VerifyOptions {
   scopedOnly?: boolean;
   /** When compiling plans here: also re-create child collections when undoing a delete. */
   restoreChildren?: boolean;
+  /** Parallel GETs per snapshot. Default 4. */
+  concurrency?: number;
+  /** Pages to follow (Link: rel="next") when a GET returns a list. Default 5; 1 disables. */
+  maxPages?: number;
   onResult?: (result: OperationResult) => void;
 }
 
@@ -130,13 +134,27 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
   const { creators, create, ensure, removeAll } = arranger(raw, spec, planById, fixtures);
   const getters = spec.operations.filter((o) => o.method === 'get' && (!options.scopedOnly || o.pathParams.length > 0));
 
+  const maxPages = options.maxPages ?? 5;
+  /** GET a route, following Link: rel="next" for lists so changes past the first page are seen. */
+  const readAll = async (path: string) => {
+    const first = await raw.request('get', path);
+    if (!Array.isArray(first.data) || maxPages <= 1) return { status: first.status, data: first.data };
+    const items = [...first.data];
+    let next = nextLink(first.headers['link'], options.baseUrl);
+    for (let page = 1; next && page < maxPages; page++) {
+      const res = await raw.request('get', next);
+      if (res.status >= 300 || !Array.isArray(res.data)) break;
+      items.push(...res.data);
+      next = nextLink(res.headers['link'], options.baseUrl);
+    }
+    return { status: first.status, data: items };
+  };
+
   const snapshot = async (pool: Record<string, Scalar>) => {
     const state = new Map<string, { status: number; data: unknown }>();
-    for (const g of getters) {
-      if (!g.pathParams.every((p) => pool[p] !== undefined)) continue;
-      const res = await raw.request('get', fillPath(g.path, pool));
-      state.set(`GET ${g.path}`, { status: res.status, data: res.data });
-    }
+    const due = getters.filter((g) => g.pathParams.every((p) => pool[p] !== undefined));
+    const results = await mapLimit(due, options.concurrency ?? 4, (g) => readAll(fillPath(g.path, pool)));
+    due.forEach((g, i) => state.set(`GET ${g.path}`, results[i]!));
     return state;
   };
 
@@ -316,6 +334,35 @@ export function arranger(raw: UndoableClient, spec: ApiSpec, planById: Map<strin
   };
 
   return { creators, create, ensure, removeAll };
+}
+
+/** The path + query of a Link header's rel="next" target, if it points at the same API. */
+export function nextLink(header: string | undefined, baseUrl: string): string | undefined {
+  if (!header) return undefined;
+  for (const part of header.split(',')) {
+    const m = /<([^>]+)>\s*;(.*)/.exec(part.trim());
+    if (!m || !/rel="?([^";]*\s)?next(\s[^";]*)?"?/i.test(m[2]!)) continue;
+    const base = new URL(baseUrl.replace(/\/?$/, '/'));
+    const url = new URL(m[1]!, base);
+    if (url.origin !== base.origin) return undefined;
+    const prefix = base.pathname.replace(/\/$/, '');
+    if (!url.pathname.startsWith(prefix)) return undefined;
+    return url.pathname.slice(prefix.length) + url.search;
+  }
+  return undefined;
+}
+
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
+  return out;
 }
 
 function parentOf(path: string): string {

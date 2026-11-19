@@ -17,6 +17,7 @@
 
 ### Verify
 - Deletes everything it created (`--keep` to inspect), probes created resources directly, `--scoped-only` for shared sandboxes.
+- Snapshots run in parallel (`--concurrency`) and follow `Link: rel="next"` pagination (`--max-pages`), so side effects past the first page of a list are caught.
 - `--junit`, `--sarif`, `--redact` (secret-looking keys are always masked), `--strict`.
 
 ### Integrations

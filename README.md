@@ -304,7 +304,7 @@ The compiled plans are hypotheses. `verify` is what turns them into facts. Confi
 ## Limits
 
 - Inverses are **compensations**, not distributed transactions. Webhooks that already fired, emails a server sent as a side effect, and things people saw in the meantime are outside any API's reach. undogen's job is to make that boundary explicit.
-- Verification can only see state that the API exposes through `GET` routes, and compares the first page of lists.
+- Verification can only see state that the API exposes through `GET` routes. Lists are followed through `Link: rel="next"` pagination up to `--max-pages` (5); cursor tokens in response bodies are not followed.
 - Conflict detection compares the top-level fields the agent wrote. Changes made through other fields, or nested inside a field the agent didn't send, are not detected unless the API sends ETags.
 - `--restore-children` re-creates one level of children; grandchildren are not captured.
 - The Python client sends multipart bodies as JSON.
