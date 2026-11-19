@@ -1,0 +1,59 @@
+{
+  "name": "undogen",
+  "version": "0.1.0",
+  "description": "Compile undo operations from any OpenAPI spec, then prove they actually work. Reversibility for AI agents and automation.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anup2k13/undogen.git"
+  },
+  "homepage": "https://github.com/anup2k13/undogen#readme",
+  "bugs": "https://github.com/anup2k13/undogen/issues",
+  "bin": {
+    "undogen": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "demo": "tsx examples/demo.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "openapi",
+    "undo",
+    "rollback",
+    "saga",
+    "compensating-transaction",
+    "ai-agents",
+    "mcp",
+    "agent-safety",
+    "reversibility"
+  ],
+  "dependencies": {
+    "yaml": "^2.5.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2",
+    "vitest": "^2.1.2"
+  }
+}

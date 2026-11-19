@@ -1,0 +1,16 @@
+{
+  "repos/create-for-authenticated-user": {
+    "inverse": "repos/delete",
+    "bindings": { "owner": "response.owner.login", "repo": "response.name" },
+    "reason": "A repository created by the agent can be deleted again"
+  },
+  "repos/create-in-org": {
+    "inverse": "repos/delete",
+    "bindings": { "owner": "params.org", "repo": "response.name" },
+    "reason": "A repository created by the agent can be deleted again"
+  },
+  "pulls/merge": {
+    "reversibility": "irreversible",
+    "reason": "Merged commits can only be reverted with a new commit, never un-merged"
+  }
+}
