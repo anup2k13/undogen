@@ -356,3 +356,111 @@ ${rows}
 </html>
 `;
 }
+
+/**
+ * A self-contained page for browsing compiled plans: summary, filters by class,
+ * free-text search, and each plan's undo request, capture and caveats.
+ * Plans are embedded as JSON (with "<" escaped, so spec text can't close the script).
+ */
+export function analysisToHtml(a: Analysis): string {
+  const rows = a.plans.map((p) => ({
+    id: p.operationId,
+    route: `${p.method.toUpperCase()} ${p.path}`,
+    cls: p.reversibility,
+    strategy: p.strategy,
+    confidence: p.confidence,
+    undo: p.inverse ? describeTemplate(p.inverse) : '',
+    capture: p.capture ? describeTemplate(p.capture) : '',
+    ifNew: p.inverseIfMissing ? describeTemplate(p.inverseIfMissing) : '',
+    reasons: p.reasons,
+    caveats: p.caveats,
+  }));
+  const data = JSON.stringify({ title: `${a.spec.title} ${a.spec.version}`, summary: a.summary, rows }).replace(/</g, '\\u003c');
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Undo plans: ${esc(a.spec.title)}</title>
+<style>
+:root { --bg: #fff; --fg: #1f2328; --muted: #59636e; --line: #d1d9e0; --card: #f6f8fa;
+  --reversible: #1a7f37; --compensable: #0969da; --irreversible: #cf222e; --unknown: #9a6700; }
+@media (prefers-color-scheme: dark) { :root { --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --line: #3d444d; --card: #151b23;
+  --reversible: #3fb950; --compensable: #58a6ff; --irreversible: #f85149; --unknown: #d29922; } }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 24px 16px 48px; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1100px; margin: 0 auto; }
+h1 { font-size: 20px; margin: 0 0 16px; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+input[type=search] { flex: 1 1 240px; min-width: 0; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); font: inherit; }
+button { padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); color: var(--fg); font: inherit; cursor: pointer; }
+button[aria-pressed=true] { border-color: currentColor; font-weight: 600; }
+button.reversible { color: var(--reversible); } button.compensable { color: var(--compensable); }
+button.irreversible { color: var(--irreversible); } button.unknown { color: var(--unknown); }
+.count { color: var(--muted); margin: 0 0 8px; }
+.plan { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; overflow-wrap: anywhere; }
+.head { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+.cls { font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.cls.reversible { color: var(--reversible); } .cls.compensable { color: var(--compensable); }
+.cls.irreversible { color: var(--irreversible); } .cls.unknown { color: var(--unknown); }
+code { font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.meta { color: var(--muted); font-size: 12px; }
+.line { margin-top: 4px; }
+.line b { color: var(--muted); font-weight: 600; font-size: 12px; display: inline-block; min-width: 64px; }
+.caveat { color: var(--unknown); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+<h1></h1>
+<div class="controls">
+  <input type="search" placeholder="Search operations, routes, reasons…" aria-label="Search">
+  <button data-cls="all" aria-pressed="true">All</button>
+  <button data-cls="reversible" class="reversible" aria-pressed="false"></button>
+  <button data-cls="compensable" class="compensable" aria-pressed="false"></button>
+  <button data-cls="irreversible" class="irreversible" aria-pressed="false"></button>
+  <button data-cls="unknown" class="unknown" aria-pressed="false"></button>
+</div>
+<p class="count"></p>
+<div id="plans"></div>
+</main>
+<script id="data" type="application/json">${data}</script>
+<script>
+const D = JSON.parse(document.getElementById('data').textContent);
+document.querySelector('h1').textContent = 'Undo plans: ' + D.title;
+for (const b of document.querySelectorAll('button[data-cls]')) {
+  const c = b.dataset.cls;
+  if (c !== 'all') b.textContent = c + ' (' + D.summary[c] + ')';
+}
+let cls = 'all';
+const q = document.querySelector('input');
+const list = document.getElementById('plans');
+const el = (tag, cl, text) => { const e = document.createElement(tag); if (cl) e.className = cl; if (text !== undefined) e.textContent = text; return e; };
+function render() {
+  const needle = q.value.trim().toLowerCase();
+  const rows = D.rows.filter((r) => (cls === 'all' || r.cls === cls) && (!needle || JSON.stringify(r).toLowerCase().includes(needle)));
+  document.querySelector('.count').textContent = rows.length + ' of ' + D.rows.length + ' write operations';
+  list.replaceChildren(...rows.slice(0, 500).map((r) => {
+    const card = el('div', 'plan');
+    const head = el('div', 'head');
+    head.append(el('code', '', r.id), el('code', 'meta', r.route), el('span', 'cls ' + r.cls, r.cls), el('span', 'meta', r.strategy + ' · ' + r.confidence.toFixed(2)));
+    card.append(head);
+    const line = (label, text) => { if (!text) return; const l = el('div', 'line'); l.append(el('b', '', label), el('code', '', text)); card.append(l); };
+    line('capture', r.capture); line('undo', r.undo); line('if new', r.ifNew);
+    if (!r.undo && r.reasons[0]) card.append(el('div', 'line meta', r.reasons[0]));
+    for (const c of r.caveats) card.append(el('div', 'line caveat', '⚠ ' + c));
+    return card;
+  }));
+}
+q.addEventListener('input', render);
+for (const b of document.querySelectorAll('button[data-cls]')) b.addEventListener('click', () => {
+  cls = b.dataset.cls;
+  for (const x of document.querySelectorAll('button[data-cls]')) x.setAttribute('aria-pressed', String(x === b));
+  render();
+});
+render();
+</script>
+</body>
+</html>
+`;
+}

@@ -7,7 +7,7 @@ import { analyze } from './analyze.js';
 import { annotate, toArazzo, toBundle } from './export.js';
 import { initFiles, mergeKeepingExisting } from './init.js';
 import { learn } from './learn.js';
-import { c, formatAnalysis, formatResultLine, formatSummary, redactReport, toBadge, toHtml, toJUnit, toMarkdown, toSarif } from './report.js';
+import { analysisToHtml, c, formatAnalysis, formatResultLine, formatSummary, redactReport, toBadge, toHtml, toJUnit, toMarkdown, toSarif } from './report.js';
 import { FileJournalStore, UndoableClient } from './runtime.js';
 import { loadSpec } from './spec.js';
 import { describeEntry } from './tools.js';
@@ -19,7 +19,7 @@ const HELP = `
 ${c.bold('undogen')} ${VERSION} — compile undo operations from an OpenAPI spec, then prove they work.
 
 ${c.bold('Usage')}
-  undogen analyze  <spec> [--json]                 Derive an inverse for every write operation (no network)
+  undogen analyze  <spec> [--json | --html <file>] Derive an inverse for every write operation (no network)
   undogen verify   <spec> --base-url <url>         Run each operation and its inverse on a sandbox, diff the state
   undogen mcp      <spec> --base-url <url>         Serve the API as MCP tools with journaling and undo tools
   undogen undo     <spec> --base-url <url> --journal <file> [--seq n | --all]
@@ -114,6 +114,7 @@ const OPTIONS = {
   overwrite: { type: 'boolean' },
   compact: { type: 'boolean' },
   markdown: { type: 'boolean' },
+  html: { type: 'string' },
   'fail-on': { type: 'string' },
   help: { type: 'boolean', short: 'h' },
   version: { type: 'boolean', short: 'v' },
@@ -238,6 +239,10 @@ async function main(argv: string[]) {
   switch (command) {
     case 'analyze': {
       if (values.json) return console.log(JSON.stringify(analysis, null, 2));
+      if (values.html) {
+        await write(values.html, analysisToHtml(analysis));
+        return console.log(`  ${analysis.plans.length} plans written to ${values.html}`);
+      }
       console.log(formatAnalysis(analysis));
       printWarnings(spec);
       return;

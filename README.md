@@ -80,7 +80,7 @@ npx undogen analyze openapi.yaml      # OpenAPI 3.x or Swagger 2.0, local file o
   sendReminder   POST   /todos/{todoId}/send-reminder   irreversible
 ```
 
-No network calls are made. Add `--json` for machine-readable plans.
+No network calls are made. Add `--json` for machine-readable plans, or `--html plans.html` for a self-contained page to browse, filter and search them (handy for reviewing a large API with its owners).
 
 ### 2. Prove the inverses against a sandbox
 

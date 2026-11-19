@@ -27,6 +27,7 @@
 - `report.html` (self-contained, light/dark, readable on a phone), `--junit`, `--sarif`, `--redact` (secret-looking keys are always masked), `--strict`.
 
 ### Integrations
+- `undogen analyze --html`: a self-contained page to browse, filter and search compiled plans.
 - `undogen lint <spec>`: for API owners, the concrete change that would make each structurally undoable-but-not-yet operation undoable (missing id in create responses, missing GET/DELETE, missing counterpart actions, missing operationIds).
 - `undogen diff <old> <new>`: reversibility changes between two versions of a spec (regressions, new gated writes, removed and changed inverses), with Markdown output for pull requests and `--fail-on`.
 - `undogen mcp`: MCP server with instructions for the model, `--tags` and `--compact` (search/describe/call tools for APIs too large to list), undo-aware tool annotations, undo/journal tools and approval through elicitation.

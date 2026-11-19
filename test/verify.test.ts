@@ -244,3 +244,20 @@ describe('synthesize: request bodies that pass validation', () => {
     expect(body.tags).toEqual(['a', 'a']);
   });
 });
+
+describe('analysisToHtml', () => {
+  it('embeds plans so spec text cannot close the script, and loads nothing external', async () => {
+    const { analysisToHtml, analyze, parseSpec } = await import('../src/index.js');
+    const evil = parseSpec({
+      openapi: '3.0.3',
+      info: { title: '</script><script>alert(1)</script>', version: '1' },
+      paths: { '/x/{id}/frob': { post: { operationId: 'frob</script><img src=x onerror=alert(2)>', responses: {} } } },
+    });
+    const html = analysisToHtml(analyze(evil));
+    expect(html.match(/<\/script>/g)).toHaveLength(2); // only our own two script tags close
+    expect(html).not.toContain('<img src=x');
+    expect(html).not.toMatch(/src="https?:|href="https?:/);
+    const data = JSON.parse(html.split('<script id="data" type="application/json">')[1]!.split('</script>')[0]!);
+    expect(data.rows[0].id).toBe('frob</script><img src=x onerror=alert(2)>');
+  });
+});
