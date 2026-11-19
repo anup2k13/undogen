@@ -38,3 +38,9 @@ export {
 export { formatAnalysis, toMarkdown, toBadge } from './report.js';
 export { VERSION } from './version.js';
 export type * from './types.js';
+export { formatResultLine, formatSummary, toJUnit, toSarif, redactReport } from './report.js';
+export { annotate, toArazzo, toBundle, toDeclaration, toLink, type AnnotateOptions } from './export.js';
+export { learn, candidateIds, type LearnAttempt, type LearnOptions, type LearnResult } from './learn.js';
+export { initFiles, type InitResult } from './init.js';
+export { toolDefinitions, toolName, describeEntry, type ToolAnnotations, type ToolDefinition, type ToolOptions } from './tools.js';
+// The MCP server lives at 'undogen/mcp' so the core library does not load the MCP SDK.

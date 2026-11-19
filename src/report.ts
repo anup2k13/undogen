@@ -140,3 +140,128 @@ export function planCounts(plans: InversePlan[]): Record<Reversibility, number> 
   for (const p of plans) out[p.reversibility]++;
   return out;
 }
+
+const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+/**
+ * JUnit XML, which most CI systems render as test results. Failed undos are
+ * failures, errors are errors, gated/skipped operations are skipped, and
+ * inconclusive ones are skipped too (failures with `strict`).
+ */
+export function toJUnit(report: VerifyReport, options: { strict?: boolean } = {}): string {
+  const seconds = (Date.parse(report.finishedAt) - Date.parse(report.startedAt)) / 1000 || 0;
+  const s = report.summary;
+  const failures = s.failed + (options.strict ? s.inconclusive : 0);
+  const skipped = s.gated + s.skipped + (options.strict ? 0 : s.inconclusive);
+  const suite = `undogen verify: ${report.spec.title} ${report.spec.version}`;
+  const cases = report.results.map((r) => {
+    const name = xml(`${r.operationId} (${r.method} ${r.path})`);
+    const detail = [r.detail, ...r.diffs.map((d) => `${d.resource} ${d.path}: ${fmt(d.before)} -> ${fmt(d.after)}`)].join('\n');
+    let body = '';
+    if (r.outcome === 'failed' || (r.outcome === 'inconclusive' && options.strict)) body = `<failure message="${xml(r.detail)}">${xml(detail)}</failure>`;
+    else if (r.outcome === 'error') body = `<error message="${xml(r.detail)}">${xml(detail)}</error>`;
+    else if (r.outcome !== 'verified') body = `<skipped message="${xml(`${r.outcome}: ${r.detail}`)}"/>`;
+    return `    <testcase classname="undogen.${xml(r.reversibility)}" name="${name}" time="0">${body}</testcase>`;
+  });
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<testsuites name="undogen" tests="${s.total}" failures="${failures}" errors="${s.error}" skipped="${skipped}" time="${seconds}">`,
+    `  <testsuite name="${xml(suite)}" tests="${s.total}" failures="${failures}" errors="${s.error}" skipped="${skipped}" time="${seconds}" timestamp="${report.startedAt}">`,
+    ...cases,
+    '  </testsuite>',
+    '</testsuites>',
+    '',
+  ].join('\n');
+}
+
+/**
+ * SARIF 2.1.0 for code scanning UIs (GitHub code scanning annotates the spec
+ * file at each failing operation).
+ */
+export function toSarif(report: VerifyReport, specUri: string, specText?: string): object {
+  const lines = specText?.split('\n') ?? [];
+  const lineOf = (r: VerifyReport['results'][number]) => {
+    const id = r.operationId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const byId = lines.findIndex((l) => new RegExp(`["']?operationId["']?\\s*:\\s*["']?${id}["']?\\s*,?\\s*$`).test(l));
+    if (byId >= 0) return byId + 1;
+    const byPath = lines.findIndex((l) => l.includes(`${r.path}"`) || l.includes(`${r.path}:`) || l.includes(`${r.path}'`));
+    return byPath >= 0 ? byPath + 1 : 1;
+  };
+  const rules = [
+    { id: 'undo-failed', name: 'UndoFailed', shortDescription: { text: 'The compiled inverse did not restore the prior state' }, defaultConfiguration: { level: 'error' } },
+    { id: 'undo-inconclusive', name: 'UndoInconclusive', shortDescription: { text: 'The operation changed nothing visible, so its inverse was not exercised' }, defaultConfiguration: { level: 'warning' } },
+    { id: 'undo-error', name: 'UndoError', shortDescription: { text: 'undogen could not set up or run the operation' }, defaultConfiguration: { level: 'warning' } },
+  ];
+  const ruleFor: Partial<Record<Outcome, string>> = { failed: 'undo-failed', inconclusive: 'undo-inconclusive', error: 'undo-error' };
+  const results = report.results
+    .filter((r) => ruleFor[r.outcome])
+    .map((r) => ({
+      ruleId: ruleFor[r.outcome],
+      level: r.outcome === 'failed' ? 'error' : 'warning',
+      message: {
+        text: [`${r.operationId} (${r.method} ${r.path}): ${r.detail}`, ...r.diffs.slice(0, 10).map((d) => `${d.resource} ${d.path}: ${fmt(d.before)} → ${fmt(d.after)}`)].join('\n'),
+      },
+      locations: [{ physicalLocation: { artifactLocation: { uri: specUri }, region: { startLine: lineOf(r) } } }],
+      partialFingerprints: { operation: `${r.method} ${r.path}` },
+    }));
+  return {
+    $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
+    version: '2.1.0',
+    runs: [
+      {
+        tool: { driver: { name: 'undogen', version: report.tool.version, informationUri: 'https://github.com/anup2k13/undogen', rules } },
+        results,
+      },
+    ],
+  };
+}
+
+/** Keys whose values are never written to reports. */
+const SECRET_KEY = /token|secret|password|passwd|api[-_]?key|authorization|cookie|session|credential|private[-_]?key/i;
+
+/**
+ * Remove sensitive data from a report before it is stored or shared.
+ * Values under secret-looking keys are always masked; with `all`, every
+ * value in the diffs is masked (only types and lengths remain), and
+ * credentials in the base URL are dropped.
+ */
+export function redactReport(report: VerifyReport, options: { all?: boolean } = {}): VerifyReport {
+  const mask = (v: unknown): unknown => {
+    if (v === null || v === undefined || typeof v === 'boolean') return v;
+    if (typeof v === 'string') return `‹redacted string(${v.length})›`;
+    if (typeof v === 'number') return '‹redacted number›';
+    if (Array.isArray(v)) return v.map(mask);
+    if (typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, mask(x)]));
+    return '‹redacted›';
+  };
+  const scrub = (v: unknown, path: string): unknown => {
+    const last = path.split(/[.[\]]/).filter(Boolean).at(-1) ?? '';
+    if (SECRET_KEY.test(last)) return mask(v);
+    if (options.all) return mask(v);
+    if (Array.isArray(v)) return v.map((x, i) => scrub(x, `${path}[${i}]`));
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, scrub(x, `${path}.${k}`)]));
+    return v;
+  };
+  let baseUrl = report.baseUrl;
+  try {
+    const u = new URL(report.baseUrl);
+    u.username = '';
+    u.password = '';
+    for (const k of [...u.searchParams.keys()]) if (SECRET_KEY.test(k) || options.all) u.searchParams.set(k, 'redacted');
+    baseUrl = u.toString().replace(/\/$/, '');
+  } catch {
+    /* keep */
+  }
+  return {
+    ...report,
+    baseUrl,
+    results: report.results.map((r) => ({
+      ...r,
+      diffs: r.diffs.map((d) => ({
+        ...d,
+        before: d.path === 'status' ? d.before : scrub(d.before, d.path),
+        after: d.path === 'status' ? d.after : scrub(d.after, d.path),
+      })),
+    })),
+  };
+}

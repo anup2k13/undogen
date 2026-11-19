@@ -105,8 +105,12 @@ export interface Declaration {
   inverse?: string;
   bindings?: Record<string, string>;
   body?: 'before' | 'request' | 'before-request-keys' | { literal: unknown };
+  /** Inverse to use when the capture found nothing (e.g. a PUT that created the resource). */
+  inverseIfMissing?: string;
   /** Recorded by `undogen annotate` so a round-trip keeps the original strategy name. */
   strategy?: Strategy;
+  /** Recorded by `undogen annotate`: the compiler's confidence. Hand-written declarations default to 1. */
+  confidence?: number;
   /** Free-form notes (ignored), e.g. hints written by `undogen init`. */
   [note: `_${string}`]: unknown;
 }

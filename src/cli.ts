@@ -1,113 +1,336 @@
 #!/usr/bin/env node
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { parseArgs } from 'node:util';
 import { analyze } from './analyze.js';
-import { c, formatAnalysis, formatResultLine, formatSummary, toBadge, toMarkdown } from './report.js';
+import { annotate, toArazzo, toBundle } from './export.js';
+import { initFiles, mergeKeepingExisting } from './init.js';
+import { learn } from './learn.js';
+import { c, formatAnalysis, formatResultLine, formatSummary, redactReport, toBadge, toJUnit, toMarkdown, toSarif } from './report.js';
+import { FileJournalStore, UndoableClient } from './runtime.js';
 import { loadSpec } from './spec.js';
+import { describeEntry } from './tools.js';
+import type { ApiSpec, Declaration } from './types.js';
+import { DEFAULT_IGNORED_FIELDS, verify, type Fixtures, type VerifyReport } from './verify.js';
 import { VERSION } from './version.js';
-import { DEFAULT_IGNORED_FIELDS, verify, type Fixtures } from './verify.js';
 
 const HELP = `
-${c.bold('undogen')} — compile undo operations from an OpenAPI spec, then prove they work.
+${c.bold('undogen')} ${VERSION} — compile undo operations from an OpenAPI spec, then prove they work.
 
 ${c.bold('Usage')}
-  undogen analyze <spec> [--json] [--overrides <file>]
-  undogen verify  <spec> --base-url <url> [options]
+  undogen analyze  <spec> [--json]                 Derive an inverse for every write operation (no network)
+  undogen verify   <spec> --base-url <url>         Run each operation and its inverse on a sandbox, diff the state
+  undogen mcp      <spec> --base-url <url>         Serve the API as MCP tools with journaling and undo tools
+  undogen undo     <spec> --base-url <url> --journal <file> [--seq n | --all]
+  undogen journal  --journal <file> [--json]       Show a persisted journal
+  undogen learn    <spec> --base-url <url> --out <overrides.json>   Find id bindings for unknown creates by experiment
+  undogen init     <spec> [--from-report report.json]               Write starter overrides.json and fixtures.json
+  undogen annotate <spec> [-o <file>]              Write x-undogen declarations and OpenAPI links into the spec
+  undogen arazzo   <spec> [-o <file>]              Export undo workflows as an Arazzo 1.0 document
+  undogen compile  <spec> [-o <file>]              Export operations + plans as JSON (for the Python client)
 
-  <spec> is an OpenAPI 3.x file (JSON or YAML) or URL.
+  <spec> is an OpenAPI 3.x or Swagger 2.0 file (JSON or YAML) or URL. External $refs are followed.
+
+${c.bold('Common options')}
   --overrides <file>     JSON map of operationId -> declaration, for specs you don't control
-
-${c.bold('analyze')}   Derive an inverse for every write operation (no network calls).
-  --json                 Print the compiled plans as JSON
-
-${c.bold('verify')}    Run each operation and its inverse against a test server, diff the state.
-  --base-url <url>       Server to test against. Use a sandbox — verify creates and deletes data.
-  --fixtures <file>      JSON fixtures: per-operation params, bodies, prepare steps, skips
-  --ignore <a,b,...>     Extra fields that may legitimately differ (default: timestamps, etags)
-  --only <id,id,...>     Only verify these operationIds
+  --restore-children     When undoing a delete re-creates a resource, re-create its child collections too
   --header <k:v>         Extra request header (repeatable), e.g. "authorization: Bearer $TOKEN"
+  --only <id,id*,...>    Only these operationIds (a trailing * matches a prefix)
+
+${c.bold('verify')}
+  --fixtures <file>      Per-operation params, bodies, prepare steps, skips
+  --ignore <a,b,...>     Extra fields that may legitimately differ (default: timestamps, etags)
   --report <dir>         Write report.json, report.md and badge.json to <dir>
+  --junit <file>         Write JUnit XML          --sarif <file>   Write SARIF 2.1.0 (code scanning)
+  --redact               Mask every value in written reports (secret-looking keys are always masked)
+  --strict               Exit 1 on inconclusive results too
+  --scoped-only          Only snapshot routes scoped to created resources (for shared sandboxes)
+  --keep                 Keep the resources verify created (default: delete them afterwards)
   --no-seed              Don't seed child resources (disables cascade detection)
 
-Exit code is 1 when any inverse fails verification.
+${c.bold('mcp')}
+  --journal <file>       Persist the journal (undo after restarts; blocks replays of irreversible calls)
+  --irreversible <mode>  ask (default: ask the human via MCP elicitation), allow, or deny
+  --no-reads             Don't expose GET operations as tools
+
+${c.bold('undo')}
+  --seq <n>              Undo this entry (default: the most recent one)    --all   Undo everything, newest first
+  --force                Undo even if someone changed the data since       --cascade   Undo dependent entries first
+
+Exit codes: 0 ok, 1 an inverse failed verification (or an undo failed), 2 usage or setup error.
 `;
 
-async function main(argv: string[]) {
-  const { values, positionals } = parseArgs({
-    args: argv,
-    allowPositionals: true,
-    options: {
-      json: { type: 'boolean' },
-      'base-url': { type: 'string' },
-      overrides: { type: 'string' },
-      fixtures: { type: 'string' },
-      ignore: { type: 'string' },
-      only: { type: 'string' },
-      header: { type: 'string', multiple: true },
-      report: { type: 'string' },
-      'no-seed': { type: 'boolean' },
-      help: { type: 'boolean', short: 'h' },
-      version: { type: 'boolean', short: 'v' },
-    },
-  });
+const OPTIONS = {
+  json: { type: 'boolean' },
+  'base-url': { type: 'string' },
+  overrides: { type: 'string' },
+  fixtures: { type: 'string' },
+  ignore: { type: 'string' },
+  only: { type: 'string' },
+  header: { type: 'string', multiple: true },
+  report: { type: 'string' },
+  junit: { type: 'string' },
+  sarif: { type: 'string' },
+  redact: { type: 'boolean' },
+  strict: { type: 'boolean' },
+  'scoped-only': { type: 'boolean' },
+  keep: { type: 'boolean' },
+  'no-seed': { type: 'boolean' },
+  'restore-children': { type: 'boolean' },
+  journal: { type: 'string' },
+  irreversible: { type: 'string' },
+  'no-reads': { type: 'boolean' },
+  seq: { type: 'string' },
+  all: { type: 'boolean' },
+  force: { type: 'boolean' },
+  cascade: { type: 'boolean' },
+  out: { type: 'string', short: 'o' },
+  'from-report': { type: 'string' },
+  'fixtures-out': { type: 'string' },
+  'overrides-out': { type: 'string' },
+  'no-links': { type: 'boolean' },
+  overwrite: { type: 'boolean' },
+  help: { type: 'boolean', short: 'h' },
+  version: { type: 'boolean', short: 'v' },
+} as const;
 
+type Values = ReturnType<typeof parseArgs<{ options: typeof OPTIONS; allowPositionals: true }>>['values'];
+
+class UsageError extends Error {}
+
+const readJson = async <T>(file: string): Promise<T> => JSON.parse(await readFile(file, 'utf8')) as T;
+const list = (s: string | undefined) => s?.split(',').map((x) => x.trim()).filter(Boolean);
+
+function headersOf(values: Values): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const h of values.header ?? []) {
+    const i = h.indexOf(':');
+    if (i < 1) throw new UsageError(`Bad --header "${h}", expected "name: value"`);
+    headers[h.slice(0, i).trim()] = h.slice(i + 1).trim();
+  }
+  return headers;
+}
+
+function printWarnings(spec: ApiSpec) {
+  if (!spec.warnings.length) return;
+  console.error(c.yellow(`  ⚠ ${spec.warnings.length} spec warning(s):`));
+  for (const w of spec.warnings.slice(0, 5)) console.error(c.dim(`    ${w}`));
+  if (spec.warnings.length > 5) console.error(c.dim(`    … ${spec.warnings.length - 5} more (see analyze --json)`));
+}
+
+async function write(file: string, text: string) {
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, text);
+}
+
+function needBaseUrl(values: Values): string {
+  const url = values['base-url'];
+  if (!url) throw new UsageError('this command needs --base-url (use a sandbox: undogen creates and deletes data)');
+  return url;
+}
+
+async function main(argv: string[]) {
+  const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: OPTIONS });
   if (values.version) return console.log(VERSION);
   const [command, specPath] = positionals;
-  if (values.help || !command || !specPath) {
+  if (values.help || !command) {
     console.log(HELP);
-    return process.exit(command ? 0 : 1);
+    return process.exit(command || values.help ? 0 : 2);
   }
 
+  if (command === 'journal') {
+    if (!values.journal) throw new UsageError('journal needs --journal <file>');
+    const entries = await new FileJournalStore(values.journal).load();
+    if (values.json) return console.log(JSON.stringify(entries, null, 2));
+    if (!entries.length) return console.log('  (empty journal)');
+    for (const e of entries) {
+      const d = describeEntry(e);
+      const color = e.status === 'undone' ? c.dim : e.status === 'active' ? (s: string) => s : c.red;
+      console.log(color(`  #${String(d.seq).padEnd(4)} ${d.status.padEnd(9)} ${d.operationId.padEnd(28)} ${d.request.padEnd(40)} ↺ ${d.undo ?? '(none)'}`));
+      if (e.undoError) console.log(c.dim(`        ${e.undoError}`));
+    }
+    return;
+  }
+
+  if (!specPath) throw new UsageError(`${command} needs a <spec>. Try --help.`);
   const spec = await loadSpec(specPath);
-  const overrides = values.overrides ? JSON.parse(await readFile(values.overrides, 'utf8')) : undefined;
-  const analysis = analyze(spec, { overrides });
+  const overrides = values.overrides ? await readJson<Record<string, Declaration>>(values.overrides) : undefined;
+  const analysis = analyze(spec, { overrides, restoreChildren: values['restore-children'] });
+  const headers = headersOf(values);
+  const only = list(values.only);
 
-  if (command === 'analyze') {
-    console.log(values.json ? JSON.stringify(analysis, null, 2) : formatAnalysis(analysis));
-    return;
-  }
-
-  if (command === 'verify') {
-    const baseUrl = values['base-url'];
-    if (!baseUrl) throw new Error('verify needs --base-url');
-    const fixtures: Fixtures = values.fixtures ? JSON.parse(await readFile(values.fixtures, 'utf8')) : {};
-    const headers: Record<string, string> = {};
-    for (const h of values.header ?? []) {
-      const i = h.indexOf(':');
-      if (i < 1) throw new Error(`Bad --header "${h}", expected "name: value"`);
-      headers[h.slice(0, i).trim()] = h.slice(i + 1).trim();
+  switch (command) {
+    case 'analyze': {
+      if (values.json) return console.log(JSON.stringify(analysis, null, 2));
+      console.log(formatAnalysis(analysis));
+      printWarnings(spec);
+      return;
     }
-    const ops = spec.operations.filter((o) => o.method !== 'get');
-    const idW = Math.max(12, ...ops.map((o) => o.id.length)) + 2;
-    const pathW = Math.max(10, ...ops.map((o) => o.path.length)) + 2;
 
-    console.log(`\n${c.bold('undogen verify')}  ${c.dim('·')}  ${spec.title} ${c.dim(spec.version)}  ${c.dim('·')}  ${baseUrl}\n`);
-    const report = await verify({
-      spec,
-      baseUrl,
-      plans: analysis.plans,
-      fixtures,
-      headers,
-      seedChildren: !values['no-seed'],
-      ignoreFields: [...DEFAULT_IGNORED_FIELDS, ...(values.ignore?.split(',').map((s) => s.trim()) ?? [])],
-      only: values.only?.split(',').map((s) => s.trim()),
-      onResult: (r) => console.log(formatResultLine(r, idW, pathW)),
-    });
-    console.log(formatSummary(report));
+    case 'verify': {
+      const baseUrl = needBaseUrl(values);
+      const fixtures: Fixtures = values.fixtures ? await readJson(values.fixtures) : {};
+      const matches = (id: string) => !only || only.some((p) => (p.endsWith('*') ? id.startsWith(p.slice(0, -1)) : id === p));
+      const ops = spec.operations.filter((o) => o.method !== 'get' && matches(o.id));
+      const idW = Math.max(12, ...ops.map((o) => o.id.length)) + 2;
+      const pathW = Math.max(10, ...ops.map((o) => o.path.length)) + 2;
 
-    if (values.report) {
-      await mkdir(values.report, { recursive: true });
-      await writeFile(join(values.report, 'report.json'), JSON.stringify(report, null, 2));
-      await writeFile(join(values.report, 'report.md'), toMarkdown(report));
-      await writeFile(join(values.report, 'badge.json'), JSON.stringify(toBadge(report)));
-      console.log(c.dim(`  Reports written to ${values.report}/\n`));
+      console.log(`\n${c.bold('undogen verify')}  ${c.dim('·')}  ${spec.title} ${c.dim(spec.version)}  ${c.dim('·')}  ${baseUrl}\n`);
+      printWarnings(spec);
+      const raw = await verify({
+        spec,
+        baseUrl,
+        plans: analysis.plans,
+        fixtures,
+        headers,
+        seedChildren: !values['no-seed'],
+        cleanup: !values.keep,
+        scopedOnly: values['scoped-only'],
+        ignoreFields: [...DEFAULT_IGNORED_FIELDS, ...(list(values.ignore) ?? [])],
+        only: ops.map((o) => o.id),
+        onResult: (r) => console.log(formatResultLine(r, idW, pathW)),
+      });
+      console.log(formatSummary(raw));
+      const report = redactReport(raw, { all: values.redact });
+
+      if (values.report) {
+        await mkdir(values.report, { recursive: true });
+        await writeFile(join(values.report, 'report.json'), JSON.stringify(report, null, 2));
+        await writeFile(join(values.report, 'report.md'), toMarkdown(report));
+        await writeFile(join(values.report, 'badge.json'), JSON.stringify(toBadge(report)));
+        console.log(c.dim(`  Reports written to ${values.report}/`));
+      }
+      if (values.junit) {
+        await write(values.junit, toJUnit(report, { strict: values.strict }));
+        console.log(c.dim(`  JUnit written to ${values.junit}`));
+      }
+      if (values.sarif) {
+        const local = !/^https?:/i.test(specPath);
+        const specText = local ? await readFile(specPath, 'utf8') : undefined;
+        const uri = local ? relative(process.cwd(), specPath).split('\\').join('/') : specPath;
+        await write(values.sarif, JSON.stringify(toSarif(report, uri, specText), null, 2));
+        console.log(c.dim(`  SARIF written to ${values.sarif}`));
+      }
+      if (values.report || values.junit || values.sarif) console.log('');
+      if (report.summary.failed > 0 || (values.strict && report.summary.inconclusive > 0)) process.exitCode = 1;
+      return;
     }
-    if (report.summary.failed > 0) process.exitCode = 1;
-    return;
-  }
 
-  throw new Error(`Unknown command "${command}". Try --help.`);
+    case 'mcp': {
+      const { createMcpServer } = await import('./mcp.js');
+      const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
+      const mode = values.irreversible ?? 'ask';
+      if (!['ask', 'allow', 'deny'].includes(mode)) throw new UsageError('--irreversible must be ask, allow or deny');
+      const { server } = await createMcpServer({
+        spec,
+        baseUrl: needBaseUrl(values),
+        plans: analysis.plans,
+        headers,
+        store: values.journal ? new FileJournalStore(values.journal) : undefined,
+        only,
+        includeReads: !values['no-reads'],
+        irreversible: mode as 'ask' | 'allow' | 'deny',
+      });
+      await server.connect(new StdioServerTransport());
+      console.error(`undogen mcp: serving ${spec.title} ${spec.version} (${spec.operations.length} operations) over stdio`);
+      return;
+    }
+
+    case 'undo': {
+      if (!values.journal) throw new UsageError('undo needs --journal <file> (written by `undogen mcp --journal` or FileJournalStore)');
+      if (!existsSync(values.journal)) throw new UsageError(`No journal at ${values.journal}`);
+      const client = await UndoableClient.open({ spec, baseUrl: needBaseUrl(values), plans: analysis.plans, headers, store: new FileJournalStore(values.journal) });
+      const opts = { force: values.force, cascade: values.cascade };
+      if (values.all) {
+        const { undone, failed } = await client.undoAll(opts);
+        for (const e of undone) console.log(c.green(`  ↺ #${e.seq} ${e.operationId}  ${describeEntry(e).undo}`));
+        for (const f of failed) console.log(c.red(`  ✗ #${f.entry.seq} ${f.entry.operationId}: ${f.error.message}`));
+        if (failed.length) process.exitCode = 1;
+        return;
+      }
+      const seq = values.seq ? Number(values.seq) : undefined;
+      if (values.seq && !Number.isInteger(seq)) throw new UsageError('--seq must be a number');
+      try {
+        await client.undo(seq, opts);
+        const e = seq ? client.journal.find((x) => x.seq === seq)! : [...client.journal].reverse().find((x) => x.status === 'undone')!;
+        console.log(c.green(`  ↺ #${e.seq} ${e.operationId}  ${describeEntry(e).undo}`));
+      } catch (err) {
+        console.log(c.red(`  ✗ ${(err as Error).message}`));
+        process.exitCode = 1;
+      }
+      return;
+    }
+
+    case 'learn': {
+      const out = values.out ?? values.overrides ?? 'overrides.json';
+      const fixtures: Fixtures = values.fixtures ? await readJson(values.fixtures) : {};
+      console.log(`\n${c.bold('undogen learn')}  ${c.dim('·')}  ${spec.title}  ${c.dim('·')}  ${needBaseUrl(values)}\n`);
+      const { learned, attempts } = await learn({
+        spec,
+        baseUrl: needBaseUrl(values),
+        plans: analysis.plans,
+        fixtures,
+        headers,
+        only,
+        onAttempt: (a) => {
+          const icon = a.outcome === 'learned' ? c.green('✓') : a.outcome === 'error' ? c.yellow('!') : c.dim('–');
+          console.log(`  ${icon} ${a.operationId.padEnd(32)} ${a.outcome === 'learned' ? a.detail : c.dim(a.detail)}`);
+        },
+      });
+      if (!attempts.length) console.log(c.dim('  Nothing to learn: no unknown creates with a suspected inverse.'));
+      const n = Object.keys(learned).length;
+      if (n) {
+        const existing = existsSync(out) ? await readJson<Record<string, Declaration>>(out) : {};
+        await write(out, JSON.stringify({ ...existing, ...learned }, null, 2) + '\n');
+        console.log(`\n  Learned ${n} binding(s) into ${out}. Prove them: undogen verify ${specPath} --overrides ${out} --base-url …\n`);
+      } else console.log('');
+      return;
+    }
+
+    case 'init': {
+      const report = values['from-report'] ? await readJson<VerifyReport>(values['from-report']) : undefined;
+      const { overrides: o, fixtures: f } = initFiles(spec, analysis, report);
+      const oFile = values['overrides-out'] ?? 'overrides.json';
+      const fFile = values['fixtures-out'] ?? 'fixtures.json';
+      for (const [file, generated, label] of [[oFile, o, 'overrides'], [fFile, f, 'fixtures']] as const) {
+        const existing = existsSync(file) ? await readJson<Record<string, object>>(file) : {};
+        const merged = mergeKeepingExisting(generated as Record<string, object>, existing);
+        const added = Object.keys(generated).filter((k) => !(k in existing)).length;
+        await write(file, JSON.stringify(merged, null, 2) + '\n');
+        console.log(`  ${file}: ${added} new ${label} entr${added === 1 ? 'y' : 'ies'}${Object.keys(existing).length ? ` (kept ${Object.keys(existing).length} existing)` : ''}`);
+      }
+      console.log(c.dim('  Keys starting with "_" are notes; undogen ignores them.'));
+      return;
+    }
+
+    case 'annotate': {
+      if (/^https?:/i.test(specPath)) throw new UsageError('annotate needs a local spec file');
+      const text = annotate(await readFile(specPath, 'utf8'), analysis, { links: !values['no-links'], overwrite: values.overwrite });
+      if (values.out) {
+        await write(values.out, text);
+        console.error(`  Annotated spec written to ${values.out}`);
+      } else process.stdout.write(text);
+      return;
+    }
+
+    case 'arazzo': {
+      const text = toArazzo(spec, analysis, /^https?:/i.test(specPath) ? specPath : `./${relative(values.out ? dirname(values.out) : process.cwd(), specPath).split('\\').join('/')}`);
+      if (values.out) await write(values.out, text);
+      else process.stdout.write(text);
+      return;
+    }
+
+    case 'compile': {
+      const text = JSON.stringify(toBundle(spec, analysis, VERSION), null, 2) + '\n';
+      if (values.out) await write(values.out, text);
+      else process.stdout.write(text);
+      return;
+    }
+
+    default:
+      throw new UsageError(`Unknown command "${command}". Try --help.`);
+  }
 }
 
 main(process.argv.slice(2)).catch((err) => {

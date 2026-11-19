@@ -297,7 +297,7 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
   const declared = override ?? (op.extensions['x-undogen'] as Declaration | undefined);
   const source = override ? 'overrides file' : 'x-undogen';
   if (declared?.reversibility === 'irreversible') {
-    return plan(op, 'irreversible', 'declared', 1, {
+    return plan(op, 'irreversible', declared.strategy ?? 'declared', declared.confidence ?? 1, {
       reasons: [declared.reason ?? `Declared irreversible via ${source}`],
     });
   }
@@ -321,7 +321,18 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
             : undefined;
     const getOp = index.find('get', op.path);
     const needsCapture = declared.body === 'before' || declared.body === 'before-request-keys';
-    return plan(op, declared.reversibility ?? 'reversible', declared.strategy ?? 'declared', 1, {
+    const lastSeg = segmentsOf(op.path).at(-1) ?? '';
+    // Undoing a DELETE by POSTing it back re-creates the resource under a new id: track it.
+    const identity =
+      op.method === 'delete' && target.method === 'post' && isParamSeg(lastSeg)
+        ? { param: paramName(lastSeg), responseKey: idFieldFor(paramName(lastSeg), target.responseSchema).key }
+        : undefined;
+    const missingTarget = declared.inverseIfMissing ? index.ops.find((o) => o.id === declared.inverseIfMissing) : undefined;
+    return plan(op, declared.reversibility ?? 'reversible', declared.strategy ?? 'declared', declared.confidence ?? 1, {
+      identity,
+      inverseIfMissing: missingTarget
+        ? { operationId: missingTarget.id, method: missingTarget.method, path: missingTarget.path, bindings: bindParams(missingTarget.path, overrides) }
+        : undefined,
       capture: needsCapture && getOp ? getTemplate(getOp) : undefined,
       inverse: { operationId: target.id, method: target.method, path: target.path, bindings: bindParams(target.path, overrides), body },
       reasons: [declared.reason ?? `Inverse declared via ${source}: ${target.id}`],

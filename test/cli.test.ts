@@ -1,0 +1,120 @@
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { parse as parseYaml } from 'yaml';
+import { FileJournalStore, loadSpec, UndoableClient } from '../src/index.js';
+import { startTodoServer } from '../examples/todo-api/server.js';
+
+const root = new URL('..', import.meta.url).pathname;
+const tsx = join(root, 'node_modules/.bin/tsx');
+const cli = join(root, 'src/cli.ts');
+const spec = join(root, 'examples/todo-api/openapi.yaml');
+const fixtures = join(root, 'examples/todo-api/fixtures.json');
+
+let server: Awaited<ReturnType<typeof startTodoServer>>;
+let dir: string;
+beforeAll(async () => {
+  server = await startTodoServer();
+  dir = await mkdtemp(join(tmpdir(), 'undogen-cli-'));
+});
+afterAll(async () => {
+  await server.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+async function run(...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  try {
+    const { stdout, stderr } = await promisify(execFile)(tsx, [cli, ...args], { cwd: dir, env: { ...process.env, NO_COLOR: '1' } });
+    return { code: 0, stdout, stderr };
+  } catch (err) {
+    const e = err as { code: number; stdout: string; stderr: string };
+    return { code: e.code, stdout: e.stdout, stderr: e.stderr };
+  }
+}
+
+describe('cli', () => {
+  it('prints its version from package.json', async () => {
+    const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+    expect((await run('--version')).stdout.trim()).toBe(pkg.version);
+  });
+
+  it('exits 2 on usage errors', async () => {
+    expect((await run('verify', spec)).code).toBe(2);
+    expect((await run('frobnicate', spec)).code).toBe(2);
+  });
+
+  it('verify writes reports, JUnit and SARIF, and exits 1 on failures', async () => {
+    const r = await run('verify', spec, '--base-url', server.url, '--fixtures', fixtures, '--report', 'out', '--junit', 'out/junit.xml', '--sarif', 'out/undogen.sarif', '--redact');
+    expect(r.code).toBe(1);
+    expect(r.stdout).toContain('6 verified · 2 failed');
+    const junit = await readFile(join(dir, 'out/junit.xml'), 'utf8');
+    expect(junit).toContain('tests="9" failures="2" errors="0" skipped="1"');
+    expect(junit).toMatch(/<testcase classname="undogen.compensable" name="deleteTodo \(DELETE \/todos\/\{todoId\}\)" time="0"><failure/);
+    const sarif = JSON.parse(await readFile(join(dir, 'out/undogen.sarif'), 'utf8'));
+    const results = sarif.runs[0].results;
+    expect(results.map((x: any) => x.ruleId)).toEqual(['undo-failed', 'undo-failed']);
+    const specLines = (await readFile(spec, 'utf8')).split('\n');
+    expect(specLines[results[0].locations[0].physicalLocation.region.startLine - 1]).toContain('operationId: deleteTodo');
+    const report = JSON.parse(await readFile(join(dir, 'out/report.json'), 'utf8'));
+    const diff = report.results.find((x: any) => x.operationId === 'deleteTodo').diffs[0];
+    expect(diff.before).toEqual({ text: '‹redacted string(16)›' });
+  });
+
+  it('--strict also fails on inconclusive results', async () => {
+    await writeFile(join(dir, 'noop.json'), JSON.stringify({ updateTodo: { body: {} } }));
+    expect((await run('verify', spec, '--base-url', server.url, '--only', 'updateTodo', '--fixtures', 'noop.json')).code).toBe(0);
+    expect((await run('verify', spec, '--base-url', server.url, '--only', 'updateTodo', '--fixtures', 'noop.json', '--strict')).code).toBe(1);
+  });
+
+  it('undo and journal work on a journal written by another process', async () => {
+    const journal = join(dir, 'session.jsonl');
+    const s = await loadSpec(spec);
+    const agent = await UndoableClient.open({ spec: s, baseUrl: server.url, store: new FileJournalStore(journal) });
+    const id = ((await agent.call('createTodo', { body: { title: 'cli' } })).data as { id: string }).id;
+    await agent.call('updateTodo', { params: { todoId: id }, body: { done: true } });
+
+    expect((await run('journal', '--journal', journal)).stdout).toMatch(/#2 +active +updateTodo/);
+    const one = await run('undo', spec, '--base-url', server.url, '--journal', journal);
+    expect(one.stdout).toContain(`↺ #2 updateTodo  PATCH /todos/${id}`);
+    const all = await run('undo', spec, '--base-url', server.url, '--journal', journal, '--all');
+    expect(all.stdout).toContain(`↺ #1 createTodo  DELETE /todos/${id}`);
+    expect((await fetch(`${server.url}/todos/${id}`)).status).toBe(404);
+  });
+
+  it('init, annotate, arazzo and compile write files', async () => {
+    await run('init', spec, '--overrides-out', 'init/overrides.json', '--fixtures-out', 'init/fixtures.json');
+    expect(JSON.parse(await readFile(join(dir, 'init/fixtures.json'), 'utf8')).unarchiveTodo.prepare).toEqual([{ operationId: 'archiveTodo' }]);
+
+    await run('annotate', spec, '-o', 'annotated.yaml');
+    expect(parseYaml(await readFile(join(dir, 'annotated.yaml'), 'utf8')).paths['/todos'].post['x-undogen']).toMatchObject({ inverse: 'deleteTodo' });
+
+    expect((await run('arazzo', spec)).stdout).toContain('workflowId: undo-createTodo');
+
+    const bundle = JSON.parse((await run('compile', spec)).stdout);
+    expect(bundle.format).toBe('undogen-bundle/1');
+    expect(bundle.operations).toHaveLength(13);
+  });
+});
+
+describe('cli: mcp over stdio', () => {
+  it('serves tools a real MCP client can call', async () => {
+    const transport = new StdioClientTransport({ command: tsx, args: [cli, 'mcp', spec, '--base-url', server.url, '--only', 'createTodo,getTodo'], stderr: 'pipe' });
+    const client = new Client({ name: 'test', version: '1' });
+    await client.connect(transport);
+    try {
+      const { tools } = await client.listTools();
+      expect(tools.map((t) => t.name)).toEqual(['createTodo', 'getTodo', 'undogen_undo', 'undogen_undo_all', 'undogen_journal']);
+      const res = await client.callTool({ name: 'createTodo', arguments: { body: { title: 'stdio' } } });
+      const id = JSON.parse((res.content as Array<{ text: string }>)[0]!.text).data.id;
+      await client.callTool({ name: 'undogen_undo', arguments: {} });
+      expect((await fetch(`${server.url}/todos/${id}`)).status).toBe(404);
+    } finally {
+      await client.close();
+    }
+  }, 20_000);
+});

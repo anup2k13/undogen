@@ -95,7 +95,7 @@ const SNAPSHOT_MISSING = Symbol('missing');
 
 class SetupError extends Error {}
 
-interface Created {
+export interface Created {
   /** DELETE that removes the resource. */
   remove: RequestTemplate;
   params: Record<string, Scalar>;
@@ -126,36 +126,8 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
   const raw = new UndoableClient(clientOptions);
   const results: OperationResult[] = [];
 
-  const creators = spec.operations.filter((o) => o.method === 'post' && planById.get(o.id)?.strategy === 'delete-created');
+  const { creators, create, ensure, removeAll } = arranger(raw, spec, planById, fixtures);
   const getters = spec.operations.filter((o) => o.method === 'get' && (!options.scopedOnly || o.pathParams.length > 0));
-
-  /** Create a resource with `creator`, remember how to delete it, and return the new id. */
-  const create = async (creator: Operation, pool: Record<string, Scalar>, created: Created[]): Promise<Scalar> => {
-    const plan = planById.get(creator.id)!;
-    const body = fixtures[creator.id]?.body ?? synthesize(creator.requestSchema, creator.requestExample);
-    const res = await raw.request('post', fillPath(creator.path, pool), { body, contentType: creator.requestContentType });
-    if (res.status >= 300) {
-      throw new SetupError(`setup: ${creator.id} returned HTTP ${res.status} ${short(res.data)} — add a fixture body`);
-    }
-    const [param, ref] = Object.entries(plan.inverse!.bindings).find(([, b]) => b.from === 'response')!;
-    const id = getPath(res.data, ref.key);
-    if (id === undefined) throw new SetupError(`setup: ${creator.id} response has no "${ref.key}"`);
-    created.push({ remove: plan.inverse!, params: { ...pool, [param]: id as Scalar } });
-    return id as Scalar;
-  };
-
-  /** Make sure every path param of `path` refers to a real resource, creating parents first. */
-  const ensure = async (path: string, pool: Record<string, Scalar>, created: Created[]) => {
-    const segs = path.split('/').filter(Boolean);
-    for (let i = 0; i < segs.length; i++) {
-      const m = /^\{(.+)\}$/.exec(segs[i]!);
-      if (!m || pool[m[1]!] !== undefined) continue;
-      const collection = '/' + segs.slice(0, i).join('/');
-      const creator = creators.find((c) => c.path === collection);
-      if (!creator) throw new SetupError(`setup: no way to create {${m[1]}} (no POST ${collection}) — add fixture params`);
-      pool[m[1]!] = await create(creator, pool, created);
-    }
-  };
 
   const snapshot = async (pool: Record<string, Scalar>) => {
     const state = new Map<string, { status: number; data: unknown }>();
@@ -165,18 +137,6 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
       state.set(`GET ${g.path}`, { status: res.status, data: res.data });
     }
     return state;
-  };
-
-  /** Delete what verify created, newest first, following ids that undo changed. Failures are ignored. */
-  const removeAll = async (created: Created[], remap: (param: string, id: Scalar) => Scalar) => {
-    for (const c of [...created].reverse()) {
-      try {
-        const params = Object.fromEntries(Object.entries(c.params).map(([k, v]) => [k, remap(k, v)]));
-        await raw.request('delete', fillPath(c.remove.path, params));
-      } catch {
-        /* best effort */
-      }
-    }
   };
 
   for (const op of spec.operations) {
@@ -308,6 +268,53 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
     results,
     summary,
   };
+}
+
+/** Creates real resources for path parameters (parents first) and deletes them again. Shared by verify and learn. */
+export function arranger(raw: UndoableClient, spec: ApiSpec, planById: Map<string, InversePlan>, fixtures: Fixtures) {
+  const creators = spec.operations.filter((o) => o.method === 'post' && planById.get(o.id)?.strategy === 'delete-created');
+
+  /** Create a resource with `creator`, remember how to delete it, and return the new id. */
+  const create = async (creator: Operation, pool: Record<string, Scalar>, created: Created[]): Promise<Scalar> => {
+    const plan = planById.get(creator.id)!;
+    const body = fixtures[creator.id]?.body ?? synthesize(creator.requestSchema, creator.requestExample);
+    const res = await raw.request('post', fillPath(creator.path, pool), { body, contentType: creator.requestContentType });
+    if (res.status >= 300) {
+      throw new SetupError(`setup: ${creator.id} returned HTTP ${res.status} ${short(res.data)} — add a fixture body`);
+    }
+    const [param, ref] = Object.entries(plan.inverse!.bindings).find(([, b]) => b.from === 'response')!;
+    const id = getPath(res.data, ref.key);
+    if (id === undefined) throw new SetupError(`setup: ${creator.id} response has no "${ref.key}"`);
+    created.push({ remove: plan.inverse!, params: { ...pool, [param]: id as Scalar } });
+    return id as Scalar;
+  };
+
+  /** Make sure every path param of `path` refers to a real resource, creating parents first. */
+  const ensure = async (path: string, pool: Record<string, Scalar>, created: Created[]) => {
+    const segs = path.split('/').filter(Boolean);
+    for (let i = 0; i < segs.length; i++) {
+      const m = /^\{(.+)\}$/.exec(segs[i]!);
+      if (!m || pool[m[1]!] !== undefined) continue;
+      const collection = '/' + segs.slice(0, i).join('/');
+      const creator = creators.find((c) => c.path === collection);
+      if (!creator) throw new SetupError(`setup: no way to create {${m[1]}} (no POST ${collection}) — add fixture params`);
+      pool[m[1]!] = await create(creator, pool, created);
+    }
+  };
+
+  /** Delete what was created, newest first, following ids that undo changed. Failures are ignored. */
+  const removeAll = async (created: Created[], remap: (param: string, id: Scalar) => Scalar = (_, v) => v) => {
+    for (const c of [...created].reverse()) {
+      try {
+        const params = Object.fromEntries(Object.entries(c.params).map(([k, v]) => [k, remap(k, v)]));
+        await raw.request('delete', fillPath(c.remove.path, params));
+      } catch {
+        /* best effort */
+      }
+    }
+  };
+
+  return { creators, create, ensure, removeAll };
 }
 
 function parentOf(path: string): string {
