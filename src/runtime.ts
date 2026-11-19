@@ -1,5 +1,6 @@
 import { analyze } from './analyze.js';
 import { DEFAULT_IGNORED_FIELDS, diffValues, type StateDiff } from './diff.js';
+import { appendJournalEvent, readJournal } from './journal.js';
 import type { ApiSpec, BodyTemplate, HttpMethod, InversePlan, Operation, RequestTemplate, ValueRef } from './types.js';
 
 export interface CallInput {
@@ -82,7 +83,8 @@ export class UndoConflictError extends UndoError {
 }
 
 export interface ClientOptions {
-  spec: ApiSpec;
+  /** Needed to make calls. Undoing entries from a journal works without it. */
+  spec?: ApiSpec;
   baseUrl: string;
   /** Pre-compiled plans; compiled from `spec` when omitted. */
   plans?: InversePlan[];
@@ -95,6 +97,12 @@ export interface ClientOptions {
   allowIrreversible?: boolean | ((op: Operation, plan: InversePlan, input: CallInput) => boolean | Promise<boolean>);
   /** Fields that may change without counting as a conflict (default: timestamps, etags). */
   ignoreFields?: string[];
+  /**
+   * Append every write and undo to this JSON Lines file. Use UndoableClient.open()
+   * to resume a journal, e.g. to roll back from a different process later.
+   * The journal contains request and response bodies: treat it as sensitive.
+   */
+  journalFile?: string;
 }
 
 /**
@@ -109,10 +117,21 @@ export class UndoableClient {
   private seq = 0;
 
   constructor(private readonly options: ClientOptions) {
-    this.ops = new Map(options.spec.operations.map((o) => [o.id, o]));
-    const plans = options.plans ?? analyze(options.spec).plans;
+    this.ops = new Map((options.spec?.operations ?? []).map((o) => [o.id, o]));
+    const plans = options.plans ?? (options.spec ? analyze(options.spec).plans : []);
     this.plans = new Map(plans.map((p) => [p.operationId, p]));
     this.fetchImpl = options.fetch ?? fetch;
+  }
+
+  /** Create a client and load any entries already recorded in `options.journalFile`. */
+  static async open(options: ClientOptions): Promise<UndoableClient> {
+    const client = new UndoableClient(options);
+    if (options.journalFile) {
+      const entries = await readJournal(options.journalFile);
+      client.journal.push(...entries);
+      client.seq = entries.reduce((max, e) => Math.max(max, e.seq), 0);
+    }
+    return client;
   }
 
   planFor(operationId: string): InversePlan | undefined {
@@ -196,17 +215,21 @@ export class UndoableClient {
       undone: false,
     };
     this.journal.push(entry);
+    if (this.options.journalFile) await appendJournalEvent(this.options.journalFile, { type: 'write', entry });
     return { ...response, entry };
   }
 
-  /** Undo one entry (default: the most recent one not yet undone). */
-  async undo(entry?: JournalEntry, options: UndoOptions = {}): Promise<HttpResult> {
-    const target = entry ?? [...this.journal].reverse().find((e) => !e.undone);
+  /** Undo one entry (default: the most recent one not yet undone). Accepts an entry or its seq number. */
+  async undo(entry?: JournalEntry | number, options: UndoOptions = {}): Promise<HttpResult> {
+    const target =
+      typeof entry === 'number'
+        ? this.journal.find((e) => e.seq === entry)
+        : entry ?? [...this.journal].reverse().find((e) => !e.undone);
+    if (!target && typeof entry === 'number') throw new Error(`No journal entry #${entry}`);
     if (!target) throw new Error('Nothing to undo');
     if (target.undone) throw new UndoError(`Entry #${target.seq} is already undone`, target);
     if (!target.inverse && target.plan.strategy === 'no-side-effects') {
-      target.undone = true;
-      return { status: 204, data: undefined, headers: {} };
+      return this.markUndone(target, { status: 204, data: undefined, headers: {} }, options);
     }
     if (!target.inverse) {
       throw new UndoError(`Entry #${target.seq} (${target.operationId}) cannot be undone: ${target.inverseError}`, target);
@@ -216,9 +239,7 @@ export class UndoableClient {
       if (live.status === 404) {
         if (target.inverse.method === 'delete') {
           // Already gone: the undo's goal is reached without touching anything.
-          target.undone = true;
-          target.undoResponse = live;
-          return live;
+          return this.markUndone(target, live, options);
         }
         throw new UndoConflictError(target, [{ resource: `GET ${target.guard.path}`, path: 'status', before: 200, after: 404 }]);
       }
@@ -235,7 +256,21 @@ export class UndoableClient {
         res,
       );
     }
-    target.undone = true;
+    return this.markUndone(target, res, options);
+  }
+
+  private async markUndone(entry: JournalEntry, res: HttpResult, options: UndoOptions): Promise<HttpResult> {
+    entry.undone = true;
+    entry.undoResponse = res;
+    if (this.options.journalFile) {
+      await appendJournalEvent(this.options.journalFile, {
+        type: 'undo',
+        seq: entry.seq,
+        at: new Date().toISOString(),
+        response: res,
+        ...(options.force ? { forced: true } : {}),
+      });
+    }
     return res;
   }
 

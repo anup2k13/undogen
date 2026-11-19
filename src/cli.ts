@@ -3,19 +3,25 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { analyze } from './analyze.js';
-import { c, formatAnalysis, formatResultLine, formatSummary, toBadge, toMarkdown } from './report.js';
+import { readJournal } from './journal.js';
+import { c, formatAnalysis, formatJournal, formatResultLine, formatSummary, toBadge, toMarkdown } from './report.js';
+import { UndoableClient, UndoConflictError } from './runtime.js';
 import { loadSpec } from './spec.js';
+import { VERSION } from './version.js';
 import { DEFAULT_IGNORED_FIELDS, verify, type Fixtures } from './verify.js';
 
 const HELP = `
-${c.bold('undogen')} — compile undo operations from an OpenAPI spec, then prove they work.
+${c.bold('undogen')} ${c.dim(VERSION)} — compile undo operations from an OpenAPI spec, then prove they work.
 
 ${c.bold('Usage')}
   undogen analyze <spec> [--json] [--overrides <file>]
   undogen verify  <spec> --base-url <url> [options]
+  undogen journal <file>
+  undogen undo    --journal <file> --base-url <url> [--seq <n> | --all] [--force] [--header <k:v>]
 
   <spec> is an OpenAPI 3.x file (JSON or YAML) or URL.
   --overrides <file>     JSON map of operationId -> declaration, for specs you don't control
+  --header <k:v>         Extra request header (repeatable), e.g. "authorization: Bearer $TOKEN"
 
 ${c.bold('analyze')}   Derive an inverse for every write operation (no network calls).
   --json                 Print the compiled plans as JSON
@@ -25,12 +31,27 @@ ${c.bold('verify')}    Run each operation and its inverse against a test server,
   --fixtures <file>      JSON fixtures: per-operation params, bodies, prepare steps, skips
   --ignore <a,b,...>     Extra fields that may legitimately differ (default: timestamps, etags)
   --only <id,id,...>     Only verify these operationIds
-  --header <k:v>         Extra request header (repeatable), e.g. "authorization: Bearer $TOKEN"
   --report <dir>         Write report.json, report.md and badge.json to <dir>
   --no-seed              Don't seed child resources (disables cascade detection)
+  Exit code is 1 when any inverse fails verification.
 
-Exit code is 1 when any inverse fails verification.
+${c.bold('journal')}   Show what a journal recorded: each write, its inverse, and whether it was undone.
+
+${c.bold('undo')}      Roll back writes recorded in a journal (default: the most recent one).
+  --seq <n>              Undo a specific entry
+  --all                  Undo every entry, newest first
+  --force                Undo even if the resource changed after the write
 `;
+
+function parseHeaders(list: string[] | undefined): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const h of list ?? []) {
+    const i = h.indexOf(':');
+    if (i < 1) throw new Error(`Bad --header "${h}", expected "name: value"`);
+    headers[h.slice(0, i).trim()] = h.slice(i + 1).trim();
+  }
+  return headers;
+}
 
 async function main(argv: string[]) {
   const { values, positionals } = parseArgs({
@@ -46,19 +67,65 @@ async function main(argv: string[]) {
       header: { type: 'string', multiple: true },
       report: { type: 'string' },
       'no-seed': { type: 'boolean' },
+      journal: { type: 'string' },
+      seq: { type: 'string' },
+      all: { type: 'boolean' },
+      force: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
   });
 
-  if (values.version) return console.log('0.1.0');
-  const [command, specPath] = positionals;
-  if (values.help || !command || !specPath) {
+  if (values.version) return console.log(VERSION);
+  const [command, target] = positionals;
+  if (values.help || !command) {
     console.log(HELP);
-    return process.exit(command ? 0 : 1);
+    return process.exit(command || values.help ? 0 : 1);
+  }
+  const headers = parseHeaders(values.header);
+
+  if (command === 'journal') {
+    const file = target ?? values.journal;
+    if (!file) throw new Error('journal needs a file: undogen journal <file>');
+    console.log(formatJournal(await readJournal(file), file));
+    return;
   }
 
-  const spec = await loadSpec(specPath);
+  if (command === 'undo') {
+    const journalFile = values.journal ?? target;
+    const baseUrl = values['base-url'];
+    if (!journalFile || !baseUrl) throw new Error('undo needs --journal <file> and --base-url <url>');
+    const client = await UndoableClient.open({ baseUrl, headers, journalFile });
+    const force = !!values.force;
+    if (values.all) {
+      const { undone, failed } = await client.undoAll({ force });
+      for (const e of undone) console.log(`  ${c.green('↺')} #${e.seq} ${e.operationId}  ${c.dim(`${e.inverse?.method.toUpperCase() ?? ''} ${e.inverse?.path ?? ''}`)}`);
+      for (const { entry, error } of failed) console.log(`  ${c.red('✗')} #${entry.seq} ${entry.operationId}  ${c.red(error.message)}`);
+      console.log(`\n  ${c.green(`${undone.length} undone`)} · ${failed.length ? c.red(`${failed.length} failed`) : '0 failed'}\n`);
+      if (failed.length) process.exitCode = 1;
+      return;
+    }
+    const seq = values.seq !== undefined ? Number(values.seq) : undefined;
+    try {
+      const res = await client.undo(seq, { force });
+      const entry = seq !== undefined ? client.journal.find((e) => e.seq === seq)! : [...client.journal].reverse().find((e) => e.undone)!;
+      console.log(`  ${c.green('↺')} #${entry.seq} ${entry.operationId} undone  ${c.dim(`HTTP ${res.status}`)}`);
+    } catch (err) {
+      if (err instanceof UndoConflictError) {
+        console.error(c.yellow(`  ⚠ ${err.message}`));
+        process.exitCode = 1;
+        return;
+      }
+      throw err;
+    }
+    return;
+  }
+
+  if (!target) {
+    console.log(HELP);
+    return process.exit(1);
+  }
+  const spec = await loadSpec(target);
   const overrides = values.overrides ? JSON.parse(await readFile(values.overrides, 'utf8')) : undefined;
   const analysis = analyze(spec, { overrides });
 
@@ -71,12 +138,6 @@ async function main(argv: string[]) {
     const baseUrl = values['base-url'];
     if (!baseUrl) throw new Error('verify needs --base-url');
     const fixtures: Fixtures = values.fixtures ? JSON.parse(await readFile(values.fixtures, 'utf8')) : {};
-    const headers: Record<string, string> = {};
-    for (const h of values.header ?? []) {
-      const i = h.indexOf(':');
-      if (i < 1) throw new Error(`Bad --header "${h}", expected "name: value"`);
-      headers[h.slice(0, i).trim()] = h.slice(i + 1).trim();
-    }
     const ops = spec.operations.filter((o) => o.method !== 'get');
     const idW = Math.max(12, ...ops.map((o) => o.id.length)) + 2;
     const pathW = Math.max(10, ...ops.map((o) => o.path.length)) + 2;

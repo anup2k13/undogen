@@ -1,5 +1,6 @@
 export { analyze, planOperation, tokenize, type AnalyzeOptions } from './analyze.js';
 export { loadSpec, parseSpec } from './spec.js';
+export { readJournal, appendJournalEvent, type JournalEvent } from './journal.js';
 export {
   UndoableClient,
   IrreversibleOperationError,
@@ -25,5 +26,6 @@ export {
   type VerifyReport,
 } from './verify.js';
 export { diffStates, diffValues } from './diff.js';
-export { formatAnalysis, toMarkdown, toBadge } from './report.js';
+export { formatAnalysis, formatJournal, toMarkdown, toBadge } from './report.js';
+export { VERSION } from './version.js';
 export type * from './types.js';

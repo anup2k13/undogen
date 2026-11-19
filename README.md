@@ -119,6 +119,23 @@ await client.undoAll();  // saga-style rollback of the whole session, newest fir
 
 Each journal entry stores the *concrete* inverse request, resolved at call time. The journal is plain JSON: you can persist it, audit it, or replay the rollback later from another process.
 
+#### Persistent journal: roll back later, from anywhere
+
+Pass `journalFile` and every write and undo is appended to a JSON Lines file. Another process can pick it up later, without the spec, and roll back:
+
+```ts
+const client = new UndoableClient({ spec, baseUrl, journalFile: 'agent-run.jsonl' });
+// ...agent works...
+```
+
+```bash
+npx undogen journal agent-run.jsonl                          # what happened, and how to undo each write
+npx undogen undo --journal agent-run.jsonl --base-url $API   # undo the latest write
+npx undogen undo --journal agent-run.jsonl --base-url $API --all   # roll back the whole run
+```
+
+The journal contains request and response bodies. Treat it like a log with sensitive data.
+
 #### Safe undo: never clobber someone else's change
 
 Undo is only safe if nobody touched the resource after the agent. Say an agent renames a ticket and a teammate then marks it done: a naive undo writes back the old snapshot and silently erases the teammate's change.
@@ -210,7 +227,6 @@ The compiled plans are hypotheses. `verify` is what turns them into facts.
 
 - MCP proxy mode: put verified undo in front of any MCP server built from an OpenAPI spec
 - Learning bindings from verification runs (turning `unknown` into `verified` automatically)
-- Persistent journals and multi-process rollback
 - Swagger 2.0, external `$ref`s, GraphQL mutations
 
 ## Development

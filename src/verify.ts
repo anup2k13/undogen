@@ -1,4 +1,5 @@
 import { analyze } from './analyze.js';
+import { VERSION } from './version.js';
 import { DEFAULT_IGNORED_FIELDS, diffStates, type StateDiff } from './diff.js';
 import { fillPath, getPath, UndoableClient, type CallInput, type HttpResult } from './runtime.js';
 import type { ApiSpec, InversePlan, Operation, Reversibility, Schema, Strategy } from './types.js';
@@ -224,7 +225,7 @@ export async function verify(options: VerifyOptions): Promise<VerifyReport> {
   const summary = { verified: 0, failed: 0, gated: 0, skipped: 0, error: 0, total: results.length };
   for (const r of results) summary[r.outcome]++;
   return {
-    tool: { name: 'undogen', version: '0.1.0' },
+    tool: { name: 'undogen', version: VERSION },
     spec: { title: spec.title, version: spec.version },
     baseUrl: options.baseUrl,
     startedAt,

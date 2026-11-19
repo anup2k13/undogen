@@ -1,3 +1,4 @@
+import type { JournalEntry } from './runtime.js';
 import type { Analysis, InversePlan, RequestTemplate, Reversibility } from './types.js';
 import type { Outcome, VerifyReport } from './verify.js';
 
@@ -138,4 +139,24 @@ export function planCounts(plans: InversePlan[]): Record<Reversibility, number> 
   const out = { reversible: 0, compensable: 0, irreversible: 0, unknown: 0 };
   for (const p of plans) out[p.reversibility]++;
   return out;
+}
+
+export function formatJournal(entries: JournalEntry[], file: string): string {
+  const lines = ['', `${c.bold('undogen journal')}  ${c.dim('·')}  ${file}  ${c.dim('·')}  ${entries.length} writes`, ''];
+  if (!entries.length) lines.push(c.dim('  (empty)'));
+  const idW = Math.max(10, ...entries.map((e) => e.operationId.length)) + 2;
+  for (const e of entries) {
+    const state = e.undone
+      ? c.dim('undone')
+      : e.inverse || e.plan.strategy === 'no-side-effects'
+        ? c.green('undoable')
+        : c.red('no undo');
+    lines.push(
+      `  ${c.dim(`#${String(e.seq).padEnd(4)}`)}${pad(e.operationId, idW)}${pad(e.request.method.toUpperCase(), 7)}${pad(e.request.path, 34)}${CLASS_COLOR[e.plan.reversibility](pad(e.plan.reversibility, 13))}${state}`,
+    );
+    if (e.inverse && !e.undone) lines.push(c.dim(`        ↺ ${e.inverse.method.toUpperCase()} ${e.inverse.path}${e.inverse.body !== undefined ? '  ' + JSON.stringify(e.inverse.body) : ''}`));
+    if (!e.inverse && e.inverseError && !e.undone) lines.push(c.dim(`        · ${e.inverseError}`));
+  }
+  lines.push('');
+  return lines.join('\n');
 }
