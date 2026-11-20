@@ -31,6 +31,15 @@ def python_session(bundle_path, url, journal, detail):
     c.undo_all()
 
 
+def python_children_session(bundle_path, url, journal, detail):
+    c = UndoableClient(bundle_path, url, store=FileJournalStore(journal), journal_detail=detail)
+    t = c.call("createTodo", body={"title": "with comments"})["data"]["id"]
+    c.call("createComment", params={"todoId": t}, body={"text": "first"})
+    c.call("createComment", params={"todoId": t}, body={"text": "second"})
+    c.call("deleteTodo", params={"todoId": t})
+    c.undo_all()
+
+
 def normalized(journal):
     """Entries with what legitimately differs between two runs (session, times, salted hashes, transport) taken out."""
     out = []
@@ -60,6 +69,20 @@ def test_typescript_and_python_write_the_same_journal(bundle_path, tmp_path, det
         python_session(bundle_path, url, py_journal, detail)
     ts, py = normalized(ts_journal), normalized(py_journal)
     assert len(ts) == len(py) == 16  # 8 calls, each saved again when undone
+    for a, b in zip(ts, py):
+        assert a == b, f"entry #{a.get('seq')} ({a.get('operationId')}) differs"
+
+
+@pytest.mark.parametrize("detail", ["full", "minimal"])
+def test_child_restore_and_id_remap_match(children_bundle_path, tmp_path, detail):
+    ts_journal, py_journal = str(tmp_path / "ts.jsonl"), str(tmp_path / "py.jsonl")
+    with todo_server() as url:
+        subprocess.run([str(TSX), str(ROOT / "test/fixtures/parity-session.ts"), url, ts_journal, detail, "children"], cwd=ROOT, check=True)
+    with todo_server() as url:
+        python_children_session(children_bundle_path, url, py_journal, detail)
+    ts, py = normalized(ts_journal), normalized(py_journal)
+    assert [e["status"] for e in ts[-4:]] == ["undone"] * 4
+    assert len(ts) == len(py) == 8
     for a, b in zip(ts, py):
         assert a == b, f"entry #{a.get('seq')} ({a.get('operationId')}) differs"
 
