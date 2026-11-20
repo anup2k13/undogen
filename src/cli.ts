@@ -24,6 +24,7 @@ ${c.bold('Usage')}
   undogen verify   <spec> --base-url <url>         Run each operation and its inverse on a sandbox, diff the state
   undogen mcp      <spec> --base-url <url>         Serve the API as MCP tools with journaling and undo tools
   undogen wrap     [--journal <file>] -- <cmd...>  Put undo in front of another MCP server (experimental; --analyze, --undo)
+                   or --url <https://…> [--header "authorization: Bearer …"] for one reached over HTTP
   undogen undo     <spec> --base-url <url> --journal <file> [--seq n | --all | --session id]
   undogen journal  --journal <file> [--session id] [--json]  Show a persisted journal (--compact rewrites it smaller)
   undogen learn    <spec> --base-url <url> --out <overrides.json>   Find id bindings for unknown creates by experiment
@@ -86,6 +87,7 @@ Exit codes: 0 ok, 1 an inverse failed verification (or an undo failed), 2 usage 
 const OPTIONS = {
   json: { type: 'boolean' },
   'base-url': { type: 'string' },
+  url: { type: 'string' },
   overrides: { type: 'string' },
   fixtures: { type: 'string' },
   ignore: { type: 'string' },
@@ -205,7 +207,7 @@ async function main(argv: string[]) {
     if (positionals.length > 1) throw new UsageError(`wrap takes the server's command after --, e.g. undogen wrap -- ${positionals.slice(1).join(' ')}`);
     const { runWrap, WrapUsageError } = await import('./wrap/cli.js');
     try {
-      process.exitCode = await runWrap(values, dashes === -1 ? [] : argv.slice(dashes + 1));
+      process.exitCode = await runWrap({ ...values, headers: headersOf(values) }, dashes === -1 ? [] : argv.slice(dashes + 1));
     } catch (err) {
       if (err instanceof WrapUsageError) throw new UsageError(err.message);
       throw err;

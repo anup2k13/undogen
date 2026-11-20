@@ -2,6 +2,7 @@
 import { readFile } from 'node:fs/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { c } from '../report.js';
 import { FileJournalStore } from '../runtime.js';
@@ -11,6 +12,10 @@ import { createWrapServer, listAllTools } from './server.js';
 import { ToolSession, type ToolEntry } from './session.js';
 
 export interface WrapFlags {
+  /** A server reached over Streamable HTTP instead of a command. */
+  url?: string;
+  /** Headers for every request to that server, e.g. authorization. */
+  headers?: Record<string, string>;
   journal?: string;
   overrides?: string;
   irreversible?: string;
@@ -27,11 +32,30 @@ export interface WrapFlags {
 
 export class WrapUsageError extends Error {}
 
-/** Connect to the server to wrap, started with the command after `--`. */
-async function connectUpstream(command: string[]): Promise<Client> {
-  const [cmd, ...args] = command;
-  if (!cmd) throw new WrapUsageError('wrap needs the server to wrap after --, e.g. undogen wrap -- npx -y @acme/mcp-server');
+/** Connect to the server to wrap: started with the command after `--`, or at --url over Streamable HTTP. */
+async function connectUpstream(command: string[], flags: WrapFlags): Promise<Client> {
   const upstream = new Client({ name: 'undogen-wrap', version: VERSION });
+  if (flags.url) {
+    if (command.length) throw new WrapUsageError('give either --url or a command after --, not both');
+    let url: URL;
+    try {
+      url = new URL(flags.url);
+    } catch {
+      throw new WrapUsageError(`--url is not a URL: ${flags.url}`);
+    }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new WrapUsageError('--url must be http(s)');
+    // Header auth only (a token): servers that need an OAuth sign-in aren't supported yet.
+    try {
+      await upstream.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: flags.headers ?? {} } }));
+    } catch (err) {
+      const message = (err as Error).message;
+      const auth = /\b401\b|unauthori[sz]ed|forbidden|\b403\b/i.test(message);
+      throw new Error(`Could not connect to ${url.origin}${url.pathname}: ${message}${auth ? '. The server wants credentials: pass --header "authorization: Bearer <token>"' : ''}`);
+    }
+    return upstream;
+  }
+  const [cmd, ...args] = command;
+  if (!cmd) throw new WrapUsageError('wrap needs the server to wrap: a command after --, e.g. undogen wrap -- npx -y @acme/mcp-server, or --url https://…');
   // The wrapped server gets this process's environment (it usually needs a token from it); its stderr is ours.
   await upstream.connect(new StdioClientTransport({ command: cmd, args, env: process.env as Record<string, string>, stderr: 'inherit' }));
   return upstream;
@@ -42,7 +66,7 @@ export async function runWrap(flags: WrapFlags, command: string[]): Promise<numb
   if (!['ask', 'allow', 'deny'].includes(mode)) throw new WrapUsageError('--irreversible must be ask, allow or deny');
   const overrides = flags.overrides ? (JSON.parse(await readFile(flags.overrides, 'utf8')) as ToolOverrides) : undefined;
   if (flags.undo && !flags.journal) throw new WrapUsageError('wrap --undo needs --journal <file>');
-  const upstream = await connectUpstream(command);
+  const upstream = await connectUpstream(command, flags);
 
   try {
     if (flags.analyze) {

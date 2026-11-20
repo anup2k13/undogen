@@ -42,8 +42,9 @@ export const issueTools = [
   { name: 'create_or_update_file', description: 'Write a file.', inputSchema: { type: 'object', properties: { repo: str, path: str, content: str }, required: ['repo', 'path', 'content'] } },
 ];
 
-export function createIssuesServer() {
-  const state = { issues: new Map<number, Issue>(), starred: new Set<string>(), emails: [] as Array<{ to: string; body: string }>, files: new Map<string, string>(), next: 1 };
+const newState = () => ({ issues: new Map<number, Issue>(), starred: new Set<string>(), emails: [] as Array<{ to: string; body: string }>, files: new Map<string, string>(), next: 1 });
+
+export function createIssuesServer(state = newState()) {
   const server = new Server({ name: 'issues', version: '1.0.0' }, { capabilities: { tools: {} }, instructions: 'Issue numbers are per repository.' });
   const text = (v: unknown): CallToolResult => ({ content: [{ type: 'text', text: JSON.stringify(v) }] });
   const fail = (message: string): CallToolResult => ({ isError: true, content: [{ type: 'text', text: message }] });
@@ -93,6 +94,31 @@ export function createIssuesServer() {
     }
   });
   return { server, state };
+}
+
+/**
+ * The same server over Streamable HTTP (stateless: a server per request, sharing one state),
+ * refusing requests without `Authorization: Bearer <token>` when a token is given.
+ */
+export async function startIssuesHttpServer(opts: { token?: string } = {}) {
+  const { createServer } = await import('node:http');
+  const { StreamableHTTPServerTransport } = await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
+  const state = newState();
+  const http = createServer(async (req, res) => {
+    if (opts.token && req.headers.authorization !== `Bearer ${opts.token}`) return void res.writeHead(401).end('unauthorized');
+    if (req.method !== 'POST') return void res.writeHead(405).end();
+    const { server } = createIssuesServer(state);
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on('close', () => {
+      void transport.close();
+      void server.close();
+    });
+    await server.connect(transport);
+    await transport.handleRequest(req, res);
+  });
+  await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', resolve));
+  const { port } = http.address() as { port: number };
+  return { url: `http://127.0.0.1:${port}/mcp`, state, close: () => new Promise<void>((resolve) => http.close(() => resolve())) };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {

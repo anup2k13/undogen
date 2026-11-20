@@ -144,6 +144,29 @@ describe('cli', () => {
     expect((await run('analyze', '--', spec)).code).toBe(0); // -- keeps its usual meaning elsewhere
   }, 40_000); // starts several processes
 
+  it('wrap reaches a server over Streamable HTTP with header auth', async () => {
+    const { startIssuesHttpServer } = await import('./fixtures/issues-mcp-server.js');
+    const http = await startIssuesHttpServer({ token: 't0ken' });
+    try {
+      const refused = await run('wrap', '--analyze', '--url', http.url);
+      expect(refused.code).not.toBe(0); // no token: 401
+      const analyzed = await run('wrap', '--analyze', '--url', http.url, '--header', 'authorization: Bearer t0ken');
+      expect(analyzed.stdout).toContain('10 tools: 2 read-only');
+
+      const agent = new Client({ name: 'agent', version: '1' });
+      await agent.connect(new StdioClientTransport({ command: tsx, args: [cli, 'wrap', '--url', http.url, '--header', 'authorization: Bearer t0ken'], cwd: dir, stderr: 'ignore' }));
+      await agent.callTool({ name: 'create_issue', arguments: { repo: 'r', title: 'over http' } });
+      expect(http.state.issues.get(1)).toMatchObject({ title: 'over http', state: 'open' });
+      await agent.callTool({ name: 'undogen_undo', arguments: {} });
+      expect(http.state.issues.get(1)).toMatchObject({ state: 'closed' });
+      await agent.close();
+
+      expect((await run('wrap', '--url', http.url, '--', 'npx', 'x')).stderr).toMatch(/either --url or a command/);
+    } finally {
+      await http.close();
+    }
+  }, 40_000);
+
   it('init, annotate, arazzo and compile write files', async () => {
     await run('init', spec, '--overrides-out', 'init/overrides.json', '--fixtures-out', 'init/fixtures.json');
     expect(JSON.parse(await readFile(join(dir, 'init/fixtures.json'), 'utf8')).unarchiveTodo.prepare).toEqual([{ operationId: 'archiveTodo' }]);
