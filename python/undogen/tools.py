@@ -318,8 +318,13 @@ def tool_definitions(
             else next((e for e in reversed(mine) if e["status"] != "undone"), None)
         )
         if entry is None:
-            if seq is not None and any(e["seq"] == seq for e in client.journal):
-                raise UndogenError(f"Entry #{seq} belongs to an earlier session; a person can undo it with `undogen undo --journal`")
+            other = next((e for e in client.journal if e["seq"] == seq), None) if seq is not None else None
+            if other is not None:
+                s = other.get("session")
+                raise UndogenError(
+                    f"Entry #{seq} belongs to an earlier session ({s}); a person can undo it with "
+                    f"`undogen undo --journal <file> --seq {seq}` or the whole run with `--session {s}`"
+                )
             raise UndogenError(f"No journal entry #{seq} in this session" if seq is not None else "Nothing to undo in this session")
         res = client.undo(entry, force=force, cascade=cascade)
         return {"status": res["status"], **({"journal": describe_entry(entry)} if entry else {})}

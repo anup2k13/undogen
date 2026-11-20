@@ -341,9 +341,10 @@ export function toolDefinitions(client: UndoableClient, operations: Operation[],
         const seq = typeof args.seq === 'number' ? args.seq : undefined;
         const entry = seq !== undefined ? mine.find((e) => e.seq === seq) : [...mine].reverse().find((e) => e.status !== 'undone');
         if (!entry) {
+          const other = seq !== undefined ? client.journal.find((e) => e.seq === seq) : undefined;
           throw new Error(
-            seq !== undefined && client.journal.some((e) => e.seq === seq)
-              ? `Entry #${seq} belongs to an earlier session; a person can undo it with \`undogen undo --journal\``
+            other
+              ? `Entry #${seq} belongs to an earlier session (${other.session}); a person can undo it with \`undogen undo --journal <file> --seq ${seq}\` or the whole run with \`--session ${other.session}\``
               : seq !== undefined
                 ? `No journal entry #${seq} in this session`
                 : 'Nothing to undo in this session',
