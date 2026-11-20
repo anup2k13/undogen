@@ -12,6 +12,8 @@ import { createWrapServer, listAllTools } from './server.js';
 import { ToolSession, type ToolEntry } from './session.js';
 
 export interface WrapFlags {
+  /** Fixtures file: prove the plans against the (sandbox) server instead of serving. */
+  verify?: string;
   /** A server reached over Streamable HTTP instead of a command. */
   url?: string;
   /** Headers for every request to that server, e.g. authorization. */
@@ -116,6 +118,31 @@ export async function runWrap(flags: WrapFlags, command: string[]): Promise<numb
       const reads = plans.filter((p) => p.strategy === 'no-side-effects').length;
       console.log(`\n  ${plans.length} tools: ${reads} read-only · ${count('reversible')} reversible · ${count('compensable')} compensable · ${count('irreversible')} irreversible · ${count('unknown')} unknown`);
       return 0;
+    }
+
+    if (flags.verify) {
+      const { verifyTools } = await import('./verify.js');
+      const fixtures = JSON.parse(await readFile(flags.verify, 'utf8')) as import('./verify.js').WrapFixtures;
+      if (!Array.isArray(fixtures.steps)) throw new WrapUsageError(`${flags.verify} needs "steps": [{ "tool": …, "arguments": {…} }]`);
+      const icons = { verified: c.green('✓'), compensated: c.yellow('≈'), failed: c.red('✗'), inconclusive: c.yellow('?'), gated: c.magenta('⛔'), error: c.red('!') } as const;
+      const report = await verifyTools({
+        call: async (name, args) => (await upstream.callTool({ name, arguments: args })) as never,
+        plans: planTools((await listAllTools(upstream)) as McpTool[], overrides),
+        fixtures,
+        onResult: flags.json
+          ? undefined
+          : (r) => {
+              console.log(`  ${icons[r.outcome]} ${(r.action ? `${r.tool} ${r.action}` : r.tool).padEnd(30)} ${r.reversibility.padEnd(12)} ${r.detail}`);
+              for (const d of r.diffs.slice(0, 5)) console.log(c.dim(`        ${d.resource} ${d.path}: ${JSON.stringify(d.before)} → ${JSON.stringify(d.after)}`));
+            },
+      });
+      if (flags.json) console.log(JSON.stringify(report, null, 2));
+      else {
+        const s = report.summary;
+        console.log(`\n  ${s.verified} verified · ${s.compensated} compensated · ${s.failed} failed · ${s.inconclusive} inconclusive · ${s.gated} gated · ${s.error} errors`);
+        for (const line of report.cleanup) console.log(c.red(`  cleanup: ${line}`));
+      }
+      return report.summary.failed || report.summary.error || report.cleanup.length ? 1 : 0;
     }
 
     if (flags.undo) {

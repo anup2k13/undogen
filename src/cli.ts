@@ -24,7 +24,8 @@ ${c.bold('Usage')}
   undogen verify   <spec> --base-url <url>         Run each operation and its inverse on a sandbox, diff the state
   undogen mcp      <spec> --base-url <url>         Serve the API as MCP tools with journaling and undo tools
   undogen wrap     [--journal <file>] -- <cmd...>  Put undo in front of another MCP server (experimental; --analyze, --undo)
-                   or --url <https://…> [--header "authorization: Bearer …"] for one reached over HTTP
+                   or --url <https://…> [--header "authorization: Bearer …"] for one reached over HTTP;
+                   --verify <fixtures.json> proves each undo against a sandbox server
   undogen undo     <spec> --base-url <url> --journal <file> [--seq n | --all | --session id]
   undogen journal  --journal <file> [--session id] [--json]  Show a persisted journal (--compact rewrites it smaller)
   undogen learn    <spec> --base-url <url> --out <overrides.json>   Find id bindings for unknown creates by experiment
@@ -114,6 +115,7 @@ const OPTIONS = {
   session: { type: 'string' },
   analyze: { type: 'boolean' },
   undo: { type: 'boolean' },
+  verify: { type: 'string' },
   all: { type: 'boolean' },
   force: { type: 'boolean' },
   cascade: { type: 'boolean' },

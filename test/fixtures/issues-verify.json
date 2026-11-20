@@ -1,0 +1,10 @@
+{
+  "probe": { "tool": "list_issues", "arguments": { "repo": "r" } },
+  "setup": [{ "tool": "create_issue", "arguments": { "repo": "r", "title": "base" } }],
+  "steps": [
+    { "tool": "update_issue", "arguments": { "repo": "r", "issue_number": "${setup.0.number}", "title": "changed" } },
+    { "tool": "add_issue_labels", "arguments": { "repo": "r", "issue_number": "${setup.0.number}", "labels": ["p1"] } },
+    { "tool": "create_issue", "arguments": { "repo": "r", "title": "new" } },
+    { "tool": "send_email", "arguments": { "to": "a@example.com", "body": "hi" } }
+  ]
+}

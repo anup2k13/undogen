@@ -608,3 +608,64 @@ describe('expandHeaders', () => {
     expect(() => expandHeaders({ authorization: 'Bearer ${MISSING}' }, {})).toThrow(/uses \$\{MISSING\}, which is not set/);
   });
 });
+
+describe('undogen wrap --verify', () => {
+  async function upstream(breakRemove = false) {
+    const { server, state } = createIssuesServer();
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await server.connect(a);
+    const client = new Client({ name: 'verify', version: '1' });
+    await client.connect(b);
+    const call = async (name: string, args: Record<string, unknown>) =>
+      // A planted bug: removing labels silently does nothing.
+      breakRemove && name === 'remove_issue_labels' ? { content: [{ type: 'text' as const, text: '[]' }] } : ((await client.callTool({ name, arguments: args })) as CallToolResult);
+    return { call, state, plans: planTools(issueTools as McpTool[]) };
+  }
+  const fixtures = {
+    probe: { tool: 'list_issues', arguments: { repo: 'r' } },
+    setup: [{ tool: 'create_issue', arguments: { repo: 'r', title: 'base' } }],
+    steps: [
+      { tool: 'update_issue', arguments: { repo: 'r', issue_number: '${setup.0.number}', title: 'changed', state: 'closed' } },
+      { tool: 'add_issue_labels', arguments: { repo: 'r', issue_number: '${setup.0.number}', labels: ['p1'] } },
+      { tool: 'star_repository', arguments: { repo: 'r' } }, // list_issues can't show stars
+      { tool: 'create_issue', arguments: { repo: 'r', title: 'new' } },
+      { tool: 'send_email', arguments: { to: 'a@example.com', body: 'hi' } },
+      { tool: 'get_issue', arguments: { repo: 'r', issue_number: '${setup.0.number}' } },
+    ],
+  };
+
+  it('proves each undo against the probes, and cleans up its setup', async () => {
+    const { verifyTools } = await import('../src/wrap/verify.js');
+    const { call, state, plans } = await upstream();
+    const report = await verifyTools({ call, plans, fixtures });
+    expect(report.results.map((r) => [r.tool, r.outcome])).toEqual([
+      ['update_issue', 'verified'],
+      ['add_issue_labels', 'verified'],
+      ['star_repository', 'inconclusive'],
+      ['create_issue', 'compensated'], // closed, not deleted: the list still shows it
+      ['send_email', 'gated'],
+      ['get_issue', 'verified'],
+    ]);
+    expect(report.results[3]!.diffs.length).toBeGreaterThan(0);
+    expect(state.emails).toEqual([]); // never called
+    expect(state.issues.get(1)).toMatchObject({ title: 'base', state: 'closed' }); // the setup issue was undone (closed)
+    expect(report.cleanup).toEqual([]);
+    expect(report.summary).toMatchObject({ verified: 3, compensated: 1, inconclusive: 1, gated: 1, failed: 0, total: 6 });
+  });
+
+  it('fails an undo that does not restore the state', async () => {
+    const { verifyTools } = await import('../src/wrap/verify.js');
+    const { call, plans } = await upstream(true);
+    const report = await verifyTools({ call, plans, fixtures: { ...fixtures, steps: [fixtures.steps[1]!] } });
+    expect(report.results[0]).toMatchObject({ tool: 'add_issue_labels', outcome: 'failed', diffs: [{ path: '$[0].labels[0]', before: undefined, after: 'p1' }] });
+  });
+
+  it('reports fixture problems as errors, not failures', async () => {
+    const { verifyTools } = await import('../src/wrap/verify.js');
+    const { call, plans } = await upstream();
+    const r1 = await verifyTools({ call, plans, fixtures: { steps: [{ tool: 'star_repository', arguments: { repo: 'r' } }] } });
+    expect(r1.results[0]).toMatchObject({ outcome: 'error', detail: expect.stringMatching(/no probe/) });
+    const r2 = await verifyTools({ call, plans, fixtures: { ...fixtures, setup: [{ tool: 'create_issue', arguments: { repo: 'r' } }] } }); // no title
+    expect(r2.results.every((r) => r.outcome === 'error' && /setup call 0 \(create_issue\)/.test(r.detail))).toBe(true);
+  });
+});

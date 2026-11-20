@@ -144,6 +144,16 @@ describe('cli', () => {
     expect((await run('analyze', '--', spec)).code).toBe(0); // -- keeps its usual meaning elsewhere
   }, 40_000); // starts several processes
 
+  it('wrap --verify proves the undo plans against the server', async () => {
+    const fixture = ['--', tsx, join(root, 'test/fixtures/issues-mcp-server.ts')];
+    const out = await run('wrap', '--verify', join(root, 'test/fixtures/issues-verify.json'), ...fixture);
+    expect(out.code).toBe(0);
+    expect(out.stdout).toMatch(/✓ update_issue +reversible +state restored exactly/);
+    expect(out.stdout).toContain('2 verified · 1 compensated · 0 failed · 0 inconclusive · 1 gated · 0 errors');
+    const json = JSON.parse((await run('wrap', '--verify', join(root, 'test/fixtures/issues-verify.json'), '--json', ...fixture)).stdout);
+    expect(json.summary).toMatchObject({ verified: 2, compensated: 1, gated: 1, total: 4 });
+  }, 30_000);
+
   it('wrap reaches a server over Streamable HTTP with header auth', async () => {
     const { startIssuesHttpServer } = await import('./fixtures/issues-mcp-server.js');
     const http = await startIssuesHttpServer({ token: 't0ken' });
