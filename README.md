@@ -233,7 +233,11 @@ Tools don't come with routes, so plans come from names, input schemas, annotatio
 | `send_email`, `merge_pull_request`, other `delete_*` | irreversible: asks the human |
 | `create_or_update_file`, `edit_file` (when `read_file` can't return what it writes) | unknown: asks the human |
 
-If the read a plan depends on fails before a call (an update's or a delete's snapshot), that call asks the human instead of running without a way back. On the reference servers: memory gets undo for `create_entities` and `create_relations` (checked end to end: the graph is empty again after `undogen_undo_all`), filesystem for `move_file`; their other writes ask first. A plan that rests on a guess about a result the tool doesn't declare says so; if a real call disproves it, that call is journaled as not undoable and later calls of the tool need approval. A server reached over HTTP works the same with `--url` and header auth instead of a command, e.g. `undogen wrap --url https://api.githubcopilot.com/mcp/ --header 'authorization: Bearer ${GITHUB_TOKEN}'` (servers that need an OAuth sign-in aren't supported yet). undogen fills `${VAR}` in header values from its environment, so in an MCP client config the token stays in `env` rather than in `args`; non-local URLs must be https. Undo a past run with `undogen wrap --journal <file> --undo --session <id> -- <server command>`. Prove the plans against a sandbox before trusting them, as `undogen verify` does for APIs: `undogen wrap --verify fixtures.json -- <server>` reads a probe (a tool that shows the state), makes each call, undoes it, reads again and diffs; irreversible and unknown tools are never called, and setup calls are undone at the end.
+**Safety.** Irreversible and unknown calls ask the human, as in `undogen mcp`. So does a call whose plan depends on a read that failed first (an update's or a delete's snapshot), and one with a flag like `replace_parent: true` that makes it replace what undo can't put back. A plan that rests on a guess about a result the tool doesn't declare says so; if a real call disproves it, that call is journaled as not undoable and later calls of the tool ask first. Undoing a create that later calls use (same id under the same argument name, or an id-like string anywhere) is refused unless `cascade: true` undoes those first.
+
+**Hosted servers.** Use `--url` and header auth instead of a command: `undogen wrap --url https://api.githubcopilot.com/mcp/ --header 'authorization: Bearer ${GITHUB_TOKEN}'`. undogen fills `${VAR}` in header values from its environment, so in an MCP client config the token stays in `env` rather than in `args`; non-local URLs must be https.
+
+**Prove the plans** against a sandbox before trusting them, as `undogen verify` does for APIs: `undogen wrap --verify fixtures.json -- <server>` reads a probe (a tool that shows the state), makes each call, undoes it, reads again and diffs. Irreversible and unknown tools are never called, read-only ones are checked to change nothing, and setup calls are undone at the end.
 
 ```json
 { "probe": { "tool": "list_issues", "arguments": { "repo": "acme/sandbox" } },
@@ -242,14 +246,18 @@ If the read a plan depends on fails before a call (an update's or a delete's sna
             { "tool": "add_issue_labels", "arguments": { "repo": "acme/sandbox", "issue_number": "${setup.0.number}", "labels": ["p1"] } }] }
 ```
 
-Outcomes: verified, compensated (a compensating undo, e.g. closed rather than deleted, leaves the expected difference), failed (exit 1), inconclusive (the probe didn't show the change), gated. Declare what can't be inferred with `--overrides tools.json`:
+Outcomes: verified, compensated (a compensating undo, e.g. closed rather than deleted, leaves the expected difference), failed (exit 1), inconclusive (the probe didn't show the change), gated. On the reference memory server, `create_entities` and `create_relations` verify and its other writes are gated; filesystem gets undo for `move_file`.
+
+**Overrides** declare what can't be inferred (`--overrides tools.json`):
 
 ```json
 { "create_page": { "inverse": "archive_page", "arguments": { "page_id": "result.id" } },
   "run_workflow": { "reversibility": "irreversible", "reason": "starts a deploy" } }
 ```
 
-Undoing a create that later calls use (same id under the same argument name, or an id-like string anywhere) is refused unless `cascade: true` undoes those first, as in `undogen mcp`. Dependencies are found by id; short names referenced under other argument names (a memory graph's relation `from`/`to`) aren't. The wrapped server's resources and prompts pass through unchanged, with their change notifications, subscriptions and argument completion; tools the server adds later are planned when it announces them; cancellation and progress reach the wrapped server. Not yet: OAuth sign-in for hosted servers.
+**Also:** undo a past run with `undogen wrap --journal <file> --undo --session <id> -- <server command>`. The wrapped server's resources and prompts pass through unchanged, with their change notifications, subscriptions and argument completion; tools it adds later are planned when it announces them; cancellation and progress reach it.
+
+**Not yet:** OAuth sign-in for hosted servers. Dependencies are found by id, so short names referenced under other argument names (a memory graph's relation `from`/`to`) aren't seen.
 
 ### 5. Python agents
 
