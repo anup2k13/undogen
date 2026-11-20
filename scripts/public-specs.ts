@@ -32,6 +32,9 @@ export const specName = (entry: string) => entry.split('/')[0]!.split('.')[0]!;
  * relative to the root's directory. Written to a temporary directory and moved into place only when the whole
  * spec loaded, so a failed download never leaves a partial copy that later runs would take for complete.
  */
+/** Written last into a finished mirror: a directory without it (e.g. left by an older version) is downloaded again. */
+const COMPLETE = '.complete';
+
 async function mirror(url: string, out: string): Promise<void> {
   const base = new URL('./', url).href;
   const tmp = `${out}.partial`;
@@ -53,6 +56,7 @@ async function mirror(url: string, out: string): Promise<void> {
         return res;
       },
     });
+    writeFileSync(join(tmp, COMPLETE), new Date().toISOString());
     rmSync(out, { recursive: true, force: true });
     renameSync(tmp, out);
   } finally {
@@ -67,19 +71,28 @@ async function mirror(url: string, out: string): Promise<void> {
  */
 export async function ensureSpecs(dir: string, refresh = false): Promise<{ entries: string[]; failed: string[] }> {
   mkdirSync(dir, { recursive: true });
+  const failed: string[] = [];
+  const local: string[] = [];
   for (const [name, url] of Object.entries(PUBLIC_SPECS)) {
     const file = join(dir, fileFor(name));
-    if (existsSync(file) && !refresh) continue;
-    console.error(`downloading ${name}…`);
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
-    writeFileSync(file, await res.text());
+    if (!existsSync(file) || refresh) {
+      console.error(`downloading ${name}…`);
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        writeFileSync(file, await res.text());
+      } catch (err) {
+        console.error(`could not download ${name}: ${(err as Error).message}; it is left out of this run`);
+        failed.push(name);
+        continue;
+      }
+    }
+    local.push(fileFor(name));
   }
   const remote: string[] = [];
-  const failed: string[] = [];
   for (const [name, url] of Object.entries(REMOTE_SPECS)) {
     const root = url.slice(new URL('./', url).href.length);
-    if (!existsSync(join(dir, name, root)) || refresh) {
+    if (!existsSync(join(dir, name, COMPLETE)) || refresh) {
       console.error(`downloading ${name} (many files)…`);
       try {
         await mirror(url, join(dir, name));
@@ -92,5 +105,5 @@ export async function ensureSpecs(dir: string, refresh = false): Promise<{ entri
     }
     remote.push(`${name}/${root}`);
   }
-  return { entries: [...Object.keys(PUBLIC_SPECS).map(fileFor), ...remote], failed };
+  return { entries: [...local, ...remote], failed };
 }

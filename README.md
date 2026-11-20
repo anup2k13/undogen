@@ -259,6 +259,8 @@ Outcomes: verified, compensated (a compensating undo, e.g. closed rather than de
 
 **Not yet:** OAuth sign-in for hosted servers. Dependencies are found by id, so short names referenced under other argument names (a memory graph's relation `from`/`to`) aren't seen.
 
+**Cascades** (here and in the HTTP runtime): dependents are undone first, then the entry itself, so a create that the same session edited later is rolled back cleanly. Writes from other sessions anywhere in the cascade refuse it before anything is undone. If the entry's own conflict check then finds someone else's change, the dependents stay undone and the error lists them.
+
 ### 5. Python agents
 
 ```bash

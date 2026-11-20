@@ -72,7 +72,9 @@ export class ToolUndoError extends Error {
 
 export class ToolDependencyError extends ToolUndoError {
   /** As DependencyError: direct dependents, or with `cascadeRefused` the other sessions' calls a cascade would reach. */
-  constructor(entry: ToolEntry, readonly dependents: ToolEntry[], otherSessions: ToolEntry[] = [], cascadeRefused = false) {
+  constructor(entry: ToolEntry, readonly dependents: ToolEntry[], otherSessionsOrRefused: ToolEntry[] | boolean = [], cascadeRefused = false) {
+    const otherSessions = Array.isArray(otherSessionsOrRefused) ? otherSessionsOrRefused : [];
+    if (otherSessionsOrRefused === true) cascadeRefused = true;
     const list = (ds: ToolEntry[], withSession: boolean) => ds.map((d) => `#${d.seq} ${d.tool}${withSession ? ` (session ${d.session})` : ''}`).join(', ');
     super(
       cascadeRefused
@@ -348,6 +350,11 @@ export class ToolSession {
       throw new ToolUndoError(`Entry #${entry.seq} (${entry.tool}) ${entry.undoError}`, entry);
     }
 
+    // Undo what depends on this entry first: its own conflict check then compares against the state those calls
+    // were undone to (an item created and then edited in the same session is cascaded back, not refused as changed).
+    for (const d of [...dependents].reverse()) if (d.status !== 'undone') await this.undo(d, { ...opts, dependentsChecked: true });
+    const cascaded = dependents.filter((d) => d.status === 'undone');
+
     if (entry.check && !opts.force && this.options.checkConflicts !== false) {
       const read = await this.options.call(entry.check.tool, entry.check.arguments);
       if (read.isError) {
@@ -362,11 +369,11 @@ export class ToolSession {
         entry.status = 'conflict';
         entry.undoError = 'changed since the call';
         await this.store.save(entry);
-        throw new ToolConflictError(entry, conflicts);
+        const err = new ToolConflictError(entry, conflicts);
+        if (cascaded.length) err.message += ` The calls that depended on it were already undone: ${cascaded.map((d) => `#${d.seq} ${d.tool}`).join(', ')}.`;
+        throw err;
       }
     }
-    // Only now, with this entry's own checks passed, undo what depends on it.
-    for (const d of [...dependents].reverse()) if (d.status !== 'undone') await this.undo(d, { ...opts, dependentsChecked: true });
 
     const res = await this.options.call(entry.inverse.tool, entry.inverse.arguments);
     if (res.isError) {

@@ -511,9 +511,24 @@ def test_every_spelling_of_an_id_is_matched(bundle_path):
 
     big = 1152921504606846977
     refs = _body_refs({"boardId": big}, "s")
-    assert _ref_hash(str(big), "s") in refs and _ref_hash("1152921504606847000", "s") in refs  # exact, and as TypeScript reads it
+    assert refs == [_ref_hash(str(big), "s")]  # exact only: the rounded spelling is shared by neighbouring ids
     _body_refs({"n": 10**5000}, "s")  # past str()'s digit limit: no crash (it has no spelling to hash)
     assert _ref_hash("12345.0", "s") in _body_refs({"id": 12345.0}, "s")  # what earlier versions wrote
     c = UndoableClient(bundle_path, "http://127.0.0.1:1")
     c._id_map = {"todoId": {"1152921504606847000": "t9"}}  # keyed by the TypeScript runtime
     assert c.remap_id("todoId", big) == "t9"
+
+
+def test_neighbouring_big_ids_stay_apart_and_typescript_keys_still_resolve(bundle_path):
+    c = UndoableClient(bundle_path, "http://127.0.0.1:1")
+    c._record_id({}, "boardId", 1152921504606846977, "NEW")
+    assert c.remap_id("boardId", 1152921504606846976) == 1152921504606846976  # a neighbour is not remapped
+    assert c.remap_id("boardId", 1152921504606846977) == "NEW"
+
+
+def test_cascade_undoes_a_create_this_session_edited(bundle_path, server_url):
+    c = UndoableClient(bundle_path, server_url)
+    tid = c.call("createTodo", body={"title": "parent"})["data"]["id"]
+    c.call("updateTodo", params={"todoId": tid}, body={"title": "mine"})
+    c.undo(1, cascade=True)
+    assert get(f"{server_url}/todos/{tid}")[0] == 404

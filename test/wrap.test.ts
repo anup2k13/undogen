@@ -506,13 +506,14 @@ describe('review fixes (wrap, round 2)', () => {
     expect(session.dependentsOf(session.journal[0]!)).toEqual([]);
   });
 
-  it("doesn't cascade when the undo it was asked for is refused", async () => {
+  it('cascades back an item this session created and then edited', async () => {
     const { call, state, data } = await setup();
     const n = data(await call('create_issue', { repo: 'r', title: 'a' })).number;
+    await call('update_issue', { repo: 'r', issue_number: n, title: 'b' }); // same session
     await call('add_issue_labels', { repo: 'r', issue_number: n, labels: ['p1'] });
-    state.issues.get(n)!.title = 'edited by someone else';
-    expect(data(await call('undogen_undo', { seq: 1, cascade: true }))).toMatchObject({ error: 'ToolConflictError' });
-    expect(state.issues.get(n)!.labels).toEqual(['p1']); // the label write was left alone
+    const out = data(await call('undogen_undo', { seq: 1, cascade: true }));
+    expect(out).toMatchObject({ undone: { seq: 1 }, alsoUndone: [{ seq: 3 }, { seq: 2 }] });
+    expect(state.issues.get(n)).toMatchObject({ title: 'a', state: 'closed', labels: [] });
   });
 
   it('reports what a cascade undid', async () => {

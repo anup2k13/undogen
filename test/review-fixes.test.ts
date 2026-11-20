@@ -457,13 +457,21 @@ describe('review fixes (round 5)', () => {
 });
 
 describe('review fixes (round 6)', () => {
-  it("doesn't cascade when the entry's own undo then conflicts", async () => {
+  it('cascades back a create that this session edited later', async () => {
+    const c = new UndoableClient({ spec: todo, baseUrl: server.url });
+    const t = ((await c.call('createTodo', { body: { title: 'parent' } })).data as { id: string }).id;
+    await c.call('updateTodo', { params: { todoId: t }, body: { title: 'mine' } });
+    await c.undo(1, { cascade: true });
+    expect((await fetch(`${server.url}/todos/${t}`)).status).toBe(404);
+  });
+
+  it("says which dependents were undone when the entry's own check then finds someone else's change", async () => {
     const c = new UndoableClient({ spec: todo, baseUrl: server.url });
     const t = ((await c.call('createTodo', { body: { title: 'parent' } })).data as { id: string }).id;
     await c.call('createComment', { params: { todoId: t }, body: { text: 'child' } });
     await new UndoableClient({ spec: todo, baseUrl: server.url }).call('updateTodo', { params: { todoId: t }, body: { title: 'edited by someone else' } });
-    await expect(c.undo(1, { cascade: true })).rejects.toBeInstanceOf(ConflictError);
-    expect((await fetch(`${server.url}/todos/${t}/comments`).then((r) => r.json())) as unknown[]).toHaveLength(1); // the comment was left alone
-    expect(c.journal[1]!.status).toBe('active');
+    const err = await c.undo(1, { cascade: true }).catch((e) => e);
+    expect(err).toBeInstanceOf(ConflictError);
+    expect(err.message).toMatch(/The writes that depended on it were already undone: #2 createComment\./);
   });
 });

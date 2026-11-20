@@ -81,7 +81,16 @@ class ConflictError(UndoError):
 
 
 class DependencyError(UndoError):
-    def __init__(self, entry: dict, dependents: List[dict], others: Optional[List[dict]] = None, cascade_refused: bool = False):
+    def __init__(
+        self,
+        entry: dict,
+        dependents: List[dict],
+        *,
+        others: Optional[List[dict]] = None,
+        cascade_refused: bool = False,
+        other_sessions: bool = False,  # the earlier name of cascade_refused
+    ):
+        cascade_refused = cascade_refused or other_sessions
         def names(ds: List[dict], with_session: bool) -> str:
             return ", ".join(f"#{d['seq']} {d['operationId']}" + (f" (session {d.get('session')})" if with_session else "") for d in ds)
 
@@ -227,20 +236,29 @@ def _js_str(v: Any) -> str:
 
 def _id_forms(v: Any) -> List[str]:
     """
-    The spellings of an id that journals may hold, all checked when matching: the JavaScript form, the
-    JavaScript-rounded double for integers above 2**53 (what the TypeScript runtime sees), and the str() form
-    earlier Python versions wrote. Values too large to write at all have none.
+    The spellings of an id that journals may hold, all checked when matching: the JavaScript form and the str() form
+    earlier Python versions wrote. Integers above 2**53 stay exact (the TypeScript runtime rounds them, so
+    dependencies on such ids aren't seen across runtimes). Values too large to write at all have none.
     """
     forms: List[str] = []
     try:
         forms.append(_js_str(v))
-        if isinstance(v, int) and not isinstance(v, bool) and abs(v) > 2**53:
-            forms.append(_js_number(float(v)))
         if isinstance(v, float):
             forms.append(str(v))
     except (ValueError, OverflowError):
         pass  # e.g. an integer over Python's 4300-digit str() limit
     return list(dict.fromkeys(forms))
+
+
+def _ts_rounded(v: Any) -> Optional[str]:
+    """How the TypeScript runtime spells an integer above 2**53 (as the nearest double). Only a fallback for reading
+    keys it wrote: neighbouring ids share it, so it is never used to match or written."""
+    if isinstance(v, int) and not isinstance(v, bool) and abs(v) > 2**53:
+        try:
+            return _js_number(float(v))
+        except OverflowError:
+            return None
+    return None
 
 
 def _id_like(v: str) -> bool:
@@ -603,17 +621,16 @@ class UndoableClient:
             if others:
                 raise DependencyError(target, others, cascade_refused=True)
 
-        def cascade_dependents() -> None:
-            # Only once this entry's own checks have passed, so a refusal leaves everything as it was.
-            for d in reversed(dependents):
-                if d["status"] != "undone":
-                    self.undo(d, force=force, cascade=True, cascade_within=cascade_within, _dependents_checked=True)
+        # Undo what depends on this entry first: its own conflict check then compares against the state those writes
+        # were undone to (a create edited later in the same session is cascaded back, not refused as changed).
+        for d in reversed(dependents):
+            if d["status"] != "undone":
+                self.undo(d, force=force, cascade=True, cascade_within=cascade_within, _dependents_checked=True)
+        cascaded = [d for d in dependents if d["status"] == "undone"]
 
         if not target.get("inverse") and target["plan"]["strategy"] == "no-side-effects":
-            cascade_dependents()
             return self._finish(target, {"status": 204, "data": None, "headers": {}})
         if target.get("noop"):
-            cascade_dependents()
             target.setdefault("undoWarnings", []).append("the call changed nothing, so there was nothing to undo")
             return self._finish(target, {"status": 204, "data": None, "headers": {}})
         if not target.get("inverse"):
@@ -631,26 +648,23 @@ class UndoableClient:
             if check.get("mode") == "diff":
                 conflicts = _compare(check["expected"], _state_of(current), "", target["session"])
                 if conflicts:
-                    return self._conflict(target, conflicts, current)
+                    return self._conflict(target, conflicts, current, cascaded)
             else:
                 if current["status"] in (404, 410):
                     if inverse["method"] == "delete":
                         target.setdefault("undoWarnings", []).append("the resource was already gone")
-                        cascade_dependents()
                         return self._finish(target, current)
-                    return self._conflict(target, [{"field": "(resource)", "expected": "exists", "actual": f"HTTP {current['status']}"}], current)
+                    return self._conflict(target, [{"field": "(resource)", "expected": "exists", "actual": f"HTTP {current['status']}"}], current, cascaded)
                 if current["status"] >= 300:
                     raise UndoError(f"Undo of #{target['seq']}: could not read current state (GET {check_path} -> HTTP {current['status']})", target, current)
                 conflicts = _compare(check["expected"], current["data"], "", target["session"])
                 if conflicts:
-                    return self._conflict(target, conflicts, current)
-            # Undoing dependents can change this resource's ETag: only send If-Match when nothing is cascaded.
-            etag = None if dependents else current["headers"].get("etag")
+                    return self._conflict(target, conflicts, current, cascaded)
+            etag = current["headers"].get("etag")  # read after the cascade, so it covers the inverse request
             # If-Match uses strong comparison: a weak W/ validator would always fail with 412.
             if etag and not etag.startswith("W/") and check_path == inverse["path"]:
                 headers["if-match"] = etag
 
-        cascade_dependents()
         if self.idempotency_header:
             headers[str(self.idempotency_header)] = f"undogen-{target['session']}-{target['seq']}-undo"
         target["undoAttempts"] = target.get("undoAttempts", 0) + 1
@@ -718,6 +732,9 @@ class UndoableClient:
             known = self._id_map.get(param, {})
             # Journals written before ids were keyed JavaScript-style used str(): look both up.
             nxt = next((known[f] for f in _id_forms(cur) if f in known), None)
+            rounded = _ts_rounded(cur)
+            if nxt is None and rounded is not None and rounded in known:
+                nxt = known[rounded]  # written by the TypeScript runtime, which only has the rounded spelling
             if nxt is None:
                 return cur
             cur = nxt
@@ -803,14 +820,18 @@ class UndoableClient:
         self._persist(target)
         return res
 
-    def _conflict(self, target: dict, conflicts: List[dict], res: dict):
+    def _conflict(self, target: dict, conflicts: List[dict], res: dict, cascaded: Optional[List[dict]] = None):
         target["status"] = "conflict"
         target["undoError"] = "state changed since the call"
         self._persist(target)
-        raise ConflictError(target, conflicts, res)
+        err = ConflictError(target, conflicts, res)
+        if cascaded:
+            note = ", ".join(f"#{d['seq']} {d['operationId']}" for d in cascaded)
+            err.args = (f"{err.args[0]} The writes that depended on it were already undone: {note}.",)
+        raise err
 
     def _record_id(self, entry: dict, param: str, old: Scalar, new: Scalar) -> None:
-        for form in _id_forms(old):  # every spelling, so either runtime finds it
+        for form in _id_forms(old):  # every exact spelling
             entry.setdefault("idMap", {}).setdefault(param, {})[form] = new
             self._id_map.setdefault(param, {})[form] = new
 
