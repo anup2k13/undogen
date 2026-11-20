@@ -182,6 +182,17 @@ def _stable(v: Any) -> str:
     return json.dumps(v, sort_keys=True, separators=(",", ":"))
 
 
+def _js_str(v: Any) -> str:
+    """str() as JavaScript's String() would write it, so hashes agree across runtimes (12345.0 -> "12345")."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if v is None:
+        return "null"
+    if isinstance(v, float) and v.is_integer() and abs(v) < 1e21:
+        return str(int(v))
+    return str(v)
+
+
 def _ref_hash(value: str, salt: str) -> str:
     return hashlib.sha256(f"{salt}\u0000{value}".encode()).hexdigest()[:32]
 
@@ -193,8 +204,8 @@ def _body_refs(body: Any, salt: str) -> Optional[List[str]]:
     def walk(v: Any, depth: int) -> None:
         if depth > 3 or v is None or isinstance(v, bool):
             return
-        if isinstance(v, (str, int, float)) and len(str(v)) >= 4:
-            out[_ref_hash(str(v), salt)] = None
+        if isinstance(v, (str, int, float)) and len(_js_str(v)) >= 4:
+            out[_ref_hash(_js_str(v), salt)] = None
         elif isinstance(v, list):
             for x in v:
                 walk(x, depth + 1)
@@ -463,7 +474,7 @@ class UndoableClient:
         if not created:
             return []
         param, value = created["param"], created["value"]
-        ids = {str(value), str(self.remap_id(param, value))}
+        ids = {_js_str(value), _js_str(self.remap_id(param, value))}
         # In the body too (POST /comments {todoId}), but only for ids that can't be mistaken for small numbers.
         body_ids = {i for i in ids if len(i) >= 4}
         return [
@@ -474,7 +485,7 @@ class UndoableClient:
             and e["plan"]["strategy"] != "no-side-effects"
             and e.get("inverse") is not None
             and (
-                str((e["request"].get("params") or {}).get(param)) in ids
+                _js_str((e["request"].get("params") or {}).get(param)) in ids
                 or (body_ids and _body_mentions(e["request"].get("body"), body_ids))
                 or (body_ids and any(_ref_hash(i, e.get("session", "")) in (e["request"].get("bodyRefs") or []) for i in body_ids))
             )

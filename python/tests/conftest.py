@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import socket
@@ -18,24 +19,32 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-@pytest.fixture(scope="session")
-def server_url():
-    """The demo Todo API (with its two planted reversibility bugs), started with tsx."""
+@contextlib.contextmanager
+def todo_server():
+    """A fresh demo Todo API (ids start again at t1), started with tsx."""
     port = _free_port()
     proc = subprocess.Popen([str(TSX), str(ROOT / "examples/todo-api/server.ts"), str(port)], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     url = f"http://127.0.0.1:{port}"
-    for _ in range(100):
-        try:
-            urllib.request.urlopen(url + "/todos", timeout=1)
-            break
-        except Exception:
-            time.sleep(0.1)
-    else:
-        proc.kill()
-        raise RuntimeError("demo server did not start")
-    yield url
-    proc.terminate()
-    proc.wait(timeout=5)
+    try:
+        for _ in range(100):
+            try:
+                urllib.request.urlopen(url + "/todos", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.1)
+        else:
+            raise RuntimeError("demo server did not start")
+        yield url
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def server_url():
+    """The demo Todo API (with its two planted reversibility bugs), shared by the tests."""
+    with todo_server() as url:
+        yield url
 
 
 @pytest.fixture(scope="session")
