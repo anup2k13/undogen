@@ -22,6 +22,7 @@ export interface WrapFlags {
   after?: string;
   session?: string;
   force?: boolean;
+  cascade?: boolean;
 }
 
 export class WrapUsageError extends Error {}
@@ -78,7 +79,7 @@ export async function runWrap(flags: WrapFlags, command: string[]): Promise<numb
         const seq = Number(flags.seq);
         if (!Number.isInteger(seq)) throw new WrapUsageError('--seq must be a number');
         try {
-          show(await session.undo(seq, { force: flags.force }));
+          show(await session.undo(seq, { force: flags.force, cascade: flags.cascade }));
         } catch (err) {
           console.log(c.red(`  ✗ ${(err as Error).message}`));
           failedAny = true;
@@ -87,7 +88,7 @@ export async function runWrap(flags: WrapFlags, command: string[]): Promise<numb
         const after = flags.after !== undefined ? Number(flags.after) : undefined;
         if (after !== undefined && !Number.isInteger(after)) throw new WrapUsageError('--after must be a number');
         if (!flags.all && after === undefined && !flags.session) throw new WrapUsageError('wrap --undo needs --seq, --all, --after or --session');
-        const { undone, failed } = await session.undoAll({ force: flags.force, after, session: flags.session });
+        const { undone, failed } = await session.undoAll({ force: flags.force, cascade: flags.cascade, after, session: flags.session });
         undone.forEach(show);
         for (const f of failed) console.log(c.red(`  ✗ #${f.entry.seq} ${f.entry.tool}: ${f.error.message}`));
         if (!undone.length && !failed.length) console.log('  nothing to undo');

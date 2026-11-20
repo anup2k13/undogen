@@ -239,7 +239,7 @@ If the read a plan depends on fails before a call (an update's or a delete's sna
   "run_workflow": { "reversibility": "irreversible", "reason": "starts a deploy" } }
 ```
 
-Not yet: dependencies between journaled calls, the wrapped server's resources and prompts, and servers reached over HTTP (stdio only).
+Undoing a create that later calls use (same id under the same argument name, or an id-like string anywhere) is refused unless `cascade: true` undoes those first, as in `undogen mcp`. Not yet: the wrapped server's resources and prompts, and servers reached over HTTP (stdio only).
 
 ### 5. Python agents
 

@@ -31,6 +31,8 @@ export interface ToolEntry {
   inverse?: ToolCall;
   /** Why there is no inverse. */
   inverseError?: string;
+  /** Ids this call created (the inverse's arguments read from the result), for finding later calls that use them. */
+  created?: Array<{ name: string; value: unknown }>;
   /** Read before undoing; `expected` holds what the call left, as the server reported it right after. */
   check?: ToolCall & { expected: Record<string, unknown> };
   status: 'active' | 'undone' | 'failed' | 'conflict';
@@ -60,6 +62,17 @@ export class ToolUndoError extends Error {
   constructor(message: string, readonly entry: ToolEntry) {
     super(message);
     this.name = 'ToolUndoError';
+  }
+}
+
+export class ToolDependencyError extends ToolUndoError {
+  constructor(entry: ToolEntry, readonly dependents: ToolEntry[]) {
+    super(
+      `Undo of #${entry.seq} (${entry.tool}) refused: later calls use what it created (${dependents.map((d) => `#${d.seq} ${d.tool}`).join(', ')}). ` +
+        'Undo those first, or pass cascade to undo them too.',
+      entry,
+    );
+    this.name = 'ToolDependencyError';
   }
 }
 
@@ -164,6 +177,8 @@ export class ToolSession {
     try {
       const { call, notRestored } = this.inverseOf(plan, args, data, before);
       entry.inverse = call;
+      const fromResult = Object.entries(plan.inverse?.arguments ?? {}).filter(([, src]) => 'from' in src && src.from === 'result');
+      if (call && fromResult.length) entry.created = fromResult.map(([name]) => ({ name, value: call.arguments[name] }));
       if (notRestored.length) {
         entry.undoWarnings = [`undo will not restore ${notRestored.join(', ')}: ${plan.snapshot?.tool} returned no earlier value for ${notRestored.length === 1 ? 'it' : 'them'}`];
       }
@@ -214,7 +229,20 @@ export class ToolSession {
   }
 
   /** Undo one entry (default: this session's most recent active one). */
-  async undo(target?: number | ToolEntry, opts: { force?: boolean } = {}): Promise<ToolEntry> {
+  /** Later, not-undone calls that use an id this entry created: the same argument name and value, or an id-like string (4+ characters) anywhere. */
+  dependentsOf(entry: ToolEntry): ToolEntry[] {
+    if (!entry.created?.length) return [];
+    const ids = entry.created.flatMap(({ name, value }) => (Array.isArray(value) ? value : [value]).map((v) => ({ name, v })));
+    return this.journal.filter(
+      (e) =>
+        e.seq > entry.seq &&
+        e.status !== 'undone' &&
+        !!e.inverse &&
+        ids.some(({ name, v }) => usesArg(e.arguments, name, v) || (typeof v === 'string' && v.length >= 4 && mentions(e.arguments, v))),
+    );
+  }
+
+  async undo(target?: number | ToolEntry, opts: { force?: boolean; cascade?: boolean } = {}): Promise<ToolEntry> {
     const entry =
       typeof target === 'object'
         ? target
@@ -223,6 +251,11 @@ export class ToolSession {
           : [...this.journal].reverse().find((e) => e.session === this.session && e.status !== 'undone');
     if (!entry) throw new Error(target !== undefined ? `No journal entry #${target}` : 'Nothing to undo');
     if (entry.status === 'undone') throw new ToolUndoError(`Entry #${entry.seq} is already undone`, entry);
+    const dependents = this.dependentsOf(entry);
+    if (dependents.length) {
+      if (!opts.cascade) throw new ToolDependencyError(entry, dependents);
+      for (const d of [...dependents].reverse()) if (d.status !== 'undone') await this.undo(d, opts);
+    }
     if (!entry.inverse) {
       entry.status = 'failed';
       entry.undoError = `cannot be undone: ${entry.inverseError ?? describeNoInverse(entry)}`;
@@ -266,11 +299,12 @@ export class ToolSession {
   }
 
   /** Undo entries newest first: all of them, one session's, or those after a checkpoint. */
-  async undoAll(opts: { force?: boolean; after?: number; session?: string } = {}): Promise<{ undone: ToolEntry[]; failed: Array<{ entry: ToolEntry; error: Error }> }> {
+  async undoAll(opts: { force?: boolean; cascade?: boolean; after?: number; session?: string } = {}): Promise<{ undone: ToolEntry[]; failed: Array<{ entry: ToolEntry; error: Error }> }> {
     const undone: ToolEntry[] = [];
     const failed: Array<{ entry: ToolEntry; error: Error }> = [];
     for (const entry of [...this.journal].reverse()) {
       if (entry.status === 'undone' || (opts.after !== undefined && entry.seq <= opts.after) || (opts.session !== undefined && entry.session !== opts.session)) continue;
+      if ((entry.status as ToolEntry['status']) === 'undone') continue; // a cascade earlier in this loop may have undone it
       try {
         undone.push(await this.undo(entry, opts));
       } catch (err) {
@@ -288,6 +322,22 @@ export class ToolSession {
 
 function describeNoInverse(entry: ToolEntry): string {
   return entry.reversibility === 'irreversible' ? 'it is irreversible' : 'no tool undoes it';
+}
+
+/** Whether `args` passes `value` under the argument `name`, at any depth (or in an array under it). */
+function usesArg(args: unknown, name: string, value: unknown): boolean {
+  if (Array.isArray(args)) return args.some((x) => usesArg(x, name, value));
+  if (!args || typeof args !== 'object') return false;
+  return Object.entries(args).some(
+    ([k, v]) => (k === name && (stableStringify(v) === stableStringify(value) || (Array.isArray(v) && v.some((x) => stableStringify(x) === stableStringify(value))))) || usesArg(v, name, value),
+  );
+}
+
+/** Whether a string appears as a value anywhere in `args`. */
+function mentions(args: unknown, value: string): boolean {
+  if (args === value) return true;
+  if (Array.isArray(args)) return args.some((x) => mentions(x, value));
+  return !!args && typeof args === 'object' && Object.values(args).some((x) => mentions(x, value));
 }
 
 /** Resolve a template's arguments against the original call. Throws when a needed value is missing. */

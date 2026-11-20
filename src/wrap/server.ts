@@ -12,7 +12,7 @@ import { maskedJson } from '../mcp.js';
 import type { JournalStore } from '../runtime.js';
 import { VERSION } from '../version.js';
 import { describePlan, planTools, type McpTool, type ToolOverrides, type ToolPlan } from './plans.js';
-import { ToolConflictError, ToolRefusedError, ToolSession, ToolUndoError, type ToolEntry } from './session.js';
+import { ToolConflictError, ToolDependencyError, ToolRefusedError, ToolSession, ToolUndoError, type ToolEntry } from './session.js';
 
 export interface WrapOptions {
   /** A client already connected to the server being wrapped. */
@@ -102,8 +102,16 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
   const undoTools: Tool[] = [
     {
       name: 'undogen_undo',
-      description: 'Undo one of your writes in this session (default: the most recent). Refuses if someone changed the data since, unless force is true.',
-      inputSchema: { type: 'object', properties: { seq: { type: 'integer', description: 'Entry number from undogen_journal' }, force: { type: 'boolean' } } },
+      description:
+        'Undo one of your writes in this session (default: the most recent). Refuses if someone changed the data since (force overrides), or if later writes use what it created (cascade undoes those too).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          seq: { type: 'integer', description: 'Entry number from undogen_journal' },
+          force: { type: 'boolean' },
+          cascade: { type: 'boolean', description: 'Also undo later writes that use what this one created' },
+        },
+      },
       annotations: { title: 'Undo a write', destructiveHint: true, openWorldHint: true },
     },
     {
@@ -160,7 +168,7 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
                   : 'Nothing to undo in this session',
             );
           }
-          return json({ undone: describeEntry(await session.undo(entry, { force: args.force === true })) });
+          return json({ undone: describeEntry(await session.undo(entry, { force: args.force === true, cascade: args.cascade === true })) });
         }
         case 'undogen_undo_all': {
           const { undone, failed } = await session.undoAll({ force: args.force === true, after: typeof args.to === 'number' ? args.to : undefined, session: session.session });
@@ -198,7 +206,13 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
         text += ' This MCP client cannot ask a human for approval, so undogen refused. Start undogen wrap with --irreversible allow to permit these calls.';
       }
       const extra =
-        err instanceof ToolConflictError ? { entry: err.entry.seq, conflicts: err.conflicts } : err instanceof ToolUndoError ? { entry: err.entry.seq, status: err.entry.status } : {};
+        err instanceof ToolConflictError
+          ? { entry: err.entry.seq, conflicts: err.conflicts }
+          : err instanceof ToolDependencyError
+            ? { entry: err.entry.seq, dependents: err.dependents.map((d) => d.seq) }
+            : err instanceof ToolUndoError
+              ? { entry: err.entry.seq, status: err.entry.status }
+              : {};
       return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: e.name, message: text, ...extra }) }] };
     }
   });

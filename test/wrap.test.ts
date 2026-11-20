@@ -346,3 +346,39 @@ describe('review fixes (wrap)', () => {
     await expect(UndoableClient.open({ spec, baseUrl: 'http://x', store: new FileJournalStore(tools) })).rejects.toThrow(/written by `undogen wrap`/);
   });
 });
+
+describe('undogen wrap: dependencies', () => {
+  it('refuses to undo a create that later calls use, and cascades on request', async () => {
+    const { call, state, data } = await setup();
+    const n = data(await call('create_issue', { repo: 'r', title: 'a' })).number;
+    await call('add_issue_labels', { repo: 'r', issue_number: n, labels: ['p1'] }); // uses issue #n
+    await call('star_repository', { repo: 'r' }); // doesn't
+    const refused = await call('undogen_undo', { seq: 1 });
+    expect(data(refused)).toMatchObject({ error: 'ToolDependencyError', entry: 1, dependents: [2] });
+    expect(state.issues.get(n)).toMatchObject({ state: 'open', labels: ['p1'] });
+
+    const out = data(await call('undogen_undo', { seq: 1, cascade: true }));
+    expect(out.undone).toMatchObject({ seq: 1, status: 'undone' });
+    expect(state.issues.get(n)).toMatchObject({ state: 'closed', labels: [] });
+    expect(state.starred.has('r')).toBe(true); // unrelated: left alone
+    expect(data(await call('undogen_journal')).entries.map((e: { status: string }) => e.status)).toEqual(['undone', 'undone', 'active']);
+  });
+
+  it('matches long id-like strings anywhere, short values only by argument name', async () => {
+    const { ToolSession } = await import('../src/wrap/session.js');
+    const o = (props: string[]) => ({ type: 'object' as const, properties: Object.fromEntries(props.map((p) => [p, {}])), required: props });
+    const plans = planTools([
+      { name: 'create_board', inputSchema: o(['name']) },
+      { name: 'delete_board', inputSchema: o(['board_id']) },
+      { name: 'create_card', inputSchema: o(['title', 'parent']) },
+      { name: 'delete_card', inputSchema: o(['card_id']) },
+    ]);
+    let n = 0;
+    const session = await ToolSession.open({ plans, call: async () => ({ content: [{ type: 'text', text: JSON.stringify({ id: `obj_${++n}abc` }) }] }) });
+    const board = await session.call('create_board', { name: 'b' });
+    expect(board.entry!.created).toEqual([{ name: 'board_id', value: 'obj_1abc' }]);
+    await session.call('create_card', { title: 'x', parent: 'obj_1abc' }); // the id under another name
+    await session.call('create_card', { title: 'obj', parent: 'none' });
+    expect(session.dependentsOf(board.entry!).map((e) => e.seq)).toEqual([2]);
+  });
+});
