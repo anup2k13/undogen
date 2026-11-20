@@ -472,3 +472,24 @@ def test_wrap_journals_are_refused_with_a_pointer(bundle_path, server_url, tmp_p
     assert main(["journal", "--journal", str(path)]) == 2
     assert main(["undo", bundle_path, "--base-url", server_url, "--journal", str(path), "--all"]) == 2
     assert "undogen wrap" in capsys.readouterr().err
+
+
+def test_numbers_are_written_like_javascript():
+    from undogen.client import _js_str
+
+    cases = {12345.0: "12345", 0.00001: "0.00001", 1e-7: "1e-7", 1e21: "1e+21", 1e16: "10000000000000000", -2.5e-8: "-2.5e-8", 2**60: "1152921504606847000", 0.1: "0.1"}
+    assert {v: _js_str(v) for v in cases} == cases
+
+
+def test_rolling_back_a_session_does_not_cascade_into_another(bundle_path, server_url, tmp_path):
+    from undogen.__main__ import main
+
+    path = str(tmp_path / "cascade.jsonl")
+    a = UndoableClient(bundle_path, server_url, store=FileJournalStore(path))
+    tid = a.call("createTodo", body={"title": "from A"})["data"]["id"]
+    b = UndoableClient(bundle_path, server_url, store=FileJournalStore(path))
+    b.call("createComment", params={"todoId": tid}, body={"text": "from B"})
+    r = UndoableClient(bundle_path, server_url, store=FileJournalStore(path)).undo_all(session=a.session, cascade=True)
+    assert r["undone"] == [] and isinstance(r["failed"][0]["error"], DependencyError)
+    assert len(get(f"{server_url}/todos/{tid}/comments")[1]) == 1
+    assert main(["undo", bundle_path, "--base-url", server_url, "--journal", path, "--session", ""]) == 2

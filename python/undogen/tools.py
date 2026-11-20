@@ -326,7 +326,8 @@ def tool_definitions(
                     f"`undogen undo --journal <file> --seq {seq}` or the whole run with `--session {s}`"
                 )
             raise UndogenError(f"No journal entry #{seq} in this session" if seq is not None else "Nothing to undo in this session")
-        res = client.undo(entry, force=force, cascade=cascade)
+        # Agents act on their own session only, cascades included.
+        res = client.undo(entry, force=force, cascade=cascade, cascade_within=client.session)
         return {"status": res["status"], **({"journal": describe_entry(entry)} if entry else {})}
 
     def undo_all(force: bool = False, to: Optional[int] = None, **_: Any) -> dict:

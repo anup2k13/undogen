@@ -159,7 +159,7 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
         properties: {
           to: { type: 'integer', description: 'A checkpoint from undogen_checkpoint' },
           force: { type: 'boolean' },
-          cascade: { type: 'boolean', description: 'Also undo writes from other sessions that use what these created' },
+          cascade: { type: 'boolean', description: 'Also undo later writes of this session that use what these created' },
         },
       },
       annotations: { title: 'Undo all', destructiveHint: true, openWorldHint: true },
@@ -270,7 +270,7 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
             );
           }
           const undone: ToolEntry[] = [];
-          await session.undo(entry, { force: args.force === true, cascade: args.cascade === true, undone });
+          await session.undo(entry, { force: args.force === true, cascade: args.cascade === true, cascadeWithin: session.session, undone });
           const also = undone.filter((e) => e !== entry);
           return json({ undone: describeEntry(entry), ...(also.length ? { alsoUndone: also.map(describeEntry) } : {}) });
         }

@@ -94,6 +94,7 @@ async function connectUpstream(command: string[], flags: WrapFlags): Promise<{ u
 }
 
 export async function runWrap(flags: WrapFlags, command: string[]): Promise<number> {
+  if (flags.session !== undefined && !flags.session.trim()) throw new WrapUsageError('--session needs a session id (see undogen journal)');
   const mode = flags.irreversible ?? 'ask';
   if (!['ask', 'allow', 'deny'].includes(mode)) throw new WrapUsageError('--irreversible must be ask, allow or deny');
   const overrides = flags.overrides ? (JSON.parse(await readFile(flags.overrides, 'utf8')) as ToolOverrides) : undefined;

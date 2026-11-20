@@ -53,6 +53,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     u.add_argument("--cascade", action="store_true", help="undo dependent entries first")
 
     args = parser.parse_args(argv)
+    if getattr(args, "session", None) is not None and not args.session.strip():
+        print("error: --session needs a session id (see journal)", file=sys.stderr)
+        return 2
+    if args.command == "journal" and args.compact and args.session is not None:
+        print("error: --compact rewrites the whole journal: it takes no --session", file=sys.stderr)
+        return 2
     store = FileJournalStore(args.journal)
 
     if args.command == "journal":
@@ -68,11 +74,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(json.dumps(entries, indent=2))
             return 0
         if not entries:
-            print(f"  (no entries for session {args.session})" if args.session else "  (empty journal)")
+            print(f"  (no entries for session {args.session})" if args.session is not None else "  (empty journal)")
+        # One group per session (one agent run), in the order sessions started, so `undo --session` has something to point at.
+        order = list(dict.fromkeys(e.get("session") for e in entries))
+        entries = [e for s in order for e in entries if e.get("session") == s]
         session = None
         for e in entries:
             if e.get("session") != session:
-                # One heading per session (one agent run), so `undo --session` has something to point at.
                 session = e.get("session")
                 n = sum(1 for x in entries if x.get("session") == session)
                 print(f"  session {session}  {e['at'].replace('T', ' ')[:16]} UTC · {n} write{'' if n == 1 else 's'}")
@@ -94,7 +102,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.session is not None and not any(e.get("session") == args.session for e in client.journal):
             print(f"error: no entries for session {args.session} in {args.journal} (see journal)", file=sys.stderr)
             return 2
-        result = client.undo_all(force=args.force, after=args.after, session=args.session)
+        result = client.undo_all(force=args.force, cascade=args.cascade, after=args.after, session=args.session)
         if not result["undone"] and not result["failed"]:
             print("  nothing to undo")
         for e in result["undone"]:

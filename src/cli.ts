@@ -222,21 +222,25 @@ async function main(argv: string[]) {
     return process.exit(command || values.help ? 0 : 2);
   }
 
+  if (values.session !== undefined && !values.session.trim()) throw new UsageError('--session needs a session id (see undogen journal)');
   if (command === 'journal') {
     if (!values.journal) throw new UsageError('journal needs --journal <file>');
+    if (values.compact && values.session !== undefined) throw new UsageError('--compact rewrites the whole journal: it takes no --session');
     if (values.compact) {
       const { before, after } = await new FileJournalStore(values.journal).compact();
       return console.log(`  ${values.journal}: ${before} lines -> ${after} entries`);
     }
     const all = await new FileJournalStore(values.journal).load();
-    const entries = values.session ? all.filter((e) => e.session === values.session) : all;
+    const filtered = values.session !== undefined ? all.filter((e) => e.session === values.session) : all;
+    // One group per session (one agent run), in the order sessions started, so `undo --session` has something to point at.
+    const order = [...new Set(filtered.map((e) => e.session))];
+    const entries = order.flatMap((s) => filtered.filter((e) => e.session === s));
     const isTool = (e: unknown): e is ToolEntry => (e as { kind?: string }).kind === 'tool';
     if (values.json) return console.log(JSON.stringify(entries, null, 2));
-    if (!entries.length) return console.log(values.session ? `  (no entries for session ${values.session})` : '  (empty journal)');
+    if (!entries.length) return console.log(values.session !== undefined ? `  (no entries for session ${values.session})` : '  (empty journal)');
     let session: string | undefined;
     for (const e of entries) {
       if (e.session !== session) {
-        // One heading per session (one agent run), so `undo --session` has something to point at.
         session = e.session;
         const n = entries.filter((x) => x.session === session).length;
         console.log(c.bold(`  session ${session}`) + c.dim(`  ${e.at.replace('T', ' ').slice(0, 16)} UTC · ${n} write${n === 1 ? '' : 's'}`));
@@ -385,7 +389,7 @@ async function main(argv: string[]) {
       if ([values.seq !== undefined, !!values.all, values.after !== undefined, values.session !== undefined].filter(Boolean).length > 1) {
         throw new UsageError('use one of --seq, --all, --after and --session');
       }
-      if (values.all || values.after || values.session) {
+      if (values.all || values.after || values.session !== undefined) {
         const after = values.after !== undefined ? Number(values.after) : undefined;
         if (after !== undefined && !Number.isInteger(after)) throw new UsageError('--after must be a number');
         if (values.session && !client.journal.some((e) => e.session === values.session)) {

@@ -318,7 +318,8 @@ export function toolDefinitions(client: UndoableClient, operations: Operation[],
   if (options.compact) tools.splice(0, tools.length, ...compactTools(client, perOperation));
   if (options.undoTools === false) return tools;
 
-  const undoOptions = (args: Record<string, unknown>): UndoOptions => ({ force: args.force === true, cascade: args.cascade === true });
+  // Agents act on their own session only, cascades included.
+  const undoOptions = (args: Record<string, unknown>): UndoOptions => ({ force: args.force === true, cascade: args.cascade === true, cascadeWithin: client.session });
   tools.push(
     {
       name: 'undogen_undo',

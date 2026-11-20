@@ -184,7 +184,7 @@ npx undogen undo openapi.yaml --base-url https://api.example.com --journal .undo
 npx undogen undo openapi.yaml --base-url https://api.example.com --journal .undogen/journal.jsonl --session 8d626b94
 ```
 
-`undogen journal` lists entries under one heading per session (each client or MCP server run is a session); `--session <id>` rolls back everything one agent run did and nothing else. `python -m undogen` takes the same flags.
+`undogen journal` lists entries under one heading per session (each client or MCP server run is a session); `--session <id>` rolls back everything one agent run did and nothing else: with `--cascade`, a write another session built on refuses the undo rather than being undone too. `python -m undogen` takes the same flags.
 
 Query parameters, form and multipart bodies, header functions and a `beforeRequest` hook (for request signing) are supported.
 

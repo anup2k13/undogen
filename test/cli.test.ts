@@ -109,6 +109,15 @@ describe('cli', () => {
 
     expect((await run('undo', spec, '--base-url', server.url, '--journal', journal, '--session', 'nope')).stderr).toMatch(/No entries for session nope/);
     expect((await run('undo', spec, '--base-url', server.url, '--journal', journal, '--seq', '1', '--all')).stderr).toMatch(/use one of/);
+    expect((await run('undo', spec, '--base-url', server.url, '--journal', journal, '--session', '')).stderr).toMatch(/--session needs a session id/);
+    expect((await run('journal', '--journal', journal, '--session', tuesday.session, '--compact')).stderr).toMatch(/takes no --session/);
+
+    // A session resumed after another one is still listed once, with all its writes.
+    const resumed = await UndoableClient.open({ spec: s, baseUrl: server.url, store: new FileJournalStore(journal), session: monday.session });
+    await resumed.call('createTodo', { body: { title: 'monday again' } });
+    const grouped = (await run('journal', '--journal', journal)).stdout;
+    expect(grouped.match(new RegExp(`session ${monday.session}`, 'g'))).toHaveLength(1);
+    expect(grouped).toMatch(new RegExp(`session ${monday.session} .* · 2 writes\\n +#1 .*\\n +#4 `));
   });
 
   it('wrap puts undo in front of another MCP server, over stdio', async () => {

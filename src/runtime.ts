@@ -147,11 +147,12 @@ export class ConflictError extends UndoError {
 
 /** Later entries use what this entry created; undo them first (or pass { cascade: true }). */
 export class DependencyError extends UndoError {
-  constructor(entry: JournalEntry, public readonly dependents: JournalEntry[]) {
+  /** `otherSessions`: cascade was asked for, but these dependents belong to other sessions, which it never touches. */
+  constructor(entry: JournalEntry, public readonly dependents: JournalEntry[], otherSessions = false) {
     super(
       `Undo of #${entry.seq} (${entry.operationId}) would orphan later writes that use it: ` +
-        dependents.map((d) => `#${d.seq} ${d.operationId}`).join(', ') +
-        '. Undo those first, or pass { cascade: true }.',
+        dependents.map((d) => `#${d.seq} ${d.operationId}${otherSessions ? ` (session ${d.session})` : ''}`).join(', ') +
+        (otherSessions ? ". They belong to other sessions, which cascade doesn't touch: undo those sessions' writes first." : '. Undo those first, or pass { cascade: true }.'),
       entry,
     );
     this.name = 'DependencyError';
@@ -282,6 +283,8 @@ export interface UndoOptions {
   force?: boolean;
   /** Undo later entries that depend on this one first. */
   cascade?: boolean;
+  /** With cascade, only undo dependents made by this session; dependents from other sessions refuse the undo. */
+  cascadeWithin?: string;
 }
 
 /**
@@ -484,7 +487,8 @@ export class UndoableClient {
     const ids = new Set([String(value), String(this.remapId(param, value))]);
     // In the body too (POST /comments { todoId }), but only for ids that can't be mistaken for small numbers,
     // and not for names the caller chose ("test", "prod"): those turn up in unrelated bodies.
-    const bodyIds = entry.created.chosen ? [] : [...ids].filter((id) => id.length >= 4);
+    // A chosen name only counts in bodies when it looks like an id (PROJ-8f3a2c), not a word.
+    const bodyIds = [...ids].filter((id) => (entry.created!.chosen ? idLike(id) : id.length >= 4));
     return this.journal.filter(
       (e) =>
         e.seq > entry.seq &&
@@ -509,7 +513,8 @@ export class UndoableClient {
 
     const dependents = this.dependentsOf(target);
     if (dependents.length) {
-      if (!opts.cascade) throw new DependencyError(target, dependents);
+      const others = opts.cascadeWithin !== undefined ? dependents.filter((d) => d.session !== opts.cascadeWithin) : [];
+      if (!opts.cascade || others.length) throw new DependencyError(target, others.length ? others : dependents, !!opts.cascade && others.length > 0);
       for (const d of [...dependents].reverse()) if (d.status !== 'undone') await this.undo(d, opts);
     }
 
@@ -607,7 +612,7 @@ export class UndoableClient {
   }
 
   async undoAll(
-    opts: Omit<UndoOptions, 'cascade'> & {
+    opts: UndoOptions & {
       /** Only entries after this checkpoint (seq). */
       after?: number;
       /** Only entries made by this session (a persisted journal holds earlier sessions too). */
@@ -617,7 +622,9 @@ export class UndoableClient {
     await this.ready();
     const undone: JournalEntry[] = [];
     const failed: Array<{ entry: JournalEntry; error: Error }> = [];
-    const { after, session, ...undoOpts } = opts;
+    const { after, session, ...rest } = opts;
+    // Rolling back one session never cascades into another session's writes.
+    const undoOpts: UndoOptions = { ...rest, ...(session !== undefined ? { cascadeWithin: session } : {}) };
     for (const entry of [...this.journal].reverse()) {
       if (entry.status === 'undone') continue;
       if (after !== undefined && entry.seq <= after) continue;
@@ -979,6 +986,9 @@ function resolveBody(body: BodyTemplate | undefined, sources: Sources): unknown 
       return invertJsonPatch(sources.request, sources.before);
   }
 }
+
+/** A value that looks like an identifier rather than a word: 8+ characters with a digit, dash or underscore. */
+const idLike = (v: string) => v.length >= 8 && /[\d_-]/.test(v);
 
 const refHash = (id: string, salt: string) => createHash('sha256').update(`${salt}\u0000${id}`).digest('hex').slice(0, 32);
 

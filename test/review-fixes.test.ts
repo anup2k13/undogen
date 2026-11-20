@@ -376,3 +376,45 @@ describe('review fixes (round 3)', () => {
     expect(spec.warnings).toEqual([expect.stringMatching(/does not say where to/)]);
   });
 });
+
+describe('review fixes (round 4: sessions and chosen ids)', () => {
+  it('rolling back one session refuses to cascade into another session', async () => {
+    const path = join(dir, 'cascade-sessions.jsonl');
+    const opts = { spec: todo, baseUrl: server.url, store: new FileJournalStore(path) };
+    const a = await UndoableClient.open(opts);
+    const t = ((await a.call('createTodo', { body: { title: 'from A' } })).data as { id: string }).id;
+    const b = await UndoableClient.open(opts);
+    await b.call('createComment', { params: { todoId: t }, body: { text: 'from B' } });
+
+    const r = await (await UndoableClient.open(opts)).undoAll({ session: a.session, cascade: true });
+    expect(r.undone).toEqual([]);
+    expect(r.failed[0]!.error).toBeInstanceOf(DependencyError);
+    expect((await fetch(`${server.url}/todos/${t}/comments`).then((x) => x.json())) as unknown[]).toHaveLength(1); // B's comment is untouched
+
+    const resumedA = await UndoableClient.open({ ...opts, session: a.session }); // sees B's write
+    const [undo] = toolDefinitions(resumedA, todo.operations, { only: [] }).filter((x) => x.name === 'undogen_undo');
+    await expect(undo!.execute({ seq: 1, cascade: true })).rejects.toThrow(/belong to other sessions, which cascade doesn't touch/); // an agent can't cascade into B either
+  });
+
+  it("matches a chosen name in bodies when it looks like an id, but not a word", async () => {
+    const s = parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'x', version: '1' },
+      paths: {
+        '/projects': { post: { operationId: 'createProject', requestBody: { content: { 'application/json': { schema: { type: 'object', required: ['key'], properties: { key: { type: 'string' } } } } } }, responses: { '204': { description: '' } } } },
+        '/projects/{key}': { delete: { operationId: 'deleteProject', responses: { '204': { description: '' } } } },
+        '/issues': { post: { operationId: 'createIssue', responses: { '201': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } } } } } },
+        '/issues/{id}': { delete: { operationId: 'deleteIssue', responses: { '204': { description: '' } } } },
+      },
+    });
+    let n = 0;
+    const f: typeof fetch = async (u, init) => (init?.method === 'POST' && String(u).endsWith('/issues') ? json({ id: `issue_${++n}xyz` }, 201) : new Response(null, { status: 204 }));
+    const c = new UndoableClient({ spec: s, baseUrl: 'http://x', fetch: f });
+    await c.call('createProject', { body: { key: 'PROJ-8f3a2c' } });
+    await c.call('createIssue', { body: { projectKey: 'PROJ-8f3a2c' } });
+    await c.call('createProject', { body: { key: 'test' } });
+    await c.call('createIssue', { body: { title: 'test' } });
+    expect(c.dependentsOf(c.journal[0]!).map((e) => e.seq)).toEqual([2]);
+    expect(c.dependentsOf(c.journal[2]!)).toEqual([]);
+  });
+});

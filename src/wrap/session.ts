@@ -71,10 +71,10 @@ export class ToolUndoError extends Error {
 }
 
 export class ToolDependencyError extends ToolUndoError {
-  constructor(entry: ToolEntry, readonly dependents: ToolEntry[]) {
+  constructor(entry: ToolEntry, readonly dependents: ToolEntry[], otherSessions = false) {
     super(
-      `Undo of #${entry.seq} (${entry.tool}) refused: later calls use what it created (${dependents.map((d) => `#${d.seq} ${d.tool}`).join(', ')}). ` +
-        'Undo those first, or pass cascade to undo them too.',
+      `Undo of #${entry.seq} (${entry.tool}) refused: later calls use what it created (${dependents.map((d) => `#${d.seq} ${d.tool}${otherSessions ? ` (session ${d.session})` : ''}`).join(', ')}). ` +
+        (otherSessions ? "They belong to other sessions, which cascade doesn't touch: undo those sessions' calls first." : 'Undo those first, or pass cascade to undo them too.'),
       entry,
     );
     this.name = 'ToolDependencyError';
@@ -300,7 +300,7 @@ export class ToolSession {
    * Undo one entry (default: this session's most recent active one). With `cascade`, later calls that use
    * what it created are undone first, after its own checks pass. `undone` collects every entry undone.
    */
-  async undo(target?: number | ToolEntry, opts: { force?: boolean; cascade?: boolean; undone?: ToolEntry[] } = {}): Promise<ToolEntry> {
+  async undo(target?: number | ToolEntry, opts: { force?: boolean; cascade?: boolean; cascadeWithin?: string; undone?: ToolEntry[] } = {}): Promise<ToolEntry> {
     const entry =
       typeof target === 'object'
         ? target
@@ -315,7 +315,8 @@ export class ToolSession {
       return this.finish(entry);
     }
     const dependents = this.dependentsOf(entry);
-    if (dependents.length && !opts.cascade) throw new ToolDependencyError(entry, dependents);
+    const others = opts.cascadeWithin !== undefined ? dependents.filter((d) => d.session !== opts.cascadeWithin) : [];
+    if (dependents.length && (!opts.cascade || others.length)) throw new ToolDependencyError(entry, others.length ? others : dependents, !!opts.cascade && others.length > 0);
     if (!entry.inverse) {
       entry.status = 'failed';
       entry.undoError = `cannot be undone: ${entry.inverseError ?? describeNoInverse(entry)}`;
@@ -369,7 +370,8 @@ export class ToolSession {
       if (entry.status === 'undone' || (opts.after !== undefined && entry.seq <= opts.after) || (opts.session !== undefined && entry.session !== opts.session)) continue;
       if ((entry.status as ToolEntry['status']) === 'undone') continue; // a cascade earlier in this loop may have undone it
       try {
-        await this.undo(entry, { ...opts, undone }); // also collects what a cascade undid
+        // Rolling back one session never cascades into another session's writes.
+        await this.undo(entry, { ...opts, undone, ...(opts.session !== undefined ? { cascadeWithin: opts.session } : {}) }); // also collects what a cascade undid
       } catch (err) {
         failed.push({ entry, error: err as Error });
       }

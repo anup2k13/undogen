@@ -16,6 +16,7 @@ place and Python agents get the same behaviour as the TypeScript client:
 from __future__ import annotations
 
 import copy
+from decimal import Decimal
 import hashlib
 import json
 import os
@@ -80,13 +81,14 @@ class ConflictError(UndoError):
 
 
 class DependencyError(UndoError):
-    def __init__(self, entry: dict, dependents: List[dict]):
-        names = ", ".join(f"#{d['seq']} {d['operationId']}" for d in dependents)
-        super().__init__(
-            f"Undo of #{entry['seq']} ({entry['operationId']}) would orphan later writes that use it: {names}. "
-            "Undo those first, or pass cascade=True.",
-            entry,
+    def __init__(self, entry: dict, dependents: List[dict], other_sessions: bool = False):
+        names = ", ".join(f"#{d['seq']} {d['operationId']}" + (f" (session {d.get('session')})" if other_sessions else "") for d in dependents)
+        hint = (
+            "They belong to other sessions, which cascade doesn't touch: undo those sessions' writes first."
+            if other_sessions
+            else "Undo those first, or pass cascade=True."
         )
+        super().__init__(f"Undo of #{entry['seq']} ({entry['operationId']}) would orphan later writes that use it: {names}. {hint}", entry)
         self.dependents = dependents
 
 
@@ -182,15 +184,47 @@ def _stable(v: Any) -> str:
     return json.dumps(v, sort_keys=True, separators=(",", ":"))
 
 
+def _js_number(f: float) -> str:
+    """A number as JavaScript's Number.prototype.toString writes it (both runtimes use the shortest round-trip digits)."""
+    if f != f:
+        return "NaN"
+    if f in (float("inf"), float("-inf")):
+        return "Infinity" if f > 0 else "-Infinity"
+    if f == 0:
+        return "0"
+    t = Decimal(repr(abs(f))).as_tuple()
+    raw = "".join(str(d) for d in t.digits)
+    digits = raw.rstrip("0") or "0"
+    k = len(digits)
+    n = k + int(t.exponent) + (len(raw) - len(digits))  # value = 0.<digits> * 10**n
+    sign = "-" if f < 0 else ""
+    if k <= n <= 21:
+        return sign + digits + "0" * (n - k)
+    if 0 < n <= 21:
+        return sign + digits[:n] + "." + digits[n:]
+    if -6 < n <= 0:
+        return sign + "0." + "0" * (-n) + digits
+    e = n - 1
+    mantissa = digits if k == 1 else digits[0] + "." + digits[1:]
+    return f"{sign}{mantissa}e{'+' if e > 0 else '-'}{abs(e)}"
+
+
 def _js_str(v: Any) -> str:
-    """str() as JavaScript's String() would write it, so hashes agree across runtimes (12345.0 -> "12345")."""
+    """str() as JavaScript's String() would write it, so hashes and id maps agree across runtimes (12345.0 -> "12345")."""
     if isinstance(v, bool):
         return "true" if v else "false"
     if v is None:
         return "null"
-    if isinstance(v, float) and v.is_integer() and abs(v) < 1e21:
-        return str(int(v))
+    if isinstance(v, float):
+        return _js_number(v)
+    if isinstance(v, int) and abs(v) > 2**53:
+        return _js_number(float(v))  # JavaScript reads it as the nearest double
     return str(v)
+
+
+def _id_like(v: str) -> bool:
+    """A value that looks like an identifier rather than a word: 8+ characters with a digit, dash or underscore."""
+    return len(v) >= 8 and any(c.isdigit() or c in "-_" for c in v)
 
 
 def _ref_hash(value: str, salt: str) -> str:
@@ -221,7 +255,7 @@ def _body_mentions(body: Any, ids: set, depth: int = 0) -> bool:
     if depth > 3 or body is None or isinstance(body, bool):
         return False
     if isinstance(body, (str, int, float)):
-        return str(body) in ids
+        return _js_str(body) in ids
     if isinstance(body, list):
         return any(_body_mentions(x, ids, depth + 1) for x in body)
     if isinstance(body, dict):
@@ -480,9 +514,9 @@ class UndoableClient:
             return []
         param, value = created["param"], created["value"]
         ids = {_js_str(value), _js_str(self.remap_id(param, value))}
-        # In the body too (POST /comments {todoId}), but only for ids that can't be mistaken for small numbers,
-        # and not for names the caller chose ("test", "prod"): those turn up in unrelated bodies.
-        body_ids = set() if created.get("chosen") else {i for i in ids if len(i) >= 4}
+        # In the body too (POST /comments {todoId}), but only for ids that can't be mistaken for small numbers;
+        # a name the caller chose only when it looks like an id (PROJ-8f3a2c), not a word ("test", "prod").
+        body_ids = {i for i in ids if (_id_like(i) if created.get("chosen") else len(i) >= 4)}
         return [
             e
             for e in self.journal
@@ -497,7 +531,7 @@ class UndoableClient:
             )
         ]
 
-    def undo(self, entry: Union[dict, int, None] = None, *, force: bool = False, cascade: bool = False) -> dict:
+    def undo(self, entry: Union[dict, int, None] = None, *, force: bool = False, cascade: bool = False, cascade_within: Optional[str] = None) -> dict:
         """Undo one entry (or seq). Default: the most recent entry not yet undone."""
         if isinstance(entry, int):
             target = next((e for e in self.journal if e["seq"] == entry), None)
@@ -514,11 +548,13 @@ class UndoableClient:
 
         dependents = self.dependents_of(target)
         if dependents:
-            if not cascade:
-                raise DependencyError(target, dependents)
+            # With cascade_within, dependents from other sessions refuse the undo instead of being undone.
+            others = [d for d in dependents if d.get("session") != cascade_within] if cascade_within is not None else []
+            if not cascade or others:
+                raise DependencyError(target, others or dependents, other_sessions=bool(cascade and others))
             for d in reversed(dependents):
                 if d["status"] != "undone":
-                    self.undo(d, force=force, cascade=True)
+                    self.undo(d, force=force, cascade=True, cascade_within=cascade_within)
 
         if not target.get("inverse") and target["plan"]["strategy"] == "no-side-effects":
             return self._finish(target, {"status": 204, "data": None, "headers": {}})
@@ -599,7 +635,7 @@ class UndoableClient:
         """Undo every entry made after `checkpoint`, newest first."""
         return self.undo_all(force=force, after=checkpoint)
 
-    def undo_all(self, *, force: bool = False, after: Optional[int] = None, session: Optional[str] = None) -> dict:
+    def undo_all(self, *, force: bool = False, cascade: bool = False, after: Optional[int] = None, session: Optional[str] = None) -> dict:
         """Undo everything (or everything after a checkpoint, or one session's writes), newest first.
         Continues past failures and reports them."""
         undone, failed = [], []
@@ -611,7 +647,8 @@ class UndoableClient:
             if session is not None and entry.get("session") != session:
                 continue
             try:
-                self.undo(entry, force=force)
+                # Rolling back one session never cascades into another session's writes.
+                self.undo(entry, force=force, cascade=cascade, cascade_within=session)
                 undone.append(entry)
             except UndogenError as err:
                 failed.append({"entry": entry, "error": err})
@@ -620,7 +657,7 @@ class UndoableClient:
     def remap_id(self, param: str, value: Scalar) -> Scalar:
         cur = value
         for _ in range(32):
-            nxt = self._id_map.get(param, {}).get(str(cur))
+            nxt = self._id_map.get(param, {}).get(_js_str(cur))
             if nxt is None:
                 return cur
             cur = nxt
@@ -713,8 +750,8 @@ class UndoableClient:
         raise ConflictError(target, conflicts, res)
 
     def _record_id(self, entry: dict, param: str, old: Scalar, new: Scalar) -> None:
-        entry.setdefault("idMap", {}).setdefault(param, {})[str(old)] = new
-        self._id_map.setdefault(param, {})[str(old)] = new
+        entry.setdefault("idMap", {}).setdefault(param, {})[_js_str(old)] = new
+        self._id_map.setdefault(param, {})[_js_str(old)] = new
 
     def _remap_params(self, params: Dict[str, Scalar]) -> Dict[str, Scalar]:
         return {k: self.remap_id(k, v) for k, v in params.items()}
