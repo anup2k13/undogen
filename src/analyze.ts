@@ -20,6 +20,7 @@ export const ACTION_PAIRS: Array<[string, string]> = [
   ['lock', 'unlock'],
   ['enable', 'disable'],
   ['activate', 'deactivate'],
+  ['deactivate', 'reactivate'],
   ['open', 'close'],
   ['reopen', 'close'],
   ['start', 'stop'],
@@ -89,6 +90,15 @@ export const ONE_WAY_VERBS = new Set([
 
 /** Values of a state/status field that mean "this is gone" for APIs without DELETE. */
 export const SOFT_DELETE_STATES = ['closed', 'archived', 'cancelled', 'canceled', 'inactive', 'deleted', 'disabled', 'revoked'];
+
+/** Words that say an operation changes an existing resource's fields. */
+const UPDATE_WORDS = new Set(['update', 'updates', 'modify', 'modifies', 'edit', 'edits', 'configure', 'configures', 'change', 'changes']);
+
+/** Whether a GET returns a list (an array, or a page object with a `data` array), not one object. */
+function readsList(getOp: Operation): boolean {
+  const schema = getOp.responseSchema as { type?: string; properties?: Record<string, { type?: string }> } | undefined;
+  return schema?.type === 'array' || schema?.properties?.data?.type === 'array' || schema?.properties?.items?.type === 'array';
+}
 
 /** Crude singularisation so "dispatches"/"pings" match "dispatch"/"ping". */
 const stems = (t: string) => [t, t.replace(/es$/, ''), t.replace(/s$/, '')];
@@ -637,6 +647,30 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
         inverseIfMissing: del ? { operationId: del.id, method: 'delete', path: del.path, bindings: bindParams(del.path) } : undefined,
         reasons: [`Snapshot via ${getOp.id}, then write the old values back with ${op.id}`],
         caveats: ['Assumes the GET and the write use the same representation'],
+      });
+    }
+  }
+
+  // 2d. POST that updates a singleton (Stripe: GET + POST /v1/tax/settings "Update settings"): snapshot and restore.
+  // Only when it says it updates and the GET reads one object, so a list + create collection isn't taken for one.
+  if (op.method === 'post' && !lastIsParam) {
+    const getOp = index.find('get', op.path);
+    const says = tokenize(`${op.summary ?? ''} ${op.id}`).find((w) => UPDATE_WORDS.has(w));
+    const firstWord = tokenize(op.summary ?? '')[0];
+    if (
+      getOp &&
+      says &&
+      (!op.summary || UPDATE_WORDS.has(firstWord ?? '')) &&
+      !readsList(getOp) &&
+      !index.find('put', op.path) &&
+      !index.find('patch', op.path) &&
+      !index.find('delete', op.path)
+    ) {
+      return plan(op, 'reversible', 'restore-snapshot', 0.55, {
+        capture: getTemplate(getOp),
+        inverse: { operationId: op.id, method: 'post', path: op.path, bindings: bindParams(op.path), body: { from: 'before-request-keys' } },
+        reasons: [`POST updates this single resource ("${says}"): snapshot via ${getOp.id}, POST the old values back`],
+        caveats: ['Assumes POST updates only the fields it is sent (Stripe-style partial update)', 'Nested and form-encoded fields are matched by name, ignoring case and separators'],
       });
     }
   }

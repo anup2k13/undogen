@@ -361,7 +361,7 @@ Four commands help fill the gaps:
 | GitHub REST | 614 | 64% | 131 | 89 | 0.6s |
 | Kubernetes (Swagger 2.0) | 586 | 78% | 114 | 12 | 0.1s |
 | DigitalOcean (hundreds of `$ref` files) | 448 | 60% | 89 | 92 | 10–40s |
-| Stripe | 339 | 39% | 135 | 72 | 0.5s |
+| Stripe | 339 | 41% | 135 | 66 | 0.3s |
 | Asana | 143 | 73% | 9 | 29 | 0.8s |
 | Twilio | 94 | 68% | 18 | 12 | 0.1s |
 | Slack (Swagger 2.0, RPC) | 94 | 32% | 11 | 53 | 0.1s |

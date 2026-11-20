@@ -1,16 +1,16 @@
 # Benchmark: analyze on public API descriptions
 
-undogen 0.1.0, 2026-11-19. Regenerate with `npx tsx scripts/benchmark.ts --out docs/benchmarks.md`.
+undogen 0.1.0, 2026-11-20. Regenerate with `npx tsx scripts/benchmark.ts --out docs/benchmarks.md`.
 
 | API | Operations | Writes | Reversible | Compensable | Irreversible (gated) | Unknown | Undo derived | Spec warnings | Time | Notes |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | GitHub REST | 1281 | 614 | 356 | 46 | 131 | 81 | 65% | 1 | 0.5s |  |
-| Stripe | 612 | 339 | 105 | 27 | 135 | 72 | 39% | 1 | 0.3s | POST-for-update style |
-| Twilio Api v2010 | 197 | 94 | 42 | 22 | 18 | 12 | 68% | 0 | 0.1s | form-encoded bodies |
-| Asana | 271 | 143 | 87 | 18 | 9 | 29 | 73% | 0 | 0.7s |  |
-| DigitalOcean | 916 | 448 | 199 | 71 | 90 | 88 | 60% | 6 | 36.9s | hundreds of external $ref files |
-| Slack Web | 174 | 94 | 27 | 3 | 11 | 53 | 32% | 0 | 0.1s | Swagger 2.0, RPC style |
-| Kubernetes | 1163 | 586 | 371 | 89 | 114 | 12 | 78% | 1 | 0.2s | Swagger 2.0 |
+| Stripe | 612 | 339 | 111 | 27 | 135 | 66 | 41% | 1 | 0.3s | POST-for-update style |
+| Twilio Api v2010 | 197 | 94 | 42 | 22 | 18 | 12 | 68% | 0 | 0.3s | form-encoded bodies |
+| Asana | 271 | 143 | 87 | 18 | 9 | 29 | 73% | 0 | 0.8s |  |
+| DigitalOcean | 916 | 448 | 201 | 71 | 90 | 86 | 61% | 6 | 44.7s | hundreds of external $ref files |
+| Slack Web | 174 | 94 | 27 | 3 | 11 | 53 | 32% | 0 | 0.2s | Swagger 2.0, RPC style |
+| Kubernetes | 1163 | 586 | 371 | 89 | 114 | 12 | 78% | 1 | 0.1s | Swagger 2.0 |
 
 **Undo derived** is the share of write operations that get a compiled inverse with no hand-written code. 
 These are hypotheses: only `undogen verify` against a sandbox shows whether an inverse works. 

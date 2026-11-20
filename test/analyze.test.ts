@@ -617,3 +617,37 @@ describe('analyze: proxy routes', () => {
     expect(analyze(spec).plans.map((p) => p.reversibility)).toEqual(['irreversible', 'irreversible', 'irreversible']);
   });
 });
+
+describe('POST that updates a singleton (Stripe settings)', () => {
+  const spec = (summary: string, getSchema: object) =>
+    parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'x', version: '1' },
+      paths: {
+        '/v1/tax/settings': {
+          get: { operationId: 'GetTaxSettings', responses: { '200': { description: '', content: { 'application/json': { schema: getSchema } } } } },
+          post: { operationId: 'PostTaxSettings', summary, requestBody: { content: { 'application/x-www-form-urlencoded': { schema: { type: 'object', properties: { defaults: { type: 'object' } } } } } }, responses: {} },
+        },
+        '/v1/billing/meters/{id}/deactivate': { post: { operationId: 'PostBillingMetersIdDeactivate', responses: {} } },
+        '/v1/billing/meters/{id}/reactivate': { post: { operationId: 'PostBillingMetersIdReactivate', responses: {} } },
+      },
+    });
+  const planOf = (s: ReturnType<typeof spec>, id: string) => analyze(s).plans.find((p) => p.operationId === id)!;
+
+  it('restores it from the GET when it says it updates and the GET reads one object', () => {
+    expect(planOf(spec('Update settings', { type: 'object', properties: { defaults: { type: 'object' } } }), 'PostTaxSettings')).toMatchObject({
+      reversibility: 'reversible',
+      strategy: 'restore-snapshot',
+      capture: { operationId: 'GetTaxSettings' },
+    });
+  });
+
+  it('leaves list + create collections and other verbs alone', () => {
+    expect(planOf(spec('Update settings', { type: 'object', properties: { data: { type: 'array' } } }), 'PostTaxSettings').strategy).not.toBe('restore-snapshot');
+    expect(planOf(spec('Create settings', { type: 'object' }), 'PostTaxSettings').strategy).not.toBe('restore-snapshot');
+  });
+
+  it('pairs deactivate with reactivate', () => {
+    expect(planOf(spec('Update settings', { type: 'object' }), 'PostBillingMetersIdDeactivate')).toMatchObject({ strategy: 'paired-action', inverse: { operationId: 'PostBillingMetersIdReactivate' } });
+  });
+});
