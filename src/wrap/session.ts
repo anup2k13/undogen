@@ -35,6 +35,8 @@ export interface ToolEntry {
   noop?: boolean;
   /** Ids this call created (the inverse's arguments read from the result), for finding later calls that use them. */
   created?: Array<{ name: string; value: unknown }>;
+  /** The other arguments that locate what was created (owner, repo): a later call naming another scope doesn't depend on it. */
+  scope?: Record<string, unknown>;
   /** Read before undoing; `expected` holds what the call left, as the server reported it right after. */
   check?: ToolCall & { expected: Record<string, unknown> };
   status: 'active' | 'undone' | 'failed' | 'conflict';
@@ -157,6 +159,10 @@ export class ToolSession {
   async call(tool: string, args: Record<string, unknown>): Promise<{ result: CallToolResult; entry?: ToolEntry }> {
     let plan = this.planFor(tool, args);
     if (plan.strategy === 'no-side-effects') return { result: await this.options.call(tool, args) };
+    const flag = plan.unsafeFlags?.find((f) => args[f] === true);
+    if (flag && plan.reversibility !== 'irreversible') {
+      plan = { ...plan, reversibility: 'unknown', reasons: [`with ${flag}: true, ${tool} replaces something its undo can't put back`, ...plan.reasons] };
+    }
 
     // Read what the call will change first. If that fails, the call couldn't be undone: it needs approval like any other.
     let before: unknown;
@@ -198,7 +204,11 @@ export class ToolSession {
       const { call, notRestored } = this.inverseOf(plan, args, data, before);
       entry.inverse = call;
       const fromResult = Object.entries(plan.inverse?.arguments ?? {}).filter(([, src]) => 'from' in src && src.from === 'result');
-      if (call && fromResult.length) entry.created = fromResult.map(([name]) => ({ name, value: call.arguments[name] }));
+      if (call && fromResult.length) {
+        entry.created = fromResult.map(([name]) => ({ name, value: call.arguments[name] }));
+        const fromArgs = Object.entries(plan.inverse?.arguments ?? {}).filter(([k, src]) => 'from' in src && src.from === 'args' && call.arguments[k] !== undefined);
+        if (fromArgs.length) entry.scope = Object.fromEntries(fromArgs.map(([k]) => [k, call.arguments[k]]));
+      }
       if (notRestored.length) {
         entry.undoWarnings = [`undo will not restore ${notRestored.join(', ')}: ${plan.snapshot?.tool} returned no earlier value for ${notRestored.length === 1 ? 'it' : 'them'}`];
       }
@@ -247,7 +257,7 @@ export class ToolSession {
     let notRestored: string[] = [];
     if (plan.restoreSent) {
       if (before === undefined) throw new Error(`${plan.snapshot?.tool} could not read the old values before the call`);
-      const sent = Object.keys(args).filter((k) => !plan.restoreSent!.includes(k));
+      const sent = Object.keys(args).filter((k) => !plan.restoreSent!.includes(k) && k !== plan.dispatch?.arg);
       const restorable = sent.filter((k) => getPath(before, k) !== undefined);
       if (!restorable.length) throw new Error(`the old values of ${sent.join(', ')} were not in what ${plan.snapshot?.tool} returned`);
       for (const k of restorable) out[k] = getPath(before, k);
@@ -266,11 +276,15 @@ export class ToolSession {
         e.seq > entry.seq &&
         e.status !== 'undone' &&
         !!e.inverse &&
-        ids.some(({ name, v }) => usesArg(e.arguments, name, v) || (typeof v === 'string' && v.length >= 4 && mentions(e.arguments, v))),
+        ids.some(({ name, v }) => (usesArg(e.arguments, name, v) && sameScope(entry.scope, e.arguments)) || (typeof v === 'string' && v.length >= 4 && mentions(e.arguments, v))),
     );
   }
 
-  async undo(target?: number | ToolEntry, opts: { force?: boolean; cascade?: boolean } = {}): Promise<ToolEntry> {
+  /**
+   * Undo one entry (default: this session's most recent active one). With `cascade`, later calls that use
+   * what it created are undone first, after its own checks pass. `undone` collects every entry undone.
+   */
+  async undo(target?: number | ToolEntry, opts: { force?: boolean; cascade?: boolean; undone?: ToolEntry[] } = {}): Promise<ToolEntry> {
     const entry =
       typeof target === 'object'
         ? target
@@ -279,16 +293,15 @@ export class ToolSession {
           : [...this.journal].reverse().find((e) => e.session === this.session && e.status !== 'undone');
     if (!entry) throw new Error(target !== undefined ? `No journal entry #${target}` : 'Nothing to undo');
     if (entry.status === 'undone') throw new ToolUndoError(`Entry #${entry.seq} is already undone`, entry);
-    const dependents = this.dependentsOf(entry);
-    if (dependents.length) {
-      if (!opts.cascade) throw new ToolDependencyError(entry, dependents);
-      for (const d of [...dependents].reverse()) if (d.status !== 'undone') await this.undo(d, opts);
-    }
     if (entry.noop) {
       entry.undoWarnings = [...(entry.undoWarnings ?? []), 'the call changed nothing, so there was nothing to undo'];
+      opts.undone?.push(entry);
       return this.finish(entry);
     }
+    const dependents = this.dependentsOf(entry);
+    if (dependents.length && !opts.cascade) throw new ToolDependencyError(entry, dependents);
     if (!entry.inverse) {
+      entry.status = 'failed';
       entry.undoError = `cannot be undone: ${entry.inverseError ?? describeNoInverse(entry)}`;
       await this.store.save(entry);
       throw new ToolUndoError(`Entry #${entry.seq} (${entry.tool}) ${entry.undoError}`, entry);
@@ -311,6 +324,8 @@ export class ToolSession {
         throw new ToolConflictError(entry, conflicts);
       }
     }
+    // Only now, with this entry's own checks passed, undo what depends on it.
+    for (const d of [...dependents].reverse()) if (d.status !== 'undone') await this.undo(d, opts);
 
     const res = await this.options.call(entry.inverse.tool, entry.inverse.arguments);
     if (res.isError) {
@@ -319,6 +334,7 @@ export class ToolSession {
       await this.store.save(entry);
       throw new ToolUndoError(`Undo of #${entry.seq} (${entry.tool}) failed: ${entry.undoError}`, entry);
     }
+    opts.undone?.push(entry);
     return this.finish(entry);
   }
 
@@ -337,7 +353,7 @@ export class ToolSession {
       if (entry.status === 'undone' || (opts.after !== undefined && entry.seq <= opts.after) || (opts.session !== undefined && entry.session !== opts.session)) continue;
       if ((entry.status as ToolEntry['status']) === 'undone') continue; // a cascade earlier in this loop may have undone it
       try {
-        undone.push(await this.undo(entry, opts));
+        await this.undo(entry, { ...opts, undone }); // also collects what a cascade undid
       } catch (err) {
         failed.push({ entry, error: err as Error });
       }
@@ -362,6 +378,11 @@ function usesArg(args: unknown, name: string, value: unknown): boolean {
   return Object.entries(args).some(
     ([k, v]) => (k === name && (stableStringify(v) === stableStringify(value) || (Array.isArray(v) && v.some((x) => stableStringify(x) === stableStringify(value))))) || usesArg(v, name, value),
   );
+}
+
+/** Whether a later call's arguments agree with where something was created (same owner/repo), where they name it at all. */
+function sameScope(scope: Record<string, unknown> | undefined, args: Record<string, unknown>): boolean {
+  return Object.entries(scope ?? {}).every(([k, v]) => args[k] === undefined || stableStringify(args[k]) === stableStringify(v));
 }
 
 /** Whether a string appears as a value anywhere in `args`. */

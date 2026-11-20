@@ -62,6 +62,8 @@ export interface ToolPlan {
   snapshot?: ToolCallTemplate;
   /** Paired actions: read again after the call; if nothing changed, undo does nothing (star an already-starred repo). */
   detectNoop?: boolean;
+  /** Boolean arguments that, when true, make the call replace something its undo can't restore: such calls need approval. */
+  unsafeFlags?: string[];
   /** A read made before undoing, to refuse when someone changed what the call wrote. */
   check?: ToolCallTemplate;
   reasons: string[];
@@ -226,7 +228,7 @@ function mapArgs(source: Named, target: Named, fromResult: boolean): Record<stri
   const out: Record<string, ArgSource> = {};
   for (const p of target.props) {
     // A create isn't given the id of what it creates, even when its schema (shared with update) has the field: issue_write's issue_number.
-    const createdId = fromResult && !!source.verb && CREATE_VERBS.has(source.verb) && !source.required.includes(p) && isIdLike(p);
+    const createdId = fromResult && !!source.verb && CREATE_VERBS.has(source.verb) && !source.required.includes(p) && namesOwnId(p, target.noun);
     if (source.props.has(p) && !createdId) out[p] = { from: 'args', key: p };
     else if (target.required.includes(p)) {
       if (!fromResult) return undefined;
@@ -238,10 +240,12 @@ function mapArgs(source: Named, target: Named, fromResult: boolean): Record<stri
   return out;
 }
 
-/** issue_number, pageId, id: names of identifiers. */
-function isIdLike(name: string): boolean {
-  const last = tokenize(name).at(-1);
-  return last === 'id' || last === 'number' || last === 'uuid' || last === 'gid';
+/** Whether `name` is the id of a `noun` itself (issue_number, card_id, id), not of a parent (board_id). */
+function namesOwnId(name: string, noun: string): boolean {
+  const words = tokenize(name).map(stem);
+  if (!['id', 'number', 'uuid', 'gid'].includes(words.at(-1)!)) return false;
+  const rest = words.slice(0, -1).join(' ');
+  return rest === '' || rest === noun || rest === noun.split(' ').at(-1);
 }
 
 /** Whether a plan rests on guesses about results the tools don't declare. */
@@ -253,6 +257,11 @@ const GUESS = "guessed from names (the tool declares no output schema): if a cal
 /** The getter for `n`'s resource whose required arguments `n` has (so it can be called with them). */
 function getterFor(n: Named, all: Named[], argsFrom: Set<string>): Named | undefined {
   return all.find((g) => g.verb && GET_VERBS.has(g.verb) && getterNoun(g, n) && g.required.length > 0 && g.required.every((r) => argsFrom.has(r)));
+}
+
+/** Whether a getter's declared output has a field for a part of the resource (get_issue -> labels for "label"). */
+function showsPart(g: Named, part: string): boolean {
+  return !!g.out && Object.keys(g.out).some((k) => stem(tokenize(k).at(-1) ?? '') === part.split(' ').at(-1));
 }
 
 function stateValue(prop: unknown): string | undefined {
@@ -318,7 +327,13 @@ function planOne(n: Named, all: Named[], override?: ToolOverrides[string]): Tool
     if (other && args) {
       // A getter for the resource (or the one it belongs to: add_issue_labels -> get_issue) shows whether the call changed anything.
       const getter = others.find(
-        (g) => g.verb && GET_VERBS.has(g.verb) && g.noun !== '' && (getterNoun(g, n) || n.noun.startsWith(`${g.noun} `)) && g.required.length > 0 && g.required.every((r) => n.props.has(r)),
+        (g) =>
+          g.verb &&
+          GET_VERBS.has(g.verb) &&
+          g.noun !== '' &&
+          (getterNoun(g, n) || (n.noun.startsWith(`${g.noun} `) && showsPart(g, n.noun.slice(g.noun.length + 1)))) &&
+          g.required.length > 0 &&
+          g.required.every((r) => n.props.has(r)),
       );
       return plan({
         reversibility: 'reversible',
@@ -388,7 +403,7 @@ function planOne(n: Named, all: Named[], override?: ToolOverrides[string]): Tool
       strategy: 'restore-snapshot',
       snapshot: { tool: getter.key, arguments: ids },
       inverse: { tool: n.key, arguments: ids },
-      restoreSent: identifying,
+      restoreSent: n.dispatch ? [...identifying, n.dispatch.arg] : identifying,
       check: { tool: getter.key, arguments: ids },
       reasons: [`${getter.key} reads the old values; ${n.key} writes them back`],
       caveats: getter.out ? [] : [`guessed: ${getter.key} declares no output schema, so whether it returns the values to restore is only known after a call`],
@@ -439,10 +454,30 @@ export function planTools(tools: McpTool[], overrides: ToolOverrides = {}): Tool
     if (!t || !target?.dispatch) return t;
     return { tool: target.tool.name, arguments: { [target.dispatch.arg]: { value: target.dispatch.value }, ...t.arguments } };
   };
+  // Reasons and caveats name actions as people and agents call them: sub_issue_write {method: "remove"}, not the internal key.
+  const readable = (text: string) =>
+    text.replace(/\b([\w.-]+)#([\w-]+)\b/g, (m, tool: string) => {
+      const d = byKey.get(m)?.dispatch;
+      return d ? `${tool} {${d.arg}: "${d.value}"}` : m;
+    });
   return all.map((n) => {
     const p = planOne(n, all, overrides[n.key] ?? overrides[n.tool.name]);
-    return { ...p, inverse: resolveKey(p.inverse), snapshot: resolveKey(p.snapshot), check: resolveKey(p.check) };
+    return {
+      ...p,
+      reasons: p.reasons.map(readable),
+      caveats: p.caveats.map(readable),
+      inverse: resolveKey(p.inverse),
+      snapshot: resolveKey(p.snapshot),
+      check: resolveKey(p.check),
+      ...unsafe(n),
+    };
   });
+}
+
+/** Boolean arguments that make the call replace or override something its undo can't put back (replace_parent, overwrite, force). */
+function unsafe(n: Named): Pick<ToolPlan, 'unsafeFlags'> {
+  const flags = [...n.props].filter((p) => /^(replace|overwrite|force)/i.test(p) && (n.tool.inputSchema.properties?.[p] as { type?: string } | undefined)?.type === 'boolean');
+  return flags.length ? { unsafeFlags: flags } : {};
 }
 
 /** The plan for a call: by tool name, and for multi-action tools by the action its arguments pick. */

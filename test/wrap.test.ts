@@ -448,3 +448,77 @@ describe('multi-action tools (shaped like GitHub\'s official MCP server)', () =>
     expect(asked).toEqual(['issue_write has no known action method: "transfer"']);
   });
 });
+
+describe('review fixes (wrap, round 2)', () => {
+  const o = (props: string[], required = props) => ({ type: 'object' as const, properties: Object.fromEntries(props.map((p) => [p, {}])), required });
+  const byKey = (plans: ReturnType<typeof planTools>) => Object.fromEntries(plans.map((p) => [p.dispatch ? `${p.tool}#${p.dispatch.value}` : p.tool, p]));
+
+  it("keeps a parent id from the arguments; only the created resource's own id comes from the result", () => {
+    const p = byKey(planTools([{ name: 'create_card', inputSchema: o(['title', 'board_id'], ['title']) }, { name: 'delete_card', inputSchema: o(['card_id', 'board_id']) }]));
+    expect(p.create_card!.inverse!.arguments).toEqual({ card_id: { from: 'result', keys: ['card_id', 'id'] }, board_id: { from: 'args', key: 'board_id' } });
+  });
+
+  it("never treats a multi-action tool's action argument as a field to restore", async () => {
+    const { githubTools } = await import('./fixtures/github-mcp-tools.js');
+    const { ToolSession } = await import('../src/wrap/session.js');
+    // The issue happens to have a field named like the action argument.
+    const issue = { number: 7, title: 'a', method: 'email' };
+    const session = await ToolSession.open({ plans: planTools(githubTools), call: async () => ({ content: [{ type: 'text', text: JSON.stringify(issue) }] }) });
+    const { entry } = await session.call('issue_write', { method: 'update', owner: 'o', repo: 'r', issue_number: 7, title: 'b' });
+    expect(entry!.inverse!.arguments).toEqual({ method: 'update', owner: 'o', repo: 'r', issue_number: 7, title: 'a' });
+    expect(entry!.undoWarnings).toBeUndefined();
+  });
+
+  it("doesn't read a parent resource that can't show the change", () => {
+    const tools = [
+      { name: 'get_repository', inputSchema: o(['repo']) },
+      { name: 'add_repository_collaborator', inputSchema: o(['repo', 'user']) },
+      { name: 'remove_repository_collaborator', inputSchema: o(['repo', 'user']) },
+    ];
+    expect(byKey(planTools(tools)).add_repository_collaborator!.detectNoop).toBeUndefined();
+  });
+
+  it('only counts a later call as dependent when it is in the same scope (owner/repo)', async () => {
+    const { call, data, session } = await setup();
+    const n = data(await call('create_issue', { repo: 'A', title: 'a' })).number;
+    await call('add_issue_labels', { repo: 'B', issue_number: n, labels: ['p1'] }); // same number, another repo
+    expect(session.dependentsOf(session.journal[0]!)).toEqual([]);
+  });
+
+  it("doesn't cascade when the undo it was asked for is refused", async () => {
+    const { call, state, data } = await setup();
+    const n = data(await call('create_issue', { repo: 'r', title: 'a' })).number;
+    await call('add_issue_labels', { repo: 'r', issue_number: n, labels: ['p1'] });
+    state.issues.get(n)!.title = 'edited by someone else';
+    expect(data(await call('undogen_undo', { seq: 1, cascade: true }))).toMatchObject({ error: 'ToolConflictError' });
+    expect(state.issues.get(n)!.labels).toEqual(['p1']); // the label write was left alone
+  });
+
+  it('reports what a cascade undid', async () => {
+    const { call, data } = await setup();
+    const n = data(await call('create_issue', { repo: 'r', title: 'a' })).number;
+    await call('add_issue_labels', { repo: 'r', issue_number: n, labels: ['p1'] });
+    const out = data(await call('undogen_undo', { seq: 1, cascade: true }));
+    expect(out).toMatchObject({ undone: { seq: 1 }, alsoUndone: [{ seq: 2, tool: 'add_issue_labels' }] });
+  });
+
+  it('asks before a call whose flag makes it replace what undo cannot restore', async () => {
+    const { githubTools } = await import('./fixtures/github-mcp-tools.js');
+    const { ToolSession } = await import('../src/wrap/session.js');
+    const asked: string[] = [];
+    const session = await ToolSession.open({ plans: planTools(githubTools), call: async () => ({ content: [] }), approve: async (p) => (asked.push(p.reasons[0]!), true) });
+    await session.call('sub_issue_write', { method: 'add', owner: 'o', repo: 'r', issue_number: 2, sub_issue_id: 42 });
+    expect(asked).toEqual([]);
+    await session.call('sub_issue_write', { method: 'add', owner: 'o', repo: 'r', issue_number: 2, sub_issue_id: 42, replace_parent: true });
+    expect(asked).toEqual(["with replace_parent: true, sub_issue_write replaces something its undo can't put back"]);
+  });
+
+  it('names actions the way they are called, and previews which action undoes', async () => {
+    const { githubTools } = await import('./fixtures/github-mcp-tools.js');
+    const texts = planTools(githubTools).flatMap((p) => [...p.reasons, ...p.caveats]);
+    expect(texts.filter((t) => t.includes('#'))).toEqual([]);
+    expect(texts).toContain('undo calls sub_issue_write {method: "remove"} even if this call changed nothing');
+    const { call, data } = await setup();
+    expect(data(await call('undogen_preview', { tool: 'create_issue' }))).toMatchObject({ undo: 'update_issue', undoWith: { state: 'closed' } });
+  });
+});

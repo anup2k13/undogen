@@ -79,12 +79,14 @@ export async function runWrap(flags: WrapFlags, command: string[]): Promise<numb
       if (flags.seq !== undefined) {
         const seq = Number(flags.seq);
         if (!Number.isInteger(seq)) throw new WrapUsageError('--seq must be a number');
+        const undone: ToolEntry[] = [];
         try {
-          show(await session.undo(seq, { force: flags.force, cascade: flags.cascade }));
+          await session.undo(seq, { force: flags.force, cascade: flags.cascade, undone });
         } catch (err) {
           console.log(c.red(`  ✗ ${(err as Error).message}`));
           failedAny = true;
         }
+        undone.forEach(show); // the entry, and anything a cascade undid first
       } else {
         const after = flags.after !== undefined ? Number(flags.after) : undefined;
         if (after !== undefined && !Number.isInteger(after)) throw new WrapUsageError('--after must be a number');

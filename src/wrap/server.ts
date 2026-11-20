@@ -124,7 +124,14 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
     {
       name: 'undogen_undo_all',
       description: 'Undo every write of this session, newest first, or only those after a checkpoint ({ to }). Reports what could not be undone.',
-      inputSchema: { type: 'object', properties: { to: { type: 'integer', description: 'A checkpoint from undogen_checkpoint' }, force: { type: 'boolean' } } },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          to: { type: 'integer', description: 'A checkpoint from undogen_checkpoint' },
+          force: { type: 'boolean' },
+          cascade: { type: 'boolean', description: 'Also undo writes from other sessions that use what these created' },
+        },
+      },
       annotations: { title: 'Undo all', destructiveHint: true, openWorldHint: true },
     },
     {
@@ -174,10 +181,18 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
                   : 'Nothing to undo in this session',
             );
           }
-          return json({ undone: describeEntry(await session.undo(entry, { force: args.force === true, cascade: args.cascade === true })) });
+          const undone: ToolEntry[] = [];
+          await session.undo(entry, { force: args.force === true, cascade: args.cascade === true, undone });
+          const also = undone.filter((e) => e !== entry);
+          return json({ undone: describeEntry(entry), ...(also.length ? { alsoUndone: also.map(describeEntry) } : {}) });
         }
         case 'undogen_undo_all': {
-          const { undone, failed } = await session.undoAll({ force: args.force === true, after: typeof args.to === 'number' ? args.to : undefined, session: session.session });
+          const { undone, failed } = await session.undoAll({
+            force: args.force === true,
+            cascade: args.cascade === true,
+            after: typeof args.to === 'number' ? args.to : undefined,
+            session: session.session,
+          });
           return json({ undone: undone.map(describeEntry), failed: failed.map((f) => ({ ...describeEntry(f.entry), error: f.error.message })) });
         }
         case 'undogen_journal':
@@ -193,6 +208,8 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
             reversibility: plan.reversibility,
             strategy: plan.strategy,
             undo: plan.inverse?.tool ?? null,
+            // Fixed arguments of the undo call: for a multi-action tool, which action undoes this one.
+            ...(plan.inverse ? { undoWith: Object.fromEntries(Object.entries(plan.inverse.arguments).flatMap(([k, src]) => ('value' in src ? [[k, src.value]] : []))) } : {}),
             needsApproval: plan.reversibility === 'irreversible' || plan.reversibility === 'unknown',
             reasons: plan.reasons,
             caveats: plan.caveats,
