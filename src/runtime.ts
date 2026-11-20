@@ -133,11 +133,12 @@ export interface Conflict {
 
 /** The state an entry produced was changed by someone else; undoing would overwrite their change. */
 export class ConflictError extends UndoError {
-  constructor(entry: JournalEntry, public readonly conflicts: Conflict[], response?: HttpResult) {
+  constructor(entry: JournalEntry, public readonly conflicts: Conflict[], response?: HttpResult, suffix = '') {
     const what = conflicts.map((c) => `${c.field}: expected ${JSON.stringify(c.expected)}, found ${JSON.stringify(c.actual)}`).join('; ');
     super(
       `Undo of #${entry.seq} (${entry.operationId}) refused: the state it wrote has changed since (${what}). ` +
-        'Pass { force: true } to overwrite anyway.',
+        'Pass { force: true } to overwrite anyway.' +
+        suffix,
       entry,
       response,
     );
@@ -546,11 +547,19 @@ export class UndoableClient {
       if (!opts.cascade) throw new DependencyError(target, dependents, others);
       if (others.length) throw new DependencyError(target, others, [], true);
     }
+    // An entry that can't be undone at all is refused before its dependents are touched.
+    if (!target.inverse && target.plan.strategy !== 'no-side-effects' && !target.noop) {
+      target.undoError = `cannot be undone: ${target.inverseError}`;
+      target.status = 'failed';
+      await this.persist(target);
+      throw new UndoError(`Entry #${target.seq} (${target.operationId}) cannot be undone: ${target.inverseError}`, target);
+    }
     // Undo what depends on this entry first: its own conflict check then compares against the state those writes
-    // were undone to (a create edited later in the same session is cascaded back, not refused as changed). A conflict
-    // found after that leaves the dependents undone; the error says so.
+    // were undone to (a create edited later in the same session is cascaded back, not refused as changed). An error
+    // after that leaves the dependents undone; every such error says which.
     for (const d of [...dependents].reverse()) if (d.status !== 'undone') await this.undo(d, { ...opts, dependentsChecked: true });
     const cascaded = dependents.filter((d) => d.status === 'undone');
+    const alsoUndone = cascaded.length ? ` The writes that depended on it were already undone: ${cascaded.map((d) => `#${d.seq} ${d.operationId}`).join(', ')}.` : '';
 
     if (!target.inverse && target.plan.strategy === 'no-side-effects') {
       return this.finish(target, { status: 204, data: undefined, headers: {} });
@@ -586,7 +595,7 @@ export class UndoableClient {
           return this.conflict(target, [{ field: '(resource)', expected: 'exists', actual: `HTTP ${current.status}` }], current, cascaded);
         }
         if (current.status >= 300) {
-          throw new UndoError(`Undo of #${target.seq}: could not read current state (GET ${checkPath} -> HTTP ${current.status})`, target, current);
+          throw new UndoError(`Undo of #${target.seq}: could not read current state (GET ${checkPath} -> HTTP ${current.status})${alsoUndone && `.${alsoUndone}`}`, target, current);
         }
         const conflicts = compareExpected(target.check.expected, current.data, '', target.session);
         if (conflicts.length) return this.conflict(target, conflicts, current, cascaded);
@@ -611,13 +620,13 @@ export class UndoableClient {
     });
     target.undoResponse = res;
     if (res.status === 412) {
-      return this.conflict(target, [{ field: '(etag)', expected: headers['if-match'], actual: 'changed' }], res);
+      return this.conflict(target, [{ field: '(etag)', expected: headers['if-match'], actual: 'changed' }], res, cascaded);
     }
     if (res.status >= 400 && !(inverse.method === 'delete' && (res.status === 404 || res.status === 410))) {
       target.status = 'failed';
       target.undoError = `${inverse.method.toUpperCase()} ${inverse.path} -> HTTP ${res.status}`;
       await this.persist(target);
-      throw new UndoError(`Undo of #${target.seq} (${target.operationId}) failed: ${target.undoError}`, target, res);
+      throw new UndoError(`Undo of #${target.seq} (${target.operationId}) failed: ${target.undoError}${alsoUndone && `.${alsoUndone}`}`, target, res);
     }
 
     // A re-created resource has a new id: remember it, so later undos address it.
@@ -789,9 +798,7 @@ export class UndoableClient {
     target.status = 'conflict';
     target.undoError = 'state changed since the call';
     await this.persist(target);
-    const err = new ConflictError(target, conflicts, res);
-    if (cascaded.length) err.message += ` The writes that depended on it were already undone: ${cascaded.map((d) => `#${d.seq} ${d.operationId}`).join(', ')}.`;
-    throw err;
+    throw new ConflictError(target, conflicts, res, cascaded.length ? ` The writes that depended on it were already undone: ${cascaded.map((d) => `#${d.seq} ${d.operationId}`).join(', ')}.` : '');
   }
 
   /** List each child collection (and, recursively, each child's own collections) before a delete. */

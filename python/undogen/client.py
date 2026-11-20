@@ -69,11 +69,11 @@ class UndoError(UndogenError):
 class ConflictError(UndoError):
     """The state an entry produced was changed by someone else; undoing would overwrite their change."""
 
-    def __init__(self, entry: dict, conflicts: List[dict], response: Optional[dict] = None):
+    def __init__(self, entry: dict, conflicts: List[dict], response: Optional[dict] = None, suffix: str = ""):
         what = "; ".join(f"{c['field']}: expected {json.dumps(c['expected'])}, found {json.dumps(c['actual'])}" for c in conflicts)
         super().__init__(
             f"Undo of #{entry['seq']} ({entry['operationId']}) refused: the state it wrote has changed since ({what}). "
-            "Pass force=True to overwrite anyway.",
+            "Pass force=True to overwrite anyway." + suffix,
             entry,
             response,
         )
@@ -85,11 +85,13 @@ class DependencyError(UndoError):
         self,
         entry: dict,
         dependents: List[dict],
-        *,
-        others: Optional[List[dict]] = None,
+        others: Union[List[dict], bool, None] = None,
         cascade_refused: bool = False,
         other_sessions: bool = False,  # the earlier name of cascade_refused
     ):
+        # Also accepts the earlier (entry, dependents, other_sessions: bool) form.
+        if isinstance(others, bool):
+            cascade_refused, others = cascade_refused or others, None
         cascade_refused = cascade_refused or other_sessions
         def names(ds: List[dict], with_session: bool) -> str:
             return ", ".join(f"#{d['seq']} {d['operationId']}" + (f" (session {d.get('session')})" if with_session else "") for d in ds)
@@ -621,12 +623,24 @@ class UndoableClient:
             if others:
                 raise DependencyError(target, others, cascade_refused=True)
 
+        # An entry that can't be undone at all is refused before its dependents are touched.
+        if not target.get("inverse") and target["plan"]["strategy"] != "no-side-effects" and not target.get("noop"):
+            target["status"] = "failed"
+            target["undoError"] = f"cannot be undone: {target.get('inverseError')}"
+            self._persist(target)
+            raise UndoError(f"Entry #{target['seq']} ({target['operationId']}) cannot be undone: {target.get('inverseError')}", target)
         # Undo what depends on this entry first: its own conflict check then compares against the state those writes
-        # were undone to (a create edited later in the same session is cascaded back, not refused as changed).
+        # were undone to (a create edited later in the same session is cascaded back, not refused as changed). An error
+        # after that leaves the dependents undone; every such error says which.
         for d in reversed(dependents):
             if d["status"] != "undone":
                 self.undo(d, force=force, cascade=True, cascade_within=cascade_within, _dependents_checked=True)
         cascaded = [d for d in dependents if d["status"] == "undone"]
+        also_undone = (
+            " The writes that depended on it were already undone: " + ", ".join(f"#{d['seq']} {d['operationId']}" for d in cascaded) + "."
+            if cascaded
+            else ""
+        )
 
         if not target.get("inverse") and target["plan"]["strategy"] == "no-side-effects":
             return self._finish(target, {"status": 204, "data": None, "headers": {}})
@@ -656,7 +670,12 @@ class UndoableClient:
                         return self._finish(target, current)
                     return self._conflict(target, [{"field": "(resource)", "expected": "exists", "actual": f"HTTP {current['status']}"}], current, cascaded)
                 if current["status"] >= 300:
-                    raise UndoError(f"Undo of #{target['seq']}: could not read current state (GET {check_path} -> HTTP {current['status']})", target, current)
+                    raise UndoError(
+                        f"Undo of #{target['seq']}: could not read current state (GET {check_path} -> HTTP {current['status']})"
+                        + (f".{also_undone}" if also_undone else ""),
+                        target,
+                        current,
+                    )
                 conflicts = _compare(check["expected"], current["data"], "", target["session"])
                 if conflicts:
                     return self._conflict(target, conflicts, current, cascaded)
@@ -680,12 +699,14 @@ class UndoableClient:
         )
         target["undoResponse"] = res
         if res["status"] == 412:
-            return self._conflict(target, [{"field": "(etag)", "expected": headers.get("if-match"), "actual": "changed"}], res)
+            return self._conflict(target, [{"field": "(etag)", "expected": headers.get("if-match"), "actual": "changed"}], res, cascaded)
         if res["status"] >= 400 and not (inverse["method"] == "delete" and res["status"] in (404, 410)):
             target["status"] = "failed"
             target["undoError"] = f"{inverse['method'].upper()} {inverse['path']} -> HTTP {res['status']}"
             self._persist(target)
-            raise UndoError(f"Undo of #{target['seq']} ({target['operationId']}) failed: {target['undoError']}", target, res)
+            raise UndoError(
+                f"Undo of #{target['seq']} ({target['operationId']}) failed: {target['undoError']}" + (f".{also_undone}" if also_undone else ""), target, res
+            )
 
         identity = target.get("identity")
         if identity and inverse["method"] == "post":
@@ -824,11 +845,8 @@ class UndoableClient:
         target["status"] = "conflict"
         target["undoError"] = "state changed since the call"
         self._persist(target)
-        err = ConflictError(target, conflicts, res)
-        if cascaded:
-            note = ", ".join(f"#{d['seq']} {d['operationId']}" for d in cascaded)
-            err.args = (f"{err.args[0]} The writes that depended on it were already undone: {note}.",)
-        raise err
+        note = ", ".join(f"#{d['seq']} {d['operationId']}" for d in cascaded or [])
+        raise ConflictError(target, conflicts, res, f" The writes that depended on it were already undone: {note}." if note else "")
 
     def _record_id(self, entry: dict, param: str, old: Scalar, new: Scalar) -> None:
         for form in _id_forms(old):  # every exact spelling

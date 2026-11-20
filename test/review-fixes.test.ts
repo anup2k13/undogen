@@ -475,3 +475,32 @@ describe('review fixes (round 6)', () => {
     expect(err.message).toMatch(/The writes that depended on it were already undone: #2 createComment\./);
   });
 });
+
+describe('review fixes (round 7)', () => {
+  it('refuses an entry that cannot be undone before touching its dependents', async () => {
+    const s = parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'x', version: '1' },
+      paths: {
+        '/boards': { post: { operationId: 'createBoard', responses: { '201': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } } } } } },
+        '/boards/{boardId}': { delete: { operationId: 'deleteBoard', responses: {} } },
+        '/boards/{boardId}/cards': { post: { operationId: 'createCard', responses: { '201': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } } } } } },
+        '/boards/{boardId}/cards/{cardId}': { delete: { operationId: 'deleteCard', responses: {} } },
+      },
+    });
+    let n = 0;
+    const deletes: string[] = [];
+    const f: typeof fetch = async (u, init) => {
+      if (init?.method === 'DELETE') deletes.push(new URL(String(u)).pathname);
+      return init?.method === 'POST' ? json({ id: `obj_${++n}abc` }, 201) : new Response(null, { status: 204 });
+    };
+    const c = new UndoableClient({ spec: s, baseUrl: 'http://x', fetch: f });
+    const board = ((await c.call('createBoard', {})).data as { id: string }).id;
+    await c.call('createCard', { params: { boardId: board } });
+    // The board's inverse couldn't be worked out (as when a response lacks the id).
+    c.journal[0]!.inverse = null;
+    c.journal[0]!.inverseError = 'no id in the response';
+    await expect(c.undo(1, { cascade: true })).rejects.toThrow(/cannot be undone: no id in the response/);
+    expect(deletes).toEqual([]); // the card was left alone
+  });
+});

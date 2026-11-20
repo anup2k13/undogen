@@ -90,9 +90,9 @@ export class ToolDependencyError extends ToolUndoError {
 }
 
 export class ToolConflictError extends ToolUndoError {
-  constructor(entry: ToolEntry, readonly conflicts: Array<{ field: string; expected: unknown; actual: unknown }>) {
+  constructor(entry: ToolEntry, readonly conflicts: Array<{ field: string; expected: unknown; actual: unknown }>, suffix = '') {
     const what = conflicts.map((c) => `${c.field}: expected ${JSON.stringify(c.expected)}, found ${JSON.stringify(c.actual)}`).join('; ');
-    super(`Undo of #${entry.seq} (${entry.tool}) refused: what it wrote has changed since (${what}). Pass force to overwrite anyway.`, entry);
+    super(`Undo of #${entry.seq} (${entry.tool}) refused: what it wrote has changed since (${what}). Pass force to overwrite anyway.${suffix}`, entry);
     this.name = 'ToolConflictError';
   }
 }
@@ -354,12 +354,13 @@ export class ToolSession {
     // were undone to (an item created and then edited in the same session is cascaded back, not refused as changed).
     for (const d of [...dependents].reverse()) if (d.status !== 'undone') await this.undo(d, { ...opts, dependentsChecked: true });
     const cascaded = dependents.filter((d) => d.status === 'undone');
+    const alsoUndone = cascaded.length ? ` The calls that depended on it were already undone: ${cascaded.map((d) => `#${d.seq} ${d.tool}`).join(', ')}.` : '';
 
     if (entry.check && !opts.force && this.options.checkConflicts !== false) {
       const read = await this.options.call(entry.check.tool, entry.check.arguments);
       if (read.isError) {
         // Tool errors carry no status code: "not found" can't be told from an outage or a permissions error, so don't guess.
-        throw new ToolUndoError(`Undo of #${entry.seq}: could not read the current state (${entry.check.tool}: ${errorText(read)}). Pass force to undo without checking.`, entry);
+        throw new ToolUndoError(`Undo of #${entry.seq}: could not read the current state (${entry.check.tool}: ${errorText(read)}). Pass force to undo without checking.${alsoUndone}`, entry);
       }
       const state = resultData(read);
       const conflicts = Object.entries(entry.check.expected)
@@ -369,9 +370,7 @@ export class ToolSession {
         entry.status = 'conflict';
         entry.undoError = 'changed since the call';
         await this.store.save(entry);
-        const err = new ToolConflictError(entry, conflicts);
-        if (cascaded.length) err.message += ` The calls that depended on it were already undone: ${cascaded.map((d) => `#${d.seq} ${d.tool}`).join(', ')}.`;
-        throw err;
+        throw new ToolConflictError(entry, conflicts, alsoUndone);
       }
     }
 
@@ -380,7 +379,7 @@ export class ToolSession {
       entry.status = 'failed';
       entry.undoError = `${entry.inverse.tool} failed: ${errorText(res)}`;
       await this.store.save(entry);
-      throw new ToolUndoError(`Undo of #${entry.seq} (${entry.tool}) failed: ${entry.undoError}`, entry);
+      throw new ToolUndoError(`Undo of #${entry.seq} (${entry.tool}) failed: ${entry.undoError}${alsoUndone && `.${alsoUndone}`}`, entry);
     }
     opts.undone?.push(entry);
     return this.finish(entry);
