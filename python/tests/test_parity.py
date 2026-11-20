@@ -91,4 +91,4 @@ def test_number_ids_hash_like_javascript():
     from undogen.client import _body_refs, _js_str, _ref_hash
 
     assert [_js_str(v) for v in (12345.0, 12345, 1.5, True, None, "x")] == ["12345", "12345", "1.5", "true", "null", "x"]
-    assert _body_refs({"boardId": 12345.0}, "s") == [_ref_hash("12345", "s")]
+    assert _ref_hash("12345", "s") in _body_refs({"boardId": 12345.0}, "s")  # the JavaScript form (plus older str() forms)

@@ -71,10 +71,16 @@ export class ToolUndoError extends Error {
 }
 
 export class ToolDependencyError extends ToolUndoError {
-  constructor(entry: ToolEntry, readonly dependents: ToolEntry[], otherSessions = false) {
+  /** As DependencyError: direct dependents, or with `cascadeRefused` the other sessions' calls a cascade would reach. */
+  constructor(entry: ToolEntry, readonly dependents: ToolEntry[], otherSessions: ToolEntry[] = [], cascadeRefused = false) {
+    const list = (ds: ToolEntry[], withSession: boolean) => ds.map((d) => `#${d.seq} ${d.tool}${withSession ? ` (session ${d.session})` : ''}`).join(', ');
     super(
-      `Undo of #${entry.seq} (${entry.tool}) refused: later calls use what it created (${dependents.map((d) => `#${d.seq} ${d.tool}${otherSessions ? ` (session ${d.session})` : ''}`).join(', ')}). ` +
-        (otherSessions ? "They belong to other sessions, which cascade doesn't touch: undo those sessions' calls first." : 'Undo those first, or pass cascade to undo them too.'),
+      cascadeRefused
+        ? `Undo of #${entry.seq} (${entry.tool}) refused: later calls from other sessions use what it created (${list(dependents, true)}). Cascade doesn't touch other sessions: undo those sessions' calls first.`
+        : `Undo of #${entry.seq} (${entry.tool}) refused: later calls use what it created (${list(dependents, false)}). ` +
+            (otherSessions.length
+              ? `Undo those first. (A cascade would stop at calls from other sessions: ${list(otherSessions, true)}.)`
+              : 'Undo those first, or pass cascade to undo them too.'),
       entry,
     );
     this.name = 'ToolDependencyError';
@@ -312,7 +318,10 @@ export class ToolSession {
    * Undo one entry (default: this session's most recent active one). With `cascade`, later calls that use
    * what it created are undone first, after its own checks pass. `undone` collects every entry undone.
    */
-  async undo(target?: number | ToolEntry, opts: { force?: boolean; cascade?: boolean; cascadeWithin?: string; undone?: ToolEntry[] } = {}): Promise<ToolEntry> {
+  async undo(
+    target?: number | ToolEntry,
+    opts: { force?: boolean; cascade?: boolean; cascadeWithin?: string; undone?: ToolEntry[]; dependentsChecked?: boolean } = {},
+  ): Promise<ToolEntry> {
     const entry =
       typeof target === 'object'
         ? target
@@ -327,10 +336,11 @@ export class ToolSession {
       return this.finish(entry);
     }
     const dependents = this.dependentsOf(entry);
-    // Look at everything a cascade would reach, not only direct dependents, before undoing anything.
-    const others = opts.cascadeWithin !== undefined ? this.allDependentsOf(entry).filter((d) => d.session !== opts.cascadeWithin) : [];
-    if (others.length) throw new ToolDependencyError(entry, others, true);
-    if (dependents.length && !opts.cascade) throw new ToolDependencyError(entry, dependents);
+    // Look at everything a cascade would reach, not only direct dependents, before undoing anything (once, at the top).
+    const others =
+      dependents.length && opts.cascadeWithin !== undefined && !opts.dependentsChecked ? this.allDependentsOf(entry).filter((d) => d.session !== opts.cascadeWithin) : [];
+    if (dependents.length && !opts.cascade) throw new ToolDependencyError(entry, dependents, others);
+    if (others.length) throw new ToolDependencyError(entry, others, [], true);
     if (!entry.inverse) {
       entry.status = 'failed';
       entry.undoError = `cannot be undone: ${entry.inverseError ?? describeNoInverse(entry)}`;
@@ -356,7 +366,7 @@ export class ToolSession {
       }
     }
     // Only now, with this entry's own checks passed, undo what depends on it.
-    for (const d of [...dependents].reverse()) if (d.status !== 'undone') await this.undo(d, opts);
+    for (const d of [...dependents].reverse()) if (d.status !== 'undone') await this.undo(d, { ...opts, dependentsChecked: true });
 
     const res = await this.options.call(entry.inverse.tool, entry.inverse.arguments);
     if (res.isError) {

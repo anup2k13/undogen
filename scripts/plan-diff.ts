@@ -16,7 +16,8 @@ import { ensureSpecs } from './public-specs.js';
 const { values } = parseArgs({ options: { ref: { type: 'string', default: 'HEAD' }, cache: { type: 'string', default: '.cache/specs' }, all: { type: 'boolean' } } });
 const root = resolve(new URL('..', import.meta.url).pathname);
 const cache = resolve(root, values.cache!);
-const files = await ensureSpecs(cache);
+const { entries: files, failed: notDownloaded } = await ensureSpecs(cache);
+for (const name of notDownloaded) console.log(`warning: ${name} could not be downloaded and is NOT compared in this run`);
 
 /** Every plan field that matters, per "<api> <operationId>". */
 const dumpScript = `

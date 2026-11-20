@@ -147,12 +147,20 @@ export class ConflictError extends UndoError {
 
 /** Later entries use what this entry created; undo them first (or pass { cascade: true }). */
 export class DependencyError extends UndoError {
-  /** `otherSessions`: cascade was asked for, but these dependents belong to other sessions, which it never touches. */
-  constructor(entry: JournalEntry, public readonly dependents: JournalEntry[], otherSessions = false) {
+  /**
+   * `dependents`: the direct dependents, or with `cascadeRefused` the other sessions' writes a cascade would reach.
+   * `otherSessions` (without cascade): writes from other sessions further down, which a cascade would also stop at.
+   */
+  constructor(entry: JournalEntry, public readonly dependents: JournalEntry[], otherSessions: JournalEntry[] = [], cascadeRefused = false) {
+    const list = (ds: JournalEntry[], withSession: boolean) => ds.map((d) => `#${d.seq} ${d.operationId}${withSession ? ` (session ${d.session})` : ''}`).join(', ');
     super(
-      `Undo of #${entry.seq} (${entry.operationId}) would orphan later writes that use it: ` +
-        dependents.map((d) => `#${d.seq} ${d.operationId}${otherSessions ? ` (session ${d.session})` : ''}`).join(', ') +
-        (otherSessions ? ". They belong to other sessions, which cascade doesn't touch: undo those sessions' writes first." : '. Undo those first, or pass { cascade: true }.'),
+      cascadeRefused
+        ? `Undo of #${entry.seq} (${entry.operationId}) would orphan later writes from other sessions: ${list(dependents, true)}. ` +
+            "Cascade doesn't touch other sessions: undo those sessions' writes first."
+        : `Undo of #${entry.seq} (${entry.operationId}) would orphan later writes that use it: ${list(dependents, false)}. ` +
+            (otherSessions.length
+              ? `Undo those first. (A cascade would stop at writes from other sessions: ${list(otherSessions, true)}.)`
+              : 'Undo those first, or pass { cascade: true }.'),
       entry,
     );
     this.name = 'DependencyError';
@@ -285,6 +293,8 @@ export interface UndoOptions {
   cascade?: boolean;
   /** With cascade, only undo dependents made by this session; dependents from other sessions refuse the undo. */
   cascadeWithin?: string;
+  /** @internal Set on a cascade's own recursive undos: the top-level call already checked every dependent. */
+  dependentsChecked?: boolean;
 }
 
 /**
@@ -526,17 +536,24 @@ export class UndoableClient {
 
     const dependents = this.dependentsOf(target);
     if (dependents.length) {
-      // Look at everything a cascade would reach, not only direct dependents, before undoing anything.
-      const others = opts.cascadeWithin !== undefined ? this.allDependentsOf(target).filter((d) => d.session !== opts.cascadeWithin) : [];
-      if (others.length) throw new DependencyError(target, others, true);
-      if (!opts.cascade) throw new DependencyError(target, dependents);
-      for (const d of [...dependents].reverse()) if (d.status !== 'undone') await this.undo(d, opts);
+      // Look at everything a cascade would reach, not only direct dependents, before undoing anything
+      // (once, at the top: the cascade's own recursive undos skip it).
+      const others =
+        opts.cascadeWithin !== undefined && !opts.dependentsChecked ? this.allDependentsOf(target).filter((d) => d.session !== opts.cascadeWithin) : [];
+      if (!opts.cascade) throw new DependencyError(target, dependents, others);
+      if (others.length) throw new DependencyError(target, others, [], true);
     }
+    // Undo what depends on this entry: only once this entry's own checks have passed, so a refusal leaves everything as it was.
+    const cascade = async () => {
+      for (const d of [...dependents].reverse()) if (d.status !== 'undone') await this.undo(d, { ...opts, dependentsChecked: true });
+    };
 
     if (!target.inverse && target.plan.strategy === 'no-side-effects') {
+      await cascade();
       return this.finish(target, { status: 204, data: undefined, headers: {} });
     }
     if (target.noop) {
+      await cascade();
       target.undoWarnings = [...(target.undoWarnings ?? []), 'the call changed nothing, so there was nothing to undo'];
       return this.finish(target, { status: 204, data: undefined, headers: {} });
     }
@@ -562,6 +579,7 @@ export class UndoableClient {
         if (current.status === 404 || current.status === 410) {
           if (inverse.method === 'delete') {
             target.undoWarnings = [...(target.undoWarnings ?? []), 'the resource was already gone'];
+            await cascade();
             return this.finish(target, current);
           }
           return this.conflict(target, [{ field: '(resource)', expected: 'exists', actual: `HTTP ${current.status}` }], current);
@@ -572,10 +590,13 @@ export class UndoableClient {
         const conflicts = compareExpected(target.check.expected, current.data, '', target.session);
         if (conflicts.length) return this.conflict(target, conflicts, current);
       }
-      const etag = current.headers['etag'];
+      // Undoing dependents can change this resource's ETag: only send If-Match when nothing was cascaded.
+      const etag = dependents.length ? undefined : current.headers['etag'];
       // If-Match uses strong comparison (RFC 9110): a weak W/ validator would always fail with 412.
       if (etag && !etag.startsWith('W/') && checkPath === inverse.path) headers['if-match'] = etag;
     }
+
+    await cascade();
 
     const idemHeader = this.options.idempotencyHeader ?? 'Idempotency-Key';
     if (idemHeader) headers[idemHeader] = `undogen-${target.session}-${target.seq}-undo`;

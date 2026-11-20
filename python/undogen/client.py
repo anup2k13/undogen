@@ -81,14 +81,18 @@ class ConflictError(UndoError):
 
 
 class DependencyError(UndoError):
-    def __init__(self, entry: dict, dependents: List[dict], other_sessions: bool = False):
-        names = ", ".join(f"#{d['seq']} {d['operationId']}" + (f" (session {d.get('session')})" if other_sessions else "") for d in dependents)
-        hint = (
-            "They belong to other sessions, which cascade doesn't touch: undo those sessions' writes first."
-            if other_sessions
-            else "Undo those first, or pass cascade=True."
-        )
-        super().__init__(f"Undo of #{entry['seq']} ({entry['operationId']}) would orphan later writes that use it: {names}. {hint}", entry)
+    def __init__(self, entry: dict, dependents: List[dict], others: Optional[List[dict]] = None, cascade_refused: bool = False):
+        def names(ds: List[dict], with_session: bool) -> str:
+            return ", ".join(f"#{d['seq']} {d['operationId']}" + (f" (session {d.get('session')})" if with_session else "") for d in ds)
+
+        head = f"Undo of #{entry['seq']} ({entry['operationId']}) would orphan later writes"
+        if cascade_refused:
+            message = f"{head} from other sessions: {names(dependents, True)}. Cascade doesn't touch other sessions: undo those sessions' writes first."
+        elif others:
+            message = f"{head} that use it: {names(dependents, False)}. Undo those first. (A cascade would stop at writes from other sessions: {names(others, True)}.)"
+        else:
+            message = f"{head} that use it: {names(dependents, False)}. Undo those first, or pass cascade=True."
+        super().__init__(message, entry)
         self.dependents = dependents
 
 
@@ -221,6 +225,24 @@ def _js_str(v: Any) -> str:
     return str(v)
 
 
+def _id_forms(v: Any) -> List[str]:
+    """
+    The spellings of an id that journals may hold, all checked when matching: the JavaScript form, the
+    JavaScript-rounded double for integers above 2**53 (what the TypeScript runtime sees), and the str() form
+    earlier Python versions wrote. Values too large to write at all have none.
+    """
+    forms: List[str] = []
+    try:
+        forms.append(_js_str(v))
+        if isinstance(v, int) and not isinstance(v, bool) and abs(v) > 2**53:
+            forms.append(_js_number(float(v)))
+        if isinstance(v, float):
+            forms.append(str(v))
+    except (ValueError, OverflowError):
+        pass  # e.g. an integer over Python's 4300-digit str() limit
+    return list(dict.fromkeys(forms))
+
+
 def _id_like(v: str) -> bool:
     """A value that looks like an identifier rather than a word: 8+ characters with a digit, dash or underscore."""
     return len(v) >= 8 and any(c in "0123456789-_" for c in v)
@@ -237,8 +259,10 @@ def _body_refs(body: Any, salt: str) -> Optional[List[str]]:
     def walk(v: Any, depth: int) -> None:
         if depth > 3 or v is None or isinstance(v, bool):
             return
-        if isinstance(v, (str, int, float)) and len(_js_str(v)) >= 4:
-            out[_ref_hash(_js_str(v), salt)] = None
+        if isinstance(v, (str, int, float)):
+            for form in _id_forms(v):
+                if len(form) >= 4:
+                    out[_ref_hash(form, salt)] = None
         elif isinstance(v, list):
             for x in v:
                 walk(x, depth + 1)
@@ -254,7 +278,7 @@ def _body_mentions(body: Any, ids: set, depth: int = 0) -> bool:
     if depth > 3 or body is None or isinstance(body, bool):
         return False
     if isinstance(body, (str, int, float)):
-        return _js_str(body) in ids
+        return any(f in ids for f in _id_forms(body))
     if isinstance(body, list):
         return any(_body_mentions(x, ids, depth + 1) for x in body)
     if isinstance(body, dict):
@@ -512,7 +536,7 @@ class UndoableClient:
         if not created:
             return []
         param, value = created["param"], created["value"]
-        ids = {_js_str(value), _js_str(self.remap_id(param, value))}
+        ids = {*_id_forms(value), *_id_forms(self.remap_id(param, value))}
         # In the body too (POST /comments {todoId}), but only for ids that can't be mistaken for small numbers;
         # a name the caller chose only when it looks like an id (PROJ-8f3a2c), not a word ("test", "prod").
         body_ids = {i for i in ids if (_id_like(i) if created.get("chosen") else len(i) >= 4)}
@@ -524,7 +548,7 @@ class UndoableClient:
             and e["plan"]["strategy"] != "no-side-effects"
             and e.get("inverse") is not None
             and (
-                _js_str((e["request"].get("params") or {}).get(param)) in ids
+                any(f in ids for f in _id_forms((e["request"].get("params") or {}).get(param)))
                 or (body_ids and _body_mentions(e["request"].get("body"), body_ids))
                 or (body_ids and any(_ref_hash(i, e.get("session", "")) in (e["request"].get("bodyRefs") or []) for i in body_ids))
             )
@@ -542,7 +566,15 @@ class UndoableClient:
             queue.extend(self.dependents_of(d))
         return sorted(seen.values(), key=lambda e: e["seq"])
 
-    def undo(self, entry: Union[dict, int, None] = None, *, force: bool = False, cascade: bool = False, cascade_within: Optional[str] = None) -> dict:
+    def undo(
+        self,
+        entry: Union[dict, int, None] = None,
+        *,
+        force: bool = False,
+        cascade: bool = False,
+        cascade_within: Optional[str] = None,
+        _dependents_checked: bool = False,
+    ) -> dict:
         """Undo one entry (or seq). Default: the most recent entry not yet undone."""
         if isinstance(entry, int):
             target = next((e for e in self.journal if e["seq"] == entry), None)
@@ -560,19 +592,28 @@ class UndoableClient:
         dependents = self.dependents_of(target)
         if dependents:
             # With cascade_within, a dependent from another session anywhere a cascade would reach refuses the undo
-            # before anything is undone.
-            others = [d for d in self.all_dependents_of(target) if d.get("session") != cascade_within] if cascade_within is not None else []
-            if others:
-                raise DependencyError(target, others, other_sessions=True)
+            # before anything is undone (checked once, at the top).
+            others = (
+                [d for d in self.all_dependents_of(target) if d.get("session") != cascade_within]
+                if cascade_within is not None and not _dependents_checked
+                else []
+            )
             if not cascade:
-                raise DependencyError(target, dependents)
+                raise DependencyError(target, dependents, others=others)
+            if others:
+                raise DependencyError(target, others, cascade_refused=True)
+
+        def cascade_dependents() -> None:
+            # Only once this entry's own checks have passed, so a refusal leaves everything as it was.
             for d in reversed(dependents):
                 if d["status"] != "undone":
-                    self.undo(d, force=force, cascade=True, cascade_within=cascade_within)
+                    self.undo(d, force=force, cascade=True, cascade_within=cascade_within, _dependents_checked=True)
 
         if not target.get("inverse") and target["plan"]["strategy"] == "no-side-effects":
+            cascade_dependents()
             return self._finish(target, {"status": 204, "data": None, "headers": {}})
         if target.get("noop"):
+            cascade_dependents()
             target.setdefault("undoWarnings", []).append("the call changed nothing, so there was nothing to undo")
             return self._finish(target, {"status": 204, "data": None, "headers": {}})
         if not target.get("inverse"):
@@ -595,6 +636,7 @@ class UndoableClient:
                 if current["status"] in (404, 410):
                     if inverse["method"] == "delete":
                         target.setdefault("undoWarnings", []).append("the resource was already gone")
+                        cascade_dependents()
                         return self._finish(target, current)
                     return self._conflict(target, [{"field": "(resource)", "expected": "exists", "actual": f"HTTP {current['status']}"}], current)
                 if current["status"] >= 300:
@@ -602,11 +644,13 @@ class UndoableClient:
                 conflicts = _compare(check["expected"], current["data"], "", target["session"])
                 if conflicts:
                     return self._conflict(target, conflicts, current)
-            etag = current["headers"].get("etag")
+            # Undoing dependents can change this resource's ETag: only send If-Match when nothing is cascaded.
+            etag = None if dependents else current["headers"].get("etag")
             # If-Match uses strong comparison: a weak W/ validator would always fail with 412.
             if etag and not etag.startswith("W/") and check_path == inverse["path"]:
                 headers["if-match"] = etag
 
+        cascade_dependents()
         if self.idempotency_header:
             headers[str(self.idempotency_header)] = f"undogen-{target['session']}-{target['seq']}-undo"
         target["undoAttempts"] = target.get("undoAttempts", 0) + 1
@@ -673,7 +717,7 @@ class UndoableClient:
         for _ in range(32):
             known = self._id_map.get(param, {})
             # Journals written before ids were keyed JavaScript-style used str(): look both up.
-            nxt = known.get(_js_str(cur), known.get(str(cur)))
+            nxt = next((known[f] for f in _id_forms(cur) if f in known), None)
             if nxt is None:
                 return cur
             cur = nxt
@@ -766,8 +810,9 @@ class UndoableClient:
         raise ConflictError(target, conflicts, res)
 
     def _record_id(self, entry: dict, param: str, old: Scalar, new: Scalar) -> None:
-        entry.setdefault("idMap", {}).setdefault(param, {})[_js_str(old)] = new
-        self._id_map.setdefault(param, {})[_js_str(old)] = new
+        for form in _id_forms(old):  # every spelling, so either runtime finds it
+            entry.setdefault("idMap", {}).setdefault(param, {})[form] = new
+            self._id_map.setdefault(param, {})[form] = new
 
     def _remap_params(self, params: Dict[str, Scalar]) -> Dict[str, Scalar]:
         return {k: self.remap_id(k, v) for k, v in params.items()}

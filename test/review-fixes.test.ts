@@ -393,7 +393,7 @@ describe('review fixes (round 4: sessions and chosen ids)', () => {
 
     const resumedA = await UndoableClient.open({ ...opts, session: a.session }); // sees B's write
     const [undo] = toolDefinitions(resumedA, todo.operations, { only: [] }).filter((x) => x.name === 'undogen_undo');
-    await expect(undo!.execute({ seq: 1, cascade: true })).rejects.toThrow(/belong to other sessions, which cascade doesn't touch/); // an agent can't cascade into B either
+    await expect(undo!.execute({ seq: 1, cascade: true })).rejects.toThrow(/later writes from other sessions: #2 createComment \(session .+\)\. Cascade doesn't touch other sessions/); // an agent can't cascade into B either
   });
 
   it("matches a chosen name in bodies when it looks like an id, but not a word", async () => {
@@ -451,7 +451,19 @@ describe('review fixes (round 5)', () => {
     const resumed = await UndoableClient.open({ ...opts, session: a.session });
     const err = await resumed.undo(1, { cascade: true, cascadeWithin: a.session }).catch((e) => e);
     expect(err).toBeInstanceOf(DependencyError);
-    expect(err.message).toMatch(/#4 createTask \(session .+\)\. They belong to other sessions/);
+    expect(err.message).toMatch(/later writes from other sessions: #4 createTask \(session .+\)\. Cascade doesn't touch other sessions/);
     expect(deletes).toEqual([]); // nothing was undone halfway
+  });
+});
+
+describe('review fixes (round 6)', () => {
+  it("doesn't cascade when the entry's own undo then conflicts", async () => {
+    const c = new UndoableClient({ spec: todo, baseUrl: server.url });
+    const t = ((await c.call('createTodo', { body: { title: 'parent' } })).data as { id: string }).id;
+    await c.call('createComment', { params: { todoId: t }, body: { text: 'child' } });
+    await new UndoableClient({ spec: todo, baseUrl: server.url }).call('updateTodo', { params: { todoId: t }, body: { title: 'edited by someone else' } });
+    await expect(c.undo(1, { cascade: true })).rejects.toBeInstanceOf(ConflictError);
+    expect((await fetch(`${server.url}/todos/${t}/comments`).then((r) => r.json())) as unknown[]).toHaveLength(1); // the comment was left alone
+    expect(c.journal[1]!.status).toBe('active');
   });
 });

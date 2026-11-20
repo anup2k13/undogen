@@ -5,7 +5,7 @@
  *
  *   npx tsx scripts/audit-plans.ts [--cache .cache/specs] [--refresh]
  *
- * Exits 1 if anything is flagged. Runs weekly in CI against the latest specs.
+ * Exits 1 if anything is flagged or a spec could not be downloaded or loaded. Runs weekly in CI against the latest specs.
  */
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -14,7 +14,7 @@ import { ensureSpecs, specLocation, specName } from './public-specs.js';
 
 const { values } = parseArgs({ options: { cache: { type: 'string', default: '.cache/specs' }, refresh: { type: 'boolean' } } });
 const dir = resolve(new URL('..', import.meta.url).pathname, values.cache!);
-const files = await ensureSpecs(dir, values.refresh);
+const { entries: files, failed: notDownloaded } = await ensureSpecs(dir, values.refresh);
 
 /** Words an operation name must contain (any one) for a strategy to be plausible. */
 const EXPECT: Array<{ when: (p: InversePlan) => boolean; label: string; words: RegExp }> = [
@@ -33,18 +33,20 @@ const EXPECT: Array<{ when: (p: InversePlan) => boolean; label: string; words: R
 const NEVER_REVERSIBLE = /^(send|exec|execute|proxy|charge|pay|transfer|refund|dispatch|deliver|notify|broadcast)$/;
 
 let flagged = 0;
-let failedToLoad = 0;
+let failedToLoad = notDownloaded.length;
+for (const name of notDownloaded) console.log(`${name}: could not be downloaded, not audited`);
 for (const entry of files) {
   const file = specName(entry);
-  let analysis;
+  let spec;
   try {
-    analysis = analyze(await loadSpec(specLocation(dir, entry)));
+    spec = await loadSpec(specLocation(dir, entry));
   } catch (err) {
-    // One spec that can't be loaded (a rate-limited download) shouldn't stop the audit of the others.
+    // One spec that can't be loaded shouldn't stop the audit of the others.
     console.log(`${file}: could not load: ${(err as Error).message}`);
     failedToLoad++;
     continue;
   }
+  const analysis = analyze(spec); // an analyzer crash is a bug: let it fail the run as one
   for (const p of analysis.plans) {
     const words = tokenize(p.operationId.split('/').pop() ?? p.operationId);
     for (const e of EXPECT) {

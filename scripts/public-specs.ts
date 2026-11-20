@@ -1,5 +1,5 @@
 /** Public API descriptions used by plan-diff, audit-plans and the weekly workflow. */
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { loadSpec } from '../src/index.js';
 
@@ -27,30 +27,45 @@ export const specLocation = (dir: string, entry: string) => join(dir, entry);
 /** The API name of an entry returned by ensureSpecs ("github.json", "digitalocean/DigitalOcean-public.v2.yaml"). */
 export const specName = (entry: string) => entry.split('/')[0]!.split('.')[0]!;
 
-/** Mirror a multi-file spec: load it from its URL once, saving every fetched document under `out` by relative path. */
-async function mirror(url: string, out: string): Promise<string> {
+/**
+ * Mirror a multi-file spec: load it from its URL once, saving every fetched document under its requested path
+ * relative to the root's directory. Written to a temporary directory and moved into place only when the whole
+ * spec loaded, so a failed download never leaves a partial copy that later runs would take for complete.
+ */
+async function mirror(url: string, out: string): Promise<void> {
   const base = new URL('./', url).href;
-  rmSync(out, { recursive: true, force: true });
-  await loadSpec(url, {
-    fetch: async (u, init) => {
-      const res = await fetch(u, init);
-      const href = String(u);
-      if (res.ok && href.startsWith(base)) {
-        const file = join(out, decodeURIComponent(href.slice(base.length)));
-        mkdirSync(dirname(file), { recursive: true });
-        writeFileSync(file, await res.clone().text());
-      }
-      return res;
-    },
-  });
-  return url.slice(base.length);
+  const tmp = `${out}.partial`;
+  rmSync(tmp, { recursive: true, force: true });
+  try {
+    await loadSpec(url, {
+      // Follow redirects here (this is our own trusted list) so each document is saved under the URL that was asked for.
+      fetch: async (u) => {
+        const href = String(u);
+        if (!href.startsWith(base)) throw new Error(`${href} is outside ${base}: it can't be mirrored`);
+        const rel = decodeURIComponent(href.slice(base.length));
+        if (rel.split('/').some((seg) => seg === '..' || seg === '.')) throw new Error(`${href}: unsafe path`);
+        const res = await fetch(href);
+        if (res.ok) {
+          const file = join(tmp, rel);
+          mkdirSync(dirname(file), { recursive: true });
+          writeFileSync(file, await res.clone().text());
+        }
+        return res;
+      },
+    });
+    rmSync(out, { recursive: true, force: true });
+    renameSync(tmp, out);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 /**
- * Download any spec missing from `dir` (or all of them with `refresh`). Returns entries relative to `dir`:
- * use specLocation(dir, entry) to load one and specName(entry) to name it.
+ * Download any spec missing from `dir` (or all of them with `refresh`). Returns entries relative to `dir`
+ * (load one with specLocation(dir, entry), name it with specName(entry)) and the names of specs that could
+ * not be downloaded, which callers must report: they are left out of the run.
  */
-export async function ensureSpecs(dir: string, refresh = false): Promise<string[]> {
+export async function ensureSpecs(dir: string, refresh = false): Promise<{ entries: string[]; failed: string[] }> {
   mkdirSync(dir, { recursive: true });
   for (const [name, url] of Object.entries(PUBLIC_SPECS)) {
     const file = join(dir, fileFor(name));
@@ -61,6 +76,7 @@ export async function ensureSpecs(dir: string, refresh = false): Promise<string[
     writeFileSync(file, await res.text());
   }
   const remote: string[] = [];
+  const failed: string[] = [];
   for (const [name, url] of Object.entries(REMOTE_SPECS)) {
     const root = url.slice(new URL('./', url).href.length);
     if (!existsSync(join(dir, name, root)) || refresh) {
@@ -70,10 +86,11 @@ export async function ensureSpecs(dir: string, refresh = false): Promise<string[
       } catch (err) {
         // A failed mirror leaves this spec out of the run (said loudly), not the others.
         console.error(`could not download ${name}: ${(err as Error).message}; it is left out of this run`);
+        failed.push(name);
         continue;
       }
     }
     remote.push(`${name}/${root}`);
   }
-  return [...Object.keys(PUBLIC_SPECS).map(fileFor), ...remote];
+  return { entries: [...Object.keys(PUBLIC_SPECS).map(fileFor), ...remote], failed };
 }

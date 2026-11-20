@@ -504,3 +504,16 @@ def test_ids_stay_exact_and_old_id_maps_still_resolve(bundle_path):
     c = UndoableClient(bundle_path, "http://127.0.0.1:1")
     c._id_map = {"todoId": {"12345.0": "t9"}}  # written by an older version with str()
     assert c.remap_id("todoId", 12345.0) == "t9"
+
+
+def test_every_spelling_of_an_id_is_matched(bundle_path):
+    from undogen.client import _body_refs, _ref_hash
+
+    big = 1152921504606846977
+    refs = _body_refs({"boardId": big}, "s")
+    assert _ref_hash(str(big), "s") in refs and _ref_hash("1152921504606847000", "s") in refs  # exact, and as TypeScript reads it
+    _body_refs({"n": 10**5000}, "s")  # past str()'s digit limit: no crash (it has no spelling to hash)
+    assert _ref_hash("12345.0", "s") in _body_refs({"id": 12345.0}, "s")  # what earlier versions wrote
+    c = UndoableClient(bundle_path, "http://127.0.0.1:1")
+    c._id_map = {"todoId": {"1152921504606847000": "t9"}}  # keyed by the TypeScript runtime
+    assert c.remap_id("todoId", big) == "t9"
