@@ -118,6 +118,8 @@ describe('cli', () => {
     const grouped = (await run('journal', '--journal', journal)).stdout;
     expect(grouped.match(new RegExp(`session ${monday.session}`, 'g'))).toHaveLength(1);
     expect(grouped).toMatch(new RegExp(`session ${monday.session} .* · 2 writes\\n +#1 .*\\n +#4 `));
+    const asJson = JSON.parse((await run('journal', '--journal', journal, '--json')).stdout) as Array<{ seq: number }>;
+    expect(asJson.map((e) => e.seq)).toEqual([1, 2, 3, 4]); // JSON stays in seq order, as python -m undogen prints it
   });
 
   it('wrap puts undo in front of another MCP server, over stdio', async () => {

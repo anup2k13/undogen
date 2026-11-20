@@ -282,7 +282,6 @@ export class ToolSession {
     return { call: { tool: plan.inverse.tool, arguments: out }, notRestored };
   }
 
-  /** Undo one entry (default: this session's most recent active one). */
   /** Later, not-undone calls that use an id this entry created: the same argument name and value, or an id-like string (4+ characters) anywhere. */
   dependentsOf(entry: ToolEntry): ToolEntry[] {
     if (!entry.created?.length) return [];
@@ -294,6 +293,19 @@ export class ToolSession {
         !!e.inverse &&
         ids.some(({ name, v }) => (usesArg(e.arguments, name, v) && sameScope(entry.scope, e.arguments)) || (typeof v === 'string' && v.length >= 4 && mentions(e.arguments, v))),
     );
+  }
+
+  /** Every later entry that depends on this one, directly or through others (what a cascade would undo). */
+  allDependentsOf(entry: ToolEntry): ToolEntry[] {
+    const seen = new Map<number, ToolEntry>();
+    const queue = this.dependentsOf(entry);
+    while (queue.length) {
+      const d = queue.shift()!;
+      if (seen.has(d.seq)) continue;
+      seen.set(d.seq, d);
+      queue.push(...this.dependentsOf(d));
+    }
+    return [...seen.values()].sort((a, b) => a.seq - b.seq);
   }
 
   /**
@@ -315,8 +327,10 @@ export class ToolSession {
       return this.finish(entry);
     }
     const dependents = this.dependentsOf(entry);
-    const others = opts.cascadeWithin !== undefined ? dependents.filter((d) => d.session !== opts.cascadeWithin) : [];
-    if (dependents.length && (!opts.cascade || others.length)) throw new ToolDependencyError(entry, others.length ? others : dependents, !!opts.cascade && others.length > 0);
+    // Look at everything a cascade would reach, not only direct dependents, before undoing anything.
+    const others = opts.cascadeWithin !== undefined ? this.allDependentsOf(entry).filter((d) => d.session !== opts.cascadeWithin) : [];
+    if (others.length) throw new ToolDependencyError(entry, others, true);
+    if (dependents.length && !opts.cascade) throw new ToolDependencyError(entry, dependents);
     if (!entry.inverse) {
       entry.status = 'failed';
       entry.undoError = `cannot be undone: ${entry.inverseError ?? describeNoInverse(entry)}`;

@@ -501,6 +501,19 @@ export class UndoableClient {
     );
   }
 
+  /** Every later entry that depends on this one, directly or through others (what a cascade would undo). */
+  allDependentsOf(entry: JournalEntry): JournalEntry[] {
+    const seen = new Map<number, JournalEntry>();
+    const queue = this.dependentsOf(entry);
+    while (queue.length) {
+      const d = queue.shift()!;
+      if (seen.has(d.seq)) continue;
+      seen.set(d.seq, d);
+      queue.push(...this.dependentsOf(d));
+    }
+    return [...seen.values()].sort((a, b) => a.seq - b.seq);
+  }
+
   /** Undo one entry (or seq). Default: the most recent entry not yet undone. */
   async undo(entryOrSeq?: JournalEntry | number, opts: UndoOptions = {}): Promise<HttpResult> {
     await this.ready();
@@ -513,8 +526,10 @@ export class UndoableClient {
 
     const dependents = this.dependentsOf(target);
     if (dependents.length) {
-      const others = opts.cascadeWithin !== undefined ? dependents.filter((d) => d.session !== opts.cascadeWithin) : [];
-      if (!opts.cascade || others.length) throw new DependencyError(target, others.length ? others : dependents, !!opts.cascade && others.length > 0);
+      // Look at everything a cascade would reach, not only direct dependents, before undoing anything.
+      const others = opts.cascadeWithin !== undefined ? this.allDependentsOf(target).filter((d) => d.session !== opts.cascadeWithin) : [];
+      if (others.length) throw new DependencyError(target, others, true);
+      if (!opts.cascade) throw new DependencyError(target, dependents);
       for (const d of [...dependents].reverse()) if (d.status !== 'undone') await this.undo(d, opts);
     }
 

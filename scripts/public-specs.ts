@@ -1,6 +1,7 @@
 /** Public API descriptions used by plan-diff, audit-plans and the weekly workflow. */
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { loadSpec } from '../src/index.js';
 
 export const PUBLIC_SPECS: Record<string, string> = {
   github: 'https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json',
@@ -12,8 +13,8 @@ export const PUBLIC_SPECS: Record<string, string> = {
 };
 
 /**
- * Specs split over many files (DigitalOcean: thousands of $ref files) can't be cached as one file:
- * they are loaded from their URL each time, so plan-diff and the audit still cover them.
+ * Specs split over many files (DigitalOcean: thousands of $ref files). ensureSpecs mirrors every file the
+ * loader fetches into `<dir>/<name>/`, keeping relative paths, so each run reads one consistent local copy.
  */
 export const REMOTE_SPECS: Record<string, string> = {
   digitalocean: 'https://raw.githubusercontent.com/digitalocean/openapi/main/specification/DigitalOcean-public.v2.yaml',
@@ -21,12 +22,34 @@ export const REMOTE_SPECS: Record<string, string> = {
 
 export const fileFor = (name: string) => name + (PUBLIC_SPECS[name]!.endsWith('.yaml') ? '.yaml' : '.json');
 
-/** Where to load an entry returned by ensureSpecs from: a cached file, or a remote spec's URL. */
-export const specLocation = (dir: string, entry: string) => (/^https?:/.test(entry) ? entry : `${dir}/${entry}`);
-/** The API name of an entry returned by ensureSpecs. */
-export const specName = (entry: string) => (/^https?:/.test(entry) ? Object.keys(REMOTE_SPECS).find((k) => REMOTE_SPECS[k] === entry)! : entry.split('.')[0]!);
+/** Where to load an entry returned by ensureSpecs from. */
+export const specLocation = (dir: string, entry: string) => join(dir, entry);
+/** The API name of an entry returned by ensureSpecs ("github.json", "digitalocean/DigitalOcean-public.v2.yaml"). */
+export const specName = (entry: string) => entry.split('/')[0]!.split('.')[0]!;
 
-/** Download any spec missing from `dir` (or all of them with `refresh`). Returns the file names. */
+/** Mirror a multi-file spec: load it from its URL once, saving every fetched document under `out` by relative path. */
+async function mirror(url: string, out: string): Promise<string> {
+  const base = new URL('./', url).href;
+  rmSync(out, { recursive: true, force: true });
+  await loadSpec(url, {
+    fetch: async (u, init) => {
+      const res = await fetch(u, init);
+      const href = String(u);
+      if (res.ok && href.startsWith(base)) {
+        const file = join(out, decodeURIComponent(href.slice(base.length)));
+        mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(file, await res.clone().text());
+      }
+      return res;
+    },
+  });
+  return url.slice(base.length);
+}
+
+/**
+ * Download any spec missing from `dir` (or all of them with `refresh`). Returns entries relative to `dir`:
+ * use specLocation(dir, entry) to load one and specName(entry) to name it.
+ */
 export async function ensureSpecs(dir: string, refresh = false): Promise<string[]> {
   mkdirSync(dir, { recursive: true });
   for (const [name, url] of Object.entries(PUBLIC_SPECS)) {
@@ -37,5 +60,20 @@ export async function ensureSpecs(dir: string, refresh = false): Promise<string[
     if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
     writeFileSync(file, await res.text());
   }
-  return [...Object.keys(PUBLIC_SPECS).map(fileFor), ...Object.values(REMOTE_SPECS)];
+  const remote: string[] = [];
+  for (const [name, url] of Object.entries(REMOTE_SPECS)) {
+    const root = url.slice(new URL('./', url).href.length);
+    if (!existsSync(join(dir, name, root)) || refresh) {
+      console.error(`downloading ${name} (many files)…`);
+      try {
+        await mirror(url, join(dir, name));
+      } catch (err) {
+        // A failed mirror leaves this spec out of the run (said loudly), not the others.
+        console.error(`could not download ${name}: ${(err as Error).message}; it is left out of this run`);
+        continue;
+      }
+    }
+    remote.push(`${name}/${root}`);
+  }
+  return [...Object.keys(PUBLIC_SPECS).map(fileFor), ...remote];
 }

@@ -33,9 +33,18 @@ const EXPECT: Array<{ when: (p: InversePlan) => boolean; label: string; words: R
 const NEVER_REVERSIBLE = /^(send|exec|execute|proxy|charge|pay|transfer|refund|dispatch|deliver|notify|broadcast)$/;
 
 let flagged = 0;
+let failedToLoad = 0;
 for (const entry of files) {
   const file = specName(entry);
-  const analysis = analyze(await loadSpec(specLocation(dir, entry)));
+  let analysis;
+  try {
+    analysis = analyze(await loadSpec(specLocation(dir, entry)));
+  } catch (err) {
+    // One spec that can't be loaded (a rate-limited download) shouldn't stop the audit of the others.
+    console.log(`${file}: could not load: ${(err as Error).message}`);
+    failedToLoad++;
+    continue;
+  }
   for (const p of analysis.plans) {
     const words = tokenize(p.operationId.split('/').pop() ?? p.operationId);
     for (const e of EXPECT) {
@@ -51,4 +60,5 @@ for (const entry of files) {
   }
 }
 console.log(flagged ? `\n${flagged} plan(s) flagged` : 'No plan contradicts its operation name.');
-process.exitCode = flagged ? 1 : 0;
+if (failedToLoad) console.log(`${failedToLoad} spec(s) could not be loaded and were not audited`);
+process.exitCode = flagged || failedToLoad ? 1 : 0;

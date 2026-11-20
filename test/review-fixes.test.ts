@@ -418,3 +418,40 @@ describe('review fixes (round 4: sessions and chosen ids)', () => {
     expect(c.dependentsOf(c.journal[2]!)).toEqual([]);
   });
 });
+
+describe('review fixes (round 5)', () => {
+  it('refuses a cascade before undoing anything when another session depends on it further down', async () => {
+    const s = parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'x', version: '1' },
+      paths: {
+        '/boards': { post: { operationId: 'createBoard', responses: { '201': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } } } } } },
+        '/boards/{boardId}': { delete: { operationId: 'deleteBoard', responses: {} } },
+        '/boards/{boardId}/cards': { post: { operationId: 'createCard', responses: { '201': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } } } } } },
+        '/boards/{boardId}/cards/{cardId}': { delete: { operationId: 'deleteCard', responses: {} } },
+        '/cards/{cardId}/tasks': { post: { operationId: 'createTask', responses: { '201': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } } } } } },
+        '/cards/{cardId}/tasks/{taskId}': { delete: { operationId: 'deleteTask', responses: {} } },
+      },
+    });
+    let n = 0;
+    const deletes: string[] = [];
+    const f: typeof fetch = async (u, init) => {
+      if (init?.method === 'DELETE') deletes.push(new URL(String(u)).pathname);
+      return init?.method === 'POST' ? json({ id: `obj_${++n}abc` }, 201) : new Response(null, { status: 204 });
+    };
+    const path = join(dir, 'transitive.jsonl');
+    const opts = { spec: s, baseUrl: 'http://x', fetch: f, store: new FileJournalStore(path) };
+    const a = await UndoableClient.open(opts);
+    const board = ((await a.call('createBoard', {})).data as { id: string }).id;
+    const card1 = ((await a.call('createCard', { params: { boardId: board } })).data as { id: string }).id; // A: card 1 on the board
+    await a.call('createCard', { params: { boardId: board } }); // A: card 2 (undone first in a cascade, newest first)
+    const b = await UndoableClient.open(opts);
+    await b.call('createTask', { params: { cardId: card1 } }); // B builds on card 1
+
+    const resumed = await UndoableClient.open({ ...opts, session: a.session });
+    const err = await resumed.undo(1, { cascade: true, cascadeWithin: a.session }).catch((e) => e);
+    expect(err).toBeInstanceOf(DependencyError);
+    expect(err.message).toMatch(/#4 createTask \(session .+\)\. They belong to other sessions/);
+    expect(deletes).toEqual([]); // nothing was undone halfway
+  });
+});

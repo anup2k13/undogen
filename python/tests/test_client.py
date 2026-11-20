@@ -477,7 +477,7 @@ def test_wrap_journals_are_refused_with_a_pointer(bundle_path, server_url, tmp_p
 def test_numbers_are_written_like_javascript():
     from undogen.client import _js_str
 
-    cases = {12345.0: "12345", 0.00001: "0.00001", 1e-7: "1e-7", 1e21: "1e+21", 1e16: "10000000000000000", -2.5e-8: "-2.5e-8", 2**60: "1152921504606847000", 0.1: "0.1"}
+    cases = {12345.0: "12345", 0.00001: "0.00001", 1e-7: "1e-7", 1e21: "1e+21", 1e16: "10000000000000000", -2.5e-8: "-2.5e-8", 0.1: "0.1", 2**60: "1152921504606846976"}  # integers stay exact
     assert {v: _js_str(v) for v in cases} == cases
 
 
@@ -493,3 +493,14 @@ def test_rolling_back_a_session_does_not_cascade_into_another(bundle_path, serve
     assert r["undone"] == [] and isinstance(r["failed"][0]["error"], DependencyError)
     assert len(get(f"{server_url}/todos/{tid}/comments")[1]) == 1
     assert main(["undo", bundle_path, "--base-url", server_url, "--journal", path, "--session", ""]) == 2
+
+
+def test_ids_stay_exact_and_old_id_maps_still_resolve(bundle_path):
+    from undogen.client import _body_refs, _id_like, _js_str
+
+    assert _js_str(1152921504606846977) != _js_str(1152921504606846978)  # neighbouring snowflake ids stay apart
+    assert _body_refs({"n": 10**400}, "s")  # no OverflowError
+    assert not _id_like("projet²abcd") and _id_like("proj-abcd")  # ASCII digits only, like TypeScript
+    c = UndoableClient(bundle_path, "http://127.0.0.1:1")
+    c._id_map = {"todoId": {"12345.0": "t9"}}  # written by an older version with str()
+    assert c.remap_id("todoId", 12345.0) == "t9"

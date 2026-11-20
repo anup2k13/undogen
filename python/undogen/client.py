@@ -217,14 +217,13 @@ def _js_str(v: Any) -> str:
         return "null"
     if isinstance(v, float):
         return _js_number(v)
-    if isinstance(v, int) and abs(v) > 2**53:
-        return _js_number(float(v))  # JavaScript reads it as the nearest double
+    # Integers stay exact (JavaScript would round those above 2**53; exact ids matter more than matching that).
     return str(v)
 
 
 def _id_like(v: str) -> bool:
     """A value that looks like an identifier rather than a word: 8+ characters with a digit, dash or underscore."""
-    return len(v) >= 8 and any(c.isdigit() or c in "-_" for c in v)
+    return len(v) >= 8 and any(c in "0123456789-_" for c in v)
 
 
 def _ref_hash(value: str, salt: str) -> str:
@@ -531,6 +530,18 @@ class UndoableClient:
             )
         ]
 
+    def all_dependents_of(self, entry: dict) -> List[dict]:
+        """Every later entry that depends on this one, directly or through others (what a cascade would undo)."""
+        seen: Dict[int, dict] = {}
+        queue = list(self.dependents_of(entry))
+        while queue:
+            d = queue.pop(0)
+            if d["seq"] in seen:
+                continue
+            seen[d["seq"]] = d
+            queue.extend(self.dependents_of(d))
+        return sorted(seen.values(), key=lambda e: e["seq"])
+
     def undo(self, entry: Union[dict, int, None] = None, *, force: bool = False, cascade: bool = False, cascade_within: Optional[str] = None) -> dict:
         """Undo one entry (or seq). Default: the most recent entry not yet undone."""
         if isinstance(entry, int):
@@ -548,10 +559,13 @@ class UndoableClient:
 
         dependents = self.dependents_of(target)
         if dependents:
-            # With cascade_within, dependents from other sessions refuse the undo instead of being undone.
-            others = [d for d in dependents if d.get("session") != cascade_within] if cascade_within is not None else []
-            if not cascade or others:
-                raise DependencyError(target, others or dependents, other_sessions=bool(cascade and others))
+            # With cascade_within, a dependent from another session anywhere a cascade would reach refuses the undo
+            # before anything is undone.
+            others = [d for d in self.all_dependents_of(target) if d.get("session") != cascade_within] if cascade_within is not None else []
+            if others:
+                raise DependencyError(target, others, other_sessions=True)
+            if not cascade:
+                raise DependencyError(target, dependents)
             for d in reversed(dependents):
                 if d["status"] != "undone":
                     self.undo(d, force=force, cascade=True, cascade_within=cascade_within)
@@ -657,7 +671,9 @@ class UndoableClient:
     def remap_id(self, param: str, value: Scalar) -> Scalar:
         cur = value
         for _ in range(32):
-            nxt = self._id_map.get(param, {}).get(_js_str(cur))
+            known = self._id_map.get(param, {})
+            # Journals written before ids were keyed JavaScript-style used str(): look both up.
+            nxt = known.get(_js_str(cur), known.get(str(cur)))
             if nxt is None:
                 return cur
             cur = nxt

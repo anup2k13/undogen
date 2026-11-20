@@ -236,7 +236,7 @@ async function main(argv: string[]) {
     const order = [...new Set(filtered.map((e) => e.session))];
     const entries = order.flatMap((s) => filtered.filter((e) => e.session === s));
     const isTool = (e: unknown): e is ToolEntry => (e as { kind?: string }).kind === 'tool';
-    if (values.json) return console.log(JSON.stringify(entries, null, 2));
+    if (values.json) return console.log(JSON.stringify(filtered, null, 2)); // in seq order, as python -m undogen prints it
     if (!entries.length) return console.log(values.session !== undefined ? `  (no entries for session ${values.session})` : '  (empty journal)');
     let session: string | undefined;
     for (const e of entries) {
