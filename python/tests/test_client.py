@@ -424,3 +424,16 @@ def test_created_binding_matches_typescript():
     assert _created_binding({"path": "/orgs/{orgId}/keys/{keyId}", "bindings": {"orgId": r("request", "org"), "keyId": r("response", "id")}}) == "keyId"
     assert _created_binding({"path": "/buckets/{name}", "bindings": {"name": r("request", "name")}}) == "name"
     assert _created_binding({"path": "/chat.delete", "bindings": {"channel": r("request", "channel"), "ts": r("response", "ts")}}) == "ts"
+
+
+def test_chosen_names_are_not_matched_in_unrelated_bodies():
+    from undogen.client import UndoableClient as C
+
+    c = C.__new__(C)
+    c.journal = [
+        {"seq": 1, "session": "s", "status": "active", "created": {"param": "name", "value": "test", "chosen": True}, "plan": {"strategy": "delete-created"}, "inverse": {}, "request": {}},
+        {"seq": 2, "session": "s", "status": "active", "plan": {"strategy": "delete-created"}, "inverse": {}, "request": {"params": {}, "body": {"text": "test"}}},
+        {"seq": 3, "session": "s", "status": "active", "plan": {"strategy": "delete-created"}, "inverse": {}, "request": {"params": {"name": "test"}}},
+    ]
+    c._id_map = {}
+    assert [e["seq"] for e in c.dependents_of(c.journal[0])] == [3]

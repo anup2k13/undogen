@@ -465,6 +465,8 @@ class UndoableClient:
             created_by = _created_binding(template)
             if created_by and inverse["params"].get(created_by) is not None:
                 entry["created"] = {"param": created_by, "value": inverse["params"][created_by]}
+                if template["bindings"][created_by]["from"] == "request":
+                    entry["created"]["chosen"] = True
         self.journal.append(entry)
         self._persist(entry)
         return {**response, "entry": entry}
@@ -475,8 +477,9 @@ class UndoableClient:
             return []
         param, value = created["param"], created["value"]
         ids = {_js_str(value), _js_str(self.remap_id(param, value))}
-        # In the body too (POST /comments {todoId}), but only for ids that can't be mistaken for small numbers.
-        body_ids = {i for i in ids if len(i) >= 4}
+        # In the body too (POST /comments {todoId}), but only for ids that can't be mistaken for small numbers,
+        # and not for names the caller chose ("test", "prod"): those turn up in unrelated bodies.
+        body_ids = set() if created.get("chosen") else {i for i in ids if len(i) >= 4}
         return [
             e
             for e in self.journal

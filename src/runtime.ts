@@ -81,7 +81,8 @@ export interface JournalEntry {
   /** The call changed nothing (e.g. starring an already-starred repo), so undo does nothing. */
   noop?: boolean;
   /** The resource this call created, so later calls that use it are known to depend on it. */
-  created?: { param: string; value: Scalar };
+  /** The resource this call created. `chosen`: its id came from the request (a name the caller picked, like "test"). */
+  created?: { param: string; value: Scalar; chosen?: boolean };
   identity?: { param: string; responseKey: string };
   /** Fingerprint of irreversible calls, used to refuse accidental replays. */
   fingerprint?: string;
@@ -463,7 +464,7 @@ export class UndoableClient {
     if (inverse && template && (inverse.method === 'delete' || plan.strategy === 'soft-delete')) {
       const createdBy = createdBinding(template);
       if (createdBy && inverse.params?.[createdBy[0]] !== undefined) {
-        entry.created = { param: createdBy[0], value: inverse.params[createdBy[0]]! };
+        entry.created = { param: createdBy[0], value: inverse.params[createdBy[0]]!, ...(createdBy[1].from === 'request' ? { chosen: true } : {}) };
       }
     }
     this.journal.push(entry);
@@ -480,8 +481,9 @@ export class UndoableClient {
     if (!entry.created) return [];
     const { param, value } = entry.created;
     const ids = new Set([String(value), String(this.remapId(param, value))]);
-    // In the body too (POST /comments { todoId }), but only for ids that can't be mistaken for small numbers.
-    const bodyIds = [...ids].filter((id) => id.length >= 4);
+    // In the body too (POST /comments { todoId }), but only for ids that can't be mistaken for small numbers,
+    // and not for names the caller chose ("test", "prod"): those turn up in unrelated bodies.
+    const bodyIds = entry.created.chosen ? [] : [...ids].filter((id) => id.length >= 4);
     return this.journal.filter(
       (e) =>
         e.seq > entry.seq &&

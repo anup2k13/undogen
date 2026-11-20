@@ -325,8 +325,31 @@ describe('review fixes (round 3)', () => {
     const c = new UndoableClient({ spec: s, baseUrl: 'http://x', fetch: f });
     await c.call('createBucket', { body: { name: 'b1' } });
     await c.call('putObject', { params: { name: 'b1' } });
-    expect(c.journal[0]!.created).toEqual({ param: 'name', value: 'b1' });
+    expect(c.journal[0]!.created).toEqual({ param: 'name', value: 'b1', chosen: true });
     await expect(c.undo(1)).rejects.toBeInstanceOf(DependencyError);
+  });
+
+  it('does not take a chosen name that turns up in an unrelated body for a dependency', async () => {
+    const s = parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'x', version: '1' },
+      paths: {
+        '/buckets': { post: { operationId: 'createBucket', requestBody: { content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } } } } }, responses: { '204': { description: '' } } } },
+        '/buckets/{name}': { delete: { operationId: 'deleteBucket', responses: { '204': { description: '' } } } },
+        '/notes': { post: { operationId: 'createNote', responses: { '201': { description: '', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } } } } } },
+        '/notes/{noteId}': { delete: { operationId: 'deleteNote', responses: { '204': { description: '' } } } },
+      },
+    });
+    const sent: string[] = [];
+    const f: typeof fetch = async (u, init) => {
+      sent.push(`${init?.method} ${new URL(String(u)).pathname}`);
+      return init?.method === 'POST' && String(u).endsWith('/notes') ? json({ id: 'note_1abc' }, 201) : new Response(null, { status: 204 });
+    };
+    const c = new UndoableClient({ spec: s, baseUrl: 'http://x', fetch: f });
+    await c.call('createBucket', { body: { name: 'test' } });
+    await c.call('createNote', { body: { text: 'test' } }); // mentions "test", but has nothing to do with the bucket
+    await c.undo(1, { cascade: true });
+    expect(sent.slice(2)).toEqual(['DELETE /buckets/test']); // the note was left alone
   });
 
   it('agent tools see a persisted journal before their first call', async () => {
