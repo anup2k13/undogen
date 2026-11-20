@@ -560,3 +560,16 @@ describe('undogen wrap: getters that do not return what an update writes', () =>
     expect(asked).toEqual(['update_doc']);
   });
 });
+
+describe('undogen wrap: resources and prompts', () => {
+  it('passes them through unchanged', async () => {
+    const { agent, call, state } = await setup();
+    await call('create_issue', { repo: 'r', title: 'a' });
+    expect(agent.getServerCapabilities()).toMatchObject({ tools: {}, resources: {}, prompts: {} });
+    expect((await agent.listResources()).resources).toEqual([{ uri: 'issues://all', name: 'All issues', mimeType: 'application/json' }]);
+    const read = await agent.readResource({ uri: 'issues://all' });
+    expect(JSON.parse((read.contents[0] as { text: string }).text)).toEqual([...state.issues.values()]);
+    expect((await agent.listPrompts()).prompts.map((p) => p.name)).toEqual(['triage']);
+    expect((await agent.getPrompt({ name: 'triage', arguments: { issue_number: '1' } })).messages[0]!.content).toEqual({ type: 'text', text: 'Triage issue 1' });
+  });
+});

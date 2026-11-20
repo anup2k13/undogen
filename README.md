@@ -240,7 +240,7 @@ If the read a plan depends on fails before a call (an update's or a delete's sna
   "run_workflow": { "reversibility": "irreversible", "reason": "starts a deploy" } }
 ```
 
-Undoing a create that later calls use (same id under the same argument name, or an id-like string anywhere) is refused unless `cascade: true` undoes those first, as in `undogen mcp`. Dependencies are found by id; short names referenced under other argument names (a memory graph's relation `from`/`to`) aren't. Not yet: the wrapped server's resources and prompts, and OAuth sign-in for hosted servers.
+Undoing a create that later calls use (same id under the same argument name, or an id-like string anywhere) is refused unless `cascade: true` undoes those first, as in `undogen mcp`. Dependencies are found by id; short names referenced under other argument names (a memory graph's relation `from`/`to`) aren't. The wrapped server's resources and prompts pass through unchanged. Not yet: OAuth sign-in for hosted servers.
 
 ### 5. Python agents
 

@@ -6,7 +6,15 @@
  */
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import {
+  CallToolRequestSchema,
+  GetPromptRequestSchema,
+  ListPromptsRequestSchema,
+  ListResourcesRequestSchema,
+  ListToolsRequestSchema,
+  ReadResourceRequestSchema,
+  type CallToolResult,
+} from '@modelcontextprotocol/sdk/types.js';
 import { pathToFileURL } from 'node:url';
 
 interface Issue {
@@ -45,7 +53,16 @@ export const issueTools = [
 const newState = () => ({ issues: new Map<number, Issue>(), starred: new Set<string>(), emails: [] as Array<{ to: string; body: string }>, files: new Map<string, string>(), next: 1 });
 
 export function createIssuesServer(state = newState()) {
-  const server = new Server({ name: 'issues', version: '1.0.0' }, { capabilities: { tools: {} }, instructions: 'Issue numbers are per repository.' });
+  const server = new Server({ name: 'issues', version: '1.0.0' }, { capabilities: { tools: {}, resources: {}, prompts: {} }, instructions: 'Issue numbers are per repository.' });
+  // A resource and a prompt, so wrappers can be checked to pass them through.
+  server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [{ uri: 'issues://all', name: 'All issues', mimeType: 'application/json' }] }));
+  server.setRequestHandler(ReadResourceRequestSchema, async (req) => ({
+    contents: [{ uri: req.params.uri, mimeType: 'application/json', text: JSON.stringify([...state.issues.values()]) }],
+  }));
+  server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: [{ name: 'triage', description: 'Triage an issue', arguments: [{ name: 'issue_number', required: true }] }] }));
+  server.setRequestHandler(GetPromptRequestSchema, async (req) => ({
+    messages: [{ role: 'user', content: { type: 'text', text: `Triage issue ${req.params.arguments?.issue_number}` } }],
+  }));
   const text = (v: unknown): CallToolResult => ({ content: [{ type: 'text', text: JSON.stringify(v) }] });
   const fail = (message: string): CallToolResult => ({ isError: true, content: [{ type: 'text', text: message }] });
 

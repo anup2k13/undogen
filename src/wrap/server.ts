@@ -7,7 +7,17 @@
  */
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from '@modelcontextprotocol/sdk/types.js';
+import {
+  CallToolRequestSchema,
+  GetPromptRequestSchema,
+  ListPromptsRequestSchema,
+  ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
+  ListToolsRequestSchema,
+  ReadResourceRequestSchema,
+  type CallToolResult,
+  type Tool,
+} from '@modelcontextprotocol/sdk/types.js';
 import { maskedJson } from '../mcp.js';
 import type { JournalStore } from '../runtime.js';
 import { VERSION } from '../version.js';
@@ -60,6 +70,7 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
   const clash = tools.find((t) => UNDO_TOOLS.includes(t.name));
   if (clash) throw new Error(`The wrapped server already has a tool named ${clash.name}`);
   const plans = planTools(tools as McpTool[], options.overrides);
+  const upstreamCaps = options.upstream.getServerCapabilities();
   const plansOf = new Map<string, ToolPlan[]>();
   for (const p of plans) plansOf.set(p.tool, [...(plansOf.get(p.tool) ?? []), p]);
   /** One line per plan; per action for a multi-action tool. */
@@ -73,7 +84,8 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
   const server = new Server(
     { name: `undogen-wrap(${title})`, version: VERSION },
     {
-      capabilities: { tools: {} },
+      // Resources and prompts are reads: they pass through unchanged when the wrapped server has them.
+      capabilities: { tools: {}, ...(upstreamCaps?.resources ? { resources: {} } : {}), ...(upstreamCaps?.prompts ? { prompts: {} } : {}) },
       instructions: [
         `These are the tools of ${title}, wrapped by undogen: every write is journaled with the call that undoes it.`,
         '- Before a multi-step task, call undogen_checkpoint and keep the number; undogen_undo_all with { to: checkpoint } rolls back only that task.',
@@ -153,6 +165,16 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
       annotations: { title: 'Preview undo', readOnlyHint: true },
     },
   ];
+
+  if (upstreamCaps?.resources) {
+    server.setRequestHandler(ListResourcesRequestSchema, (req) => options.upstream.listResources(req.params));
+    server.setRequestHandler(ListResourceTemplatesRequestSchema, (req) => options.upstream.listResourceTemplates(req.params));
+    server.setRequestHandler(ReadResourceRequestSchema, (req) => options.upstream.readResource(req.params));
+  }
+  if (upstreamCaps?.prompts) {
+    server.setRequestHandler(ListPromptsRequestSchema, (req) => options.upstream.listPrompts(req.params));
+    server.setRequestHandler(GetPromptRequestSchema, (req) => options.upstream.getPrompt(req.params));
+  }
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
