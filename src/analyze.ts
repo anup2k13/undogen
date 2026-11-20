@@ -94,10 +94,32 @@ export const SOFT_DELETE_STATES = ['closed', 'archived', 'cancelled', 'canceled'
 /** Words that say an operation changes an existing resource's fields. */
 const UPDATE_WORDS = new Set(['update', 'updates', 'modify', 'modifies', 'edit', 'edits', 'configure', 'configures', 'change', 'changes']);
 
-/** Whether a GET returns a list (an array, or a page object with a `data` array), not one object. */
+type Shape = { type?: string; properties?: Record<string, Shape>; allOf?: Shape[]; anyOf?: Shape[]; oneOf?: Shape[] };
+/** Properties of an object schema, including those of its allOf/anyOf/oneOf parts. */
+const propsOf = (s: Shape | undefined): Record<string, Shape> =>
+  Object.assign({}, ...[...(s?.allOf ?? []), ...(s?.anyOf ?? []), ...(s?.oneOf ?? [])].map(propsOf), s?.properties ?? {});
+/** Names of list containers and pagination fields in list responses. */
+const LIST_FIELDS = new Set(['data', 'items', 'results', 'entries', 'values', 'records', 'elements', 'nodes', 'edges', 'list']);
+const PAGINATION_FIELDS = new Set(['has_more', 'hasmore', 'next', 'next_cursor', 'nextcursor', 'next_page', 'nextpage', 'next_page_token', 'nextpagetoken', 'total_count', 'totalcount', 'links', 'meta']);
+
+/** Whether a GET returns a list (an array, or a page object around one), not one object. */
 function readsList(getOp: Operation): boolean {
-  const schema = getOp.responseSchema as { type?: string; properties?: Record<string, { type?: string }> } | undefined;
-  return schema?.type === 'array' || schema?.properties?.data?.type === 'array' || schema?.properties?.items?.type === 'array';
+  const schema = getOp.responseSchema as Shape | undefined;
+  if (schema?.type === 'array') return true;
+  const props = propsOf(schema);
+  const arrays = Object.entries(props).filter(([, p]) => p?.type === 'array').map(([k]) => k.toLowerCase());
+  return arrays.some((k) => LIST_FIELDS.has(k)) || (arrays.length > 0 && Object.keys(props).some((k) => PAGINATION_FIELDS.has(k.toLowerCase())));
+}
+
+/** Whether every field a write sends is in what the GET returns (top level, or inside one envelope object), so its old value can be written back. */
+function readsWhatItWrites(op: Operation, getOp: Operation): boolean {
+  const norm = (k: string) => k.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const sent = Object.keys(propsOf(op.requestSchema as Shape)).filter((k) => norm(k) !== 'expand');
+  if (!sent.length) return false;
+  const top = propsOf(getOp.responseSchema as Shape);
+  const envelopes = Object.values(top).filter((p) => p?.type === 'object' || p?.properties);
+  const readable = new Set([...Object.keys(top), ...envelopes.flatMap((e) => Object.keys(propsOf(e)))].map(norm));
+  return sent.every((k) => readable.has(norm(k)));
 }
 
 /** Crude singularisation so "dispatches"/"pings" match "dispatch"/"ping". */
@@ -662,6 +684,7 @@ function basePlan(op: Operation, index: Index, override: Declaration | undefined
       says &&
       (!op.summary || UPDATE_WORDS.has(firstWord ?? '')) &&
       !readsList(getOp) &&
+      readsWhatItWrites(op, getOp) &&
       !index.find('put', op.path) &&
       !index.find('patch', op.path) &&
       !index.find('delete', op.path)

@@ -651,3 +651,38 @@ describe('POST that updates a singleton (Stripe settings)', () => {
     expect(planOf(spec('Update settings', { type: 'object' }), 'PostBillingMetersIdDeactivate')).toMatchObject({ strategy: 'paired-action', inverse: { operationId: 'PostBillingMetersIdReactivate' } });
   });
 });
+
+describe('singleton POST updates: review fixes', () => {
+  const build = (getSchema: object, body: object, extra: Record<string, object> = {}) =>
+    analyze(
+      parseSpec({
+        openapi: '3.0.3',
+        info: { title: 'x', version: '1' },
+        paths: {
+          '/v2/registry/subscription': {
+            get: { operationId: 'getSub', responses: { '200': { description: '', content: { 'application/json': { schema: getSchema } } } } },
+            post: { operationId: 'updateSub', summary: 'Update Subscription Tier', requestBody: { content: { 'application/json': { schema: { type: 'object', properties: body } } } }, responses: {} },
+          },
+          ...extra,
+        },
+      }),
+    ).plans.find((p) => p.operationId === 'updateSub')!;
+
+  it("doesn't claim a restore when the GET doesn't return what the POST writes (DigitalOcean's tier_slug vs subscription.tier.slug)", () => {
+    expect(build({ type: 'object', properties: { subscription: { type: 'object', properties: { tier: { type: 'object' } } } } }, { tier_slug: { type: 'string' } }).strategy).not.toBe('restore-snapshot');
+    expect(build({ type: 'object', properties: { subscription: { type: 'object', properties: { tier_slug: { type: 'string' } } } } }, { tier_slug: { type: 'string' } }).strategy).toBe('restore-snapshot'); // inside one envelope is fine
+  });
+
+  it('recognises paginated lists however their array is named', () => {
+    expect(build({ type: 'object', properties: { results: { type: 'array' }, next: { type: 'string' } } }, { results: { type: 'array' } }).strategy).not.toBe('restore-snapshot');
+  });
+
+  it('prefers activate over reactivate as the way back from deactivate', () => {
+    const s = parseSpec({
+      openapi: '3.0.3',
+      info: { title: 'x', version: '1' },
+      paths: Object.fromEntries(['deactivate', 'activate', 'reactivate'].map((v) => [`/meters/{id}/${v}`, { post: { operationId: v, responses: {} } }])),
+    });
+    expect(analyze(s).plans.find((p) => p.operationId === 'deactivate')).toMatchObject({ inverse: { operationId: 'activate' } });
+  });
+});

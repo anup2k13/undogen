@@ -122,8 +122,15 @@ export async function runWrap(flags: WrapFlags, command: string[]): Promise<numb
 
     if (flags.verify) {
       const { verifyTools } = await import('./verify.js');
+      for (const [flag, set] of [['--analyze', flags.analyze], ['--undo', flags.undo], ['--journal', flags.journal], ['--irreversible', flags.irreversible]] as const) {
+        if (set) throw new WrapUsageError(`--verify doesn't use ${flag}: it calls nothing irreversible or unknown and undoes everything it does`);
+      }
       const fixtures = JSON.parse(await readFile(flags.verify, 'utf8')) as import('./verify.js').WrapFixtures;
-      if (!Array.isArray(fixtures.steps)) throw new WrapUsageError(`${flags.verify} needs "steps": [{ "tool": …, "arguments": {…} }]`);
+      const isCall = (c: unknown) => !!c && typeof c === 'object' && typeof (c as { tool?: unknown }).tool === 'string';
+      const shape = `${flags.verify} should look like { "probe": { "tool": …, "arguments": {…} }, "setup": [ … ], "steps": [{ "tool": …, "arguments": {…} }] }`;
+      if (!fixtures || typeof fixtures !== 'object' || !Array.isArray(fixtures.steps) || !fixtures.steps.every(isCall)) throw new WrapUsageError(shape);
+      if (fixtures.setup !== undefined && !(Array.isArray(fixtures.setup) && fixtures.setup.every(isCall))) throw new WrapUsageError(shape);
+      if (fixtures.probe !== undefined && ![fixtures.probe].flat().every(isCall)) throw new WrapUsageError(shape);
       const icons = { verified: c.green('✓'), compensated: c.yellow('≈'), failed: c.red('✗'), inconclusive: c.yellow('?'), gated: c.magenta('⛔'), error: c.red('!') } as const;
       const report = await verifyTools({
         call: async (name, args) => (await upstream.callTool({ name, arguments: args })) as never,

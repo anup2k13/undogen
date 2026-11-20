@@ -669,3 +669,49 @@ describe('undogen wrap --verify', () => {
     expect(r2.results.every((r) => r.outcome === 'error' && /setup call 0 \(create_issue\)/.test(r.detail))).toBe(true);
   });
 });
+
+describe('undogen wrap --verify: review fixes', () => {
+  async function upstream(tweak?: (name: string, args: Record<string, unknown>) => CallToolResult | undefined) {
+    const { server, state } = createIssuesServer();
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await server.connect(a);
+    const client = new Client({ name: 'verify', version: '1' });
+    await client.connect(b);
+    const call = async (name: string, args: Record<string, unknown>) => tweak?.(name, args) ?? ((await client.callTool({ name, arguments: args })) as CallToolResult);
+    return { call, state };
+  }
+  const probe = { tool: 'list_issues', arguments: { repo: 'r' } };
+
+  it('fails a compensating undo that changed nothing', async () => {
+    const { verifyTools } = await import('../src/wrap/verify.js');
+    // update_issue ignores state: closing the created issue does nothing.
+    const { call } = await upstream((name, args) => (name === 'update_issue' && args.state ? { content: [{ type: 'text', text: '{}' }] } : undefined));
+    const report = await verifyTools({ call, plans: planTools(issueTools as McpTool[]), fixtures: { probe, steps: [{ tool: 'create_issue', arguments: { repo: 'r', title: 'x' } }] } });
+    expect(report.results[0]).toMatchObject({ outcome: 'failed', detail: expect.stringMatching(/^the undo changed nothing/) });
+  });
+
+  it('calls read-only steps and fails one that writes', async () => {
+    const { verifyTools } = await import('../src/wrap/verify.js');
+    const { call } = await upstream();
+    const plans = planTools(issueTools as McpTool[], { add_issue_labels: { reversibility: 'no-side-effects' } }); // a wrong plan
+    const fixtures = { probe, setup: [{ tool: 'create_issue', arguments: { repo: 'r', title: 'x' } }], steps: [{ tool: 'add_issue_labels', arguments: { repo: 'r', issue_number: '${setup.0.number}', labels: ['p1'] } }, { tool: 'list_issues', arguments: { repo: 'r' } }] };
+    const report = await verifyTools({ call, plans, fixtures });
+    expect(report.results.map((r) => r.outcome)).toEqual(['failed', 'verified']);
+    expect(report.results[0]!.detail).toMatch(/planned as read-only, but it changed the state/);
+  });
+
+  it('gates by the filled arguments (unsafe flags) and reports a broken probe as an error', async () => {
+    const { verifyTools } = await import('../src/wrap/verify.js');
+    const { githubTools } = await import('./fixtures/github-mcp-tools.js');
+    const calls: string[] = [];
+    const call = async (name: string) => (calls.push(name), { content: [{ type: 'text' as const, text: '{}' }] });
+    const step = { tool: 'sub_issue_write', arguments: { method: 'add', owner: 'o', repo: 'r', issue_number: 1, sub_issue_id: 2, replace_parent: true } };
+    const r = await verifyTools({ call, plans: planTools(githubTools), fixtures: { probe: { tool: 'issue_read', arguments: { method: 'get_sub_issues', owner: 'o', repo: 'r', issue_number: 1 } }, steps: [step] } });
+    expect(r.results[0]).toMatchObject({ outcome: 'gated', action: 'add', detail: expect.stringMatching(/replace_parent: true/) });
+    expect(calls).toEqual([]);
+
+    const { call: real } = await upstream();
+    const broken = await verifyTools({ call: real, plans: planTools(issueTools as McpTool[]), fixtures: { probe: { tool: 'list_issue', arguments: {} }, steps: [{ tool: 'star_repository', arguments: { repo: 'r' } }] } });
+    expect(broken.results[0]).toMatchObject({ outcome: 'error', detail: expect.stringMatching(/probe list_issue failed/) });
+  });
+});

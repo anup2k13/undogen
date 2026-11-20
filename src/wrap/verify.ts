@@ -10,7 +10,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { getPath } from '../runtime.js';
 import { DEFAULT_IGNORED_FIELDS, diffStates, type StateDiff } from '../verify.js';
 import type { ToolPlan } from './plans.js';
-import { resultData, ToolSession, type CallUpstream, type ToolCall } from './session.js';
+import { resultData, ToolRefusedError, ToolSession, type CallUpstream, type ToolCall } from './session.js';
 
 export interface WrapFixtures {
   /** Reads that show the state the steps change, compared before each call and after its undo. */
@@ -87,7 +87,7 @@ export async function verifyTools(options: {
   let setupError: string | undefined;
   for (const [i, s] of (fixtures.setup ?? []).entries()) {
     try {
-      const { result } = await session.call(s.tool, fill(s.arguments, setupData) as Record<string, unknown>);
+      const { result } = await session.call(s.tool, fill(s.arguments ?? {}, setupData) as Record<string, unknown>);
       if (result.isError) throw new FixtureError(`${s.tool} failed: ${textOf(result)}`);
       setupData.push(resultData(result));
     } catch (err) {
@@ -96,29 +96,38 @@ export async function verifyTools(options: {
     }
   }
 
+  /** Read the probes; a probe that fails is a fixture problem (the state can't be seen), not "no change". */
   const read = async (probes: ToolCall[]) => {
     const state = new Map<string, { status: number; data: unknown }>();
     for (const p of probes) {
-      const args = fill(p.arguments, setupData) as Record<string, unknown>;
+      const args = fill(p.arguments ?? {}, setupData) as Record<string, unknown>;
       const r = await options.call(p.tool, args);
-      state.set(`${p.tool} ${JSON.stringify(args)}`, { status: r.isError ? 500 : 200, data: r.isError ? textOf(r) : resultData(r) });
+      if (r.isError) throw new FixtureError(`probe ${p.tool} failed: ${textOf(r)}`);
+      state.set(`${p.tool} ${JSON.stringify(args)}`, { status: 200, data: resultData(r) });
     }
     return state;
   };
 
   for (const step of fixtures.steps) {
-    const plan = session.planFor(step.tool, step.arguments);
-    const base = { tool: step.tool, ...(plan.dispatch ? { action: plan.dispatch.value } : {}), reversibility: plan.reversibility, strategy: plan.strategy, diffs: [] as StateDiff[] };
     if (setupError) {
-      record({ ...base, outcome: 'error', detail: setupError });
+      const plan = session.planFor(step.tool, step.arguments ?? {});
+      record({ tool: step.tool, reversibility: plan.reversibility, strategy: plan.strategy, diffs: [], outcome: 'error', detail: setupError });
       continue;
     }
-    if (plan.reversibility === 'irreversible' || plan.reversibility === 'unknown') {
-      record({ ...base, outcome: 'gated', detail: `never called: ${plan.reasons[0]}` });
+    let args: Record<string, unknown>;
+    try {
+      args = fill(step.arguments ?? {}, setupData) as Record<string, unknown>;
+    } catch (err) {
+      const plan = session.planFor(step.tool, step.arguments ?? {});
+      record({ tool: step.tool, reversibility: plan.reversibility, strategy: plan.strategy, diffs: [], outcome: 'error', detail: (err as Error).message });
       continue;
     }
-    if (plan.strategy === 'no-side-effects') {
-      record({ ...base, outcome: 'verified', detail: 'read-only: nothing to undo' });
+    // The plan for these arguments: the action of a multi-action tool, and flags that make a call unsafe to undo.
+    const plan = session.planFor(step.tool, args);
+    const unsafe = plan.unsafeFlags?.find((f) => args[f] === true);
+    const base = { tool: step.tool, ...(plan.dispatch ? { action: plan.dispatch.value } : {}), reversibility: plan.reversibility, strategy: plan.strategy, diffs: [] as StateDiff[] };
+    if (plan.reversibility === 'irreversible' || plan.reversibility === 'unknown' || unsafe) {
+      record({ ...base, outcome: 'gated', detail: `never called: ${unsafe ? `${unsafe}: true makes it replace what undo can't put back` : plan.reasons[0]}` });
       continue;
     }
     const probes = [step.probe ?? fixtures.probe ?? []].flat();
@@ -127,15 +136,23 @@ export async function verifyTools(options: {
       continue;
     }
     try {
-      const args = fill(step.arguments, setupData) as Record<string, unknown>;
       const before = await read(probes);
       const { result, entry } = await session.call(step.tool, args);
-      if (result.isError || !entry) {
+      if (result.isError) {
         record({ ...base, outcome: 'error', detail: `the call failed: ${textOf(result)} (fix its arguments in the fixtures)` });
         continue;
       }
       const after = await read(probes);
-      const changed = diffStates(before, after, { ignore }).length > 0;
+      const changes = diffStates(before, after, { ignore });
+      if (plan.strategy === 'no-side-effects' || !entry) {
+        // Taken for a read: prove it changed nothing (a write mistaken for a read would never be journaled).
+        record(
+          changes.length
+            ? { ...base, outcome: 'failed', detail: `planned as read-only, but it changed the state (${changes.length} difference(s)): it would run without a journal entry`, diffs: changes }
+            : { ...base, outcome: 'verified', detail: 'read-only: the probes showed no change' },
+        );
+        continue;
+      }
       try {
         await session.undo(entry);
       } catch (err) {
@@ -144,15 +161,19 @@ export async function verifyTools(options: {
       }
       const restored = await read(probes);
       const diffs = diffStates(before, restored, { ignore });
+      const undoChanged = diffStates(after, restored, { ignore }).length > 0;
+      if (plan.strategy === 'recreate-from-snapshot' && Object.values(step.arguments ?? {}).some((v) => typeof v === 'string' && v.startsWith('${setup.'))) {
+        cleanup.push(`${step.tool} re-created a setup resource under a new id: the setup cleanup can't follow it, so check the sandbox for a leftover`);
+      }
       if (!diffs.length) {
-        record({ ...base, outcome: changed ? 'verified' : 'inconclusive', detail: changed ? 'state restored exactly' : 'the probes showed no change, so the undo was not tested: pick a probe that shows it' });
-      } else if (plan.reversibility === 'compensable') {
+        record({ ...base, outcome: changes.length ? 'verified' : 'inconclusive', detail: changes.length ? 'state restored exactly' : 'the probes showed no change, so the undo was not tested: pick a probe that shows it' });
+      } else if (plan.reversibility === 'compensable' && undoChanged) {
         record({ ...base, outcome: 'compensated', detail: `${diffs.length} difference(s) remain, as expected for a compensating undo (${plan.caveats[0] ?? plan.reasons[0]})`, diffs });
       } else {
-        record({ ...base, outcome: 'failed', detail: `${diffs.length} difference(s) remain after undo`, diffs });
+        record({ ...base, outcome: 'failed', detail: undoChanged ? `${diffs.length} difference(s) remain after undo` : `the undo changed nothing (${diffs.length} difference(s) remain)`, diffs });
       }
     } catch (err) {
-      record({ ...base, outcome: 'error', detail: (err as Error).message });
+      record({ ...base, outcome: err instanceof ToolRefusedError ? 'gated' : 'error', detail: err instanceof ToolRefusedError ? `never called: ${err.plan.reasons[0]}` : (err as Error).message });
     }
   }
 
