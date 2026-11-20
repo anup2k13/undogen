@@ -24,7 +24,7 @@ client = UndoableClient(
 todo = client.call("createTodo", body={"title": "Ship it"})
 client.call("updateTodo", params={"todoId": todo["data"]["id"]}, body={"done": True})
 client.undo()        # newest first; refuses if someone else changed the data since (ConflictError)
-client.undo_all()    # saga-style rollback
+client.undo_all()    # saga-style rollback (session=client.session: only this process's writes)
 ```
 
 Tools for agent frameworks:
