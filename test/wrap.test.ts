@@ -382,3 +382,24 @@ describe('undogen wrap: dependencies', () => {
     expect(session.dependentsOf(board.entry!).map((e) => e.seq)).toEqual([2]);
   });
 });
+
+describe('undogen wrap: paired actions that changed nothing', () => {
+  it("doesn't remove a label the issue already had", async () => {
+    const { call, state, data } = await setup();
+    const n = data(await call('create_issue', { repo: 'r', title: 'a' })).number;
+    state.issues.get(n)!.labels = ['bug']; // already there, put by someone else
+    await call('add_issue_labels', { repo: 'r', issue_number: n, labels: ['bug'] });
+    await call('add_issue_labels', { repo: 'r', issue_number: n, labels: ['p1'] });
+    await call('undogen_undo'); // p1: added by the agent, removed
+    expect(state.issues.get(n)!.labels).toEqual(['bug']);
+    const out = data(await call('undogen_undo')); // bug: the agent's call changed nothing
+    expect(out.undone).toMatchObject({ seq: 2, status: 'undone', warnings: ['the call changed nothing, so there was nothing to undo'] });
+    expect(state.issues.get(n)!.labels).toEqual(['bug']);
+  });
+
+  it('reads the parent resource for sub-resource actions', () => {
+    const plans = Object.fromEntries(planTools(issueTools as McpTool[]).map((p) => [p.tool, p]));
+    expect(plans.add_issue_labels).toMatchObject({ snapshot: { tool: 'get_issue' }, detectNoop: true, caveats: ['if get_issue shows the call changed nothing, undo does nothing'] });
+    expect(plans.star_repository!.detectNoop).toBeUndefined(); // no way to read stars: undo calls unstar regardless
+  });
+});

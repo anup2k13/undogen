@@ -31,6 +31,8 @@ export interface ToolEntry {
   inverse?: ToolCall;
   /** Why there is no inverse. */
   inverseError?: string;
+  /** The call changed nothing (the state read before and after was the same), so undo does nothing. */
+  noop?: boolean;
   /** Ids this call created (the inverse's arguments read from the result), for finding later calls that use them. */
   created?: Array<{ name: string; value: unknown }>;
   /** Read before undoing; `expected` holds what the call left, as the server reported it right after. */
@@ -150,7 +152,8 @@ export class ToolSession {
       } catch (err) {
         failure = (err as Error).message;
       }
-      if (failure !== undefined) {
+      // Only an inverse built from the snapshot is lost; a paired action's undo doesn't need it.
+      if (failure !== undefined && !plan.detectNoop) {
         plan = { ...plan, reversibility: 'unknown', reasons: [`${plan.snapshot.tool} could not read the current state first (${failure}), so this call could not be undone`, ...plan.reasons] };
       }
     }
@@ -187,6 +190,14 @@ export class ToolSession {
       // The plan was a guess that this call disproved: from now on, treat the tool as unknown (approval needed).
       if (plan.reversibility !== 'irreversible' && plan.reversibility !== 'unknown') {
         this.plans.set(tool, { ...plan, reversibility: 'unknown', strategy: 'none', inverse: undefined, reasons: [`its undo could not be worked out from a real call (${entry.inverseError})`, ...plan.reasons] });
+      }
+    }
+    if (plan.detectNoop && plan.snapshot && before !== undefined) {
+      try {
+        const read = await this.options.call(plan.snapshot.tool, resolve(plan.snapshot, args, undefined, undefined));
+        if (!read.isError && stableStringify(resultData(read)) === stableStringify(before)) entry.noop = true;
+      } catch {
+        /* can't tell: undo will call the inverse */
       }
     }
     // The write happened: journal it before anything else can fail.
@@ -256,8 +267,11 @@ export class ToolSession {
       if (!opts.cascade) throw new ToolDependencyError(entry, dependents);
       for (const d of [...dependents].reverse()) if (d.status !== 'undone') await this.undo(d, opts);
     }
+    if (entry.noop) {
+      entry.undoWarnings = [...(entry.undoWarnings ?? []), 'the call changed nothing, so there was nothing to undo'];
+      return this.finish(entry);
+    }
     if (!entry.inverse) {
-      entry.status = 'failed';
       entry.undoError = `cannot be undone: ${entry.inverseError ?? describeNoInverse(entry)}`;
       await this.store.save(entry);
       throw new ToolUndoError(`Entry #${entry.seq} (${entry.tool}) ${entry.undoError}`, entry);

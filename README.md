@@ -226,7 +226,7 @@ Tools don't come with routes, so plans come from names, input schemas, annotatio
 | `create_entities` + `delete_entities {entityNames}`, output `entities[]` | delete what was created: `entityNames` ← `entities[].name` |
 | `create_issue`, no delete, `update_issue {state: open\|closed}` | close what was created (compensable) |
 | `update_issue` + `get_issue` | read before, write the old values back; refuse if someone changed them since |
-| `star_repo` / `unstar_repo`, `add_labels` / `remove_labels` | the counterpart, same arguments |
+| `star_repo` / `unstar_repo`, `add_issue_labels` / `remove_issue_labels` | the counterpart, same arguments; with `get_issue`, nothing if the call changed nothing |
 | `move_file {source, destination}` | move back |
 | `delete_issue` + `get_issue` + `create_issue` | read before, re-create under a new id (compensable) |
 | `send_email`, `merge_pull_request`, other `delete_*` | irreversible: asks the human |

@@ -56,8 +56,10 @@ export interface ToolPlan {
   inverse?: ToolCallTemplate;
   /** restore-snapshot: every argument the call sent, other than these identifying ones, is written back from the snapshot. */
   restoreSent?: string[];
-  /** A read made before the call (restore-snapshot, recreate-from-snapshot). */
+  /** A read made before the call (restore-snapshot, recreate-from-snapshot, and paired actions with a getter). */
   snapshot?: ToolCallTemplate;
+  /** Paired actions: read again after the call; if nothing changed, undo does nothing (star an already-starred repo). */
+  detectNoop?: boolean;
   /** A read made before undoing, to refuse when someone changed what the call wrote. */
   check?: ToolCallTemplate;
   reasons: string[];
@@ -268,12 +270,17 @@ function planOne(n: Named, all: Named[], override?: ToolOverrides[string]): Tool
     const other = find([counterpart]);
     const args = other && mapArgs(n, other, false);
     if (other && args) {
+      // A getter for the resource (or the one it belongs to: add_issue_labels -> get_issue) shows whether the call changed anything.
+      const getter = others.find(
+        (g) => g.verb && GET_VERBS.has(g.verb) && g.noun !== '' && (getterNoun(g, n) || n.noun.startsWith(`${g.noun} `)) && g.required.length > 0 && g.required.every((r) => n.props.has(r)),
+      );
       return plan({
         reversibility: 'reversible',
         strategy: 'paired-action',
         inverse: { tool: other.tool.name, arguments: args },
+        ...(getter ? { snapshot: { tool: getter.tool.name, arguments: Object.fromEntries(getter.required.map((r) => [r, { from: 'args', key: r } as ArgSource])) }, detectNoop: true } : {}),
         reasons: [`${counterpart} reverses ${n.verb}`],
-        caveats: [`undo calls ${other.tool.name} even if this call changed nothing`],
+        caveats: [getter ? `if ${getter.tool.name} shows the call changed nothing, undo does nothing` : `undo calls ${other.tool.name} even if this call changed nothing`],
       });
     }
   }
