@@ -174,7 +174,10 @@ Each entry stores the *concrete* inverse request, resolved at call time. The jou
 npx undogen journal --journal .undogen/journal.jsonl
 npx undogen undo openapi.yaml --base-url https://api.example.com --journal .undogen/journal.jsonl --seq 4
 npx undogen undo openapi.yaml --base-url https://api.example.com --journal .undogen/journal.jsonl --all
+npx undogen undo openapi.yaml --base-url https://api.example.com --journal .undogen/journal.jsonl --session 8d626b94
 ```
+
+`undogen journal` lists entries under one heading per session (each client or MCP server run is a session); `--session <id>` rolls back everything one agent run did and nothing else. `python -m undogen` takes the same flags.
 
 Query parameters, form and multipart bodies, header functions and a `beforeRequest` hook (for request signing) are supported.
 

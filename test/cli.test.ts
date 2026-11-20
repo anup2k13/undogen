@@ -89,6 +89,28 @@ describe('cli', () => {
     expect((await fetch(`${server.url}/todos/${id}`)).status).toBe(404);
   });
 
+  it('journal groups entries by session, and undo --session rolls back one agent run', async () => {
+    const journal = join(dir, 'sessions.jsonl');
+    const s = await loadSpec(spec);
+    const monday = await UndoableClient.open({ spec: s, baseUrl: server.url, store: new FileJournalStore(journal) });
+    const kept = ((await monday.call('createTodo', { body: { title: 'monday' } })).data as { id: string }).id;
+    const tuesday = await UndoableClient.open({ spec: s, baseUrl: server.url, store: new FileJournalStore(journal) });
+    const a = ((await tuesday.call('createTodo', { body: { title: 'tuesday a' } })).data as { id: string }).id;
+    const b = ((await tuesday.call('createTodo', { body: { title: 'tuesday b' } })).data as { id: string }).id;
+
+    const listed = (await run('journal', '--journal', journal)).stdout;
+    expect(listed).toMatch(new RegExp(`session ${monday.session} .* · 1 write\\n`));
+    expect(listed).toMatch(new RegExp(`session ${tuesday.session} .* · 2 writes\\n`));
+    expect((await run('journal', '--journal', journal, '--session', tuesday.session)).stdout).not.toContain('#1 ');
+
+    const out = await run('undo', spec, '--base-url', server.url, '--journal', journal, '--session', tuesday.session);
+    expect(out.stdout.split('\n').map((l) => l.trim()).filter(Boolean)).toEqual([`↺ #3 createTodo  DELETE /todos/${b}`, `↺ #2 createTodo  DELETE /todos/${a}`]);
+    expect((await fetch(`${server.url}/todos/${kept}`)).status).toBe(200);
+
+    expect((await run('undo', spec, '--base-url', server.url, '--journal', journal, '--session', 'nope')).stderr).toMatch(/No entries for session nope/);
+    expect((await run('undo', spec, '--base-url', server.url, '--journal', journal, '--seq', '1', '--all')).stderr).toMatch(/use one of/);
+  });
+
   it('init, annotate, arazzo and compile write files', async () => {
     await run('init', spec, '--overrides-out', 'init/overrides.json', '--fixtures-out', 'init/fixtures.json');
     expect(JSON.parse(await readFile(join(dir, 'init/fixtures.json'), 'utf8')).unarchiveTodo.prepare).toEqual([{ operationId: 'archiveTodo' }]);

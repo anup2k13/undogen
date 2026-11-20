@@ -16,7 +16,7 @@
 - CLI output piped into a command that closes early (`| head`) no longer crashes with EPIPE.
 - Agent undo tools act on the agent's own session only; earlier sessions in a persisted journal are left to `undogen undo --journal`. Weak ETags are never sent as `If-Match`.
 - Journal files are created readable by their owner only (0600); `journalDetail: 'minimal'` stores only what undo needs (conflict-check values as salted hashes). Agent tools accept only the header parameters an operation declares, so a tool call cannot replace the configured credentials.
-- Persistent journals (`JournalStore`, `FileJournalStore`, `UndoableClient.open()`), undo by seq, `undogen undo` and `undogen journal`.
+- Persistent journals (`JournalStore`, `FileJournalStore`, `UndoableClient.open()`), undo by seq, `undogen undo` and `undogen journal`; `undogen journal` groups entries by session and `undogen undo --session <id>` rolls back one agent run (TS + Python CLIs).
 - `FileJournalStore.compact()` and `undogen journal --compact` shrink a journal to the latest version of each entry.
 - Checkpoints: `checkpoint()` / `undoTo(checkpoint)` (Python: `checkpoint()` / `undo_to()`), the `undogen_checkpoint` tool with `undogen_undo_all { to }`, and `undogen undo --after <seq>`, to roll back one task of a longer session.
 - Dependency-aware undo (`DependencyError`, `{ cascade: true }`), id remapping after re-creation, opt-in child re-creation (`restoreChildren`, `--restore-children`), recursive up to three levels (projects → tasks → notes).

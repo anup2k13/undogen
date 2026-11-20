@@ -22,8 +22,8 @@ ${c.bold('Usage')}
   undogen analyze  <spec> [--json | --html <file>] Derive an inverse for every write operation (no network)
   undogen verify   <spec> --base-url <url>         Run each operation and its inverse on a sandbox, diff the state
   undogen mcp      <spec> --base-url <url>         Serve the API as MCP tools with journaling and undo tools
-  undogen undo     <spec> --base-url <url> --journal <file> [--seq n | --all]
-  undogen journal  --journal <file> [--json]       Show a persisted journal (--compact rewrites it smaller)
+  undogen undo     <spec> --base-url <url> --journal <file> [--seq n | --all | --session id]
+  undogen journal  --journal <file> [--session id] [--json]  Show a persisted journal (--compact rewrites it smaller)
   undogen learn    <spec> --base-url <url> --out <overrides.json>   Find id bindings for unknown creates by experiment
   undogen init     <spec> [--from-report report.json]               Write starter overrides.json and fixtures.json
   undogen annotate <spec> [-o <file>]              Write x-undogen declarations and OpenAPI links into the spec
@@ -75,6 +75,7 @@ ${c.bold('lint')}
 ${c.bold('undo')}
   --seq <n>              Undo this entry (default: the most recent one)    --all   Undo everything, newest first
   --after <n>            Undo everything after entry n (a checkpoint), newest first
+  --session <id>         undo: everything one session (one agent run) did; journal: show only that session
   --force                Undo even if someone changed the data since       --cascade   Undo dependent entries first
 
 Exit codes: 0 ok, 1 an inverse failed verification (or an undo failed), 2 usage or setup error.
@@ -106,6 +107,7 @@ const OPTIONS = {
   tags: { type: 'string' },
   seq: { type: 'string' },
   after: { type: 'string' },
+  session: { type: 'string' },
   all: { type: 'boolean' },
   force: { type: 'boolean' },
   cascade: { type: 'boolean' },
@@ -202,10 +204,18 @@ async function main(argv: string[]) {
       const { before, after } = await new FileJournalStore(values.journal).compact();
       return console.log(`  ${values.journal}: ${before} lines -> ${after} entries`);
     }
-    const entries = await new FileJournalStore(values.journal).load();
+    const all = await new FileJournalStore(values.journal).load();
+    const entries = values.session ? all.filter((e) => e.session === values.session) : all;
     if (values.json) return console.log(JSON.stringify(entries, null, 2));
-    if (!entries.length) return console.log('  (empty journal)');
+    if (!entries.length) return console.log(values.session ? `  (no entries for session ${values.session})` : '  (empty journal)');
+    let session: string | undefined;
     for (const e of entries) {
+      if (e.session !== session) {
+        // One heading per session (one agent run), so `undo --session` has something to point at.
+        session = e.session;
+        const n = entries.filter((x) => x.session === session).length;
+        console.log(c.bold(`  session ${session}`) + c.dim(`  ${e.at.replace('T', ' ').slice(0, 16)} UTC · ${n} write${n === 1 ? '' : 's'}`));
+      }
       const d = describeEntry(e);
       const color = e.status === 'undone' ? c.dim : e.status === 'active' ? (s: string) => s : c.red;
       console.log(color(`  #${String(d.seq).padEnd(4)} ${d.status.padEnd(9)} ${d.operationId.padEnd(28)} ${d.request.padEnd(40)} ↺ ${d.undo ?? '(none)'}`));
@@ -340,10 +350,17 @@ async function main(argv: string[]) {
       if (!existsSync(values.journal)) throw new UsageError(`No journal at ${values.journal}`);
       const client = await UndoableClient.open({ spec, baseUrl: needBaseUrl(values), plans: analysis.plans, headers, store: new FileJournalStore(values.journal) });
       const opts = { force: values.force, cascade: values.cascade };
-      if (values.all || values.after) {
+      if ([values.seq !== undefined, !!values.all, values.after !== undefined, values.session !== undefined].filter(Boolean).length > 1) {
+        throw new UsageError('use one of --seq, --all, --after and --session');
+      }
+      if (values.all || values.after || values.session) {
         const after = values.after !== undefined ? Number(values.after) : undefined;
         if (after !== undefined && !Number.isInteger(after)) throw new UsageError('--after must be a number');
-        const { undone, failed } = await client.undoAll({ ...opts, after });
+        if (values.session && !client.journal.some((e) => e.session === values.session)) {
+          throw new UsageError(`No entries for session ${values.session} in ${values.journal} (see undogen journal)`);
+        }
+        const { undone, failed } = await client.undoAll({ ...opts, after, session: values.session });
+        if (!undone.length && !failed.length) console.log('  nothing to undo');
         for (const e of undone) console.log(c.green(`  ↺ #${e.seq} ${e.operationId}  ${describeEntry(e).undo}`));
         for (const f of failed) console.log(c.red(`  ✗ #${f.entry.seq} ${f.entry.operationId}: ${f.error.message}`));
         if (failed.length) process.exitCode = 1;

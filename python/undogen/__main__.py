@@ -1,7 +1,7 @@
 """Inspect and roll back journals from Python, without Node:
 
-    python -m undogen journal --journal .undogen/journal.jsonl
-    python -m undogen undo undogen.json --base-url https://api.example.com --journal .undogen/journal.jsonl [--seq N | --after N | --all] [--force] [--cascade]
+    python -m undogen journal --journal .undogen/journal.jsonl [--session ID]
+    python -m undogen undo undogen.json --base-url https://api.example.com --journal .undogen/journal.jsonl [--seq N | --after N | --all | --session ID] [--force] [--cascade]
     python -m undogen journal --journal .undogen/journal.jsonl --compact
 
 The bundle comes from `undogen compile spec.yaml -o undogen.json`. Journals written by either runtime work.
@@ -36,6 +36,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     j = sub.add_parser("journal", help="show a journal")
     j.add_argument("--journal", required=True)
     j.add_argument("--json", action="store_true")
+    j.add_argument("--session", help="show only this session (one agent run)")
     j.add_argument("--compact", action="store_true", help="rewrite it with the latest version of each entry")
 
     u = sub.add_parser("undo", help="undo entries of a journal")
@@ -47,6 +48,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     which.add_argument("--seq", type=int, help="undo this entry (default: the most recent one)")
     which.add_argument("--after", type=int, help="undo everything after this entry (a checkpoint)")
     which.add_argument("--all", action="store_true", help="undo everything, newest first")
+    which.add_argument("--session", help="undo everything this session (one agent run) did, newest first")
     u.add_argument("--force", action="store_true", help="undo even if someone changed the data since")
     u.add_argument("--cascade", action="store_true", help="undo dependent entries first")
 
@@ -58,13 +60,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             r = store.compact()
             print(f"  {args.journal}: {r['before']} lines -> {r['after']} entries")
             return 0
-        entries = store.load()
+        entries = [e for e in store.load() if args.session is None or e.get("session") == args.session]
         if args.json:
             print(json.dumps(entries, indent=2))
             return 0
         if not entries:
-            print("  (empty journal)")
+            print(f"  (no entries for session {args.session})" if args.session else "  (empty journal)")
+        session = None
         for e in entries:
+            if e.get("session") != session:
+                # One heading per session (one agent run), so `undo --session` has something to point at.
+                session = e.get("session")
+                n = sum(1 for x in entries if x.get("session") == session)
+                print(f"  session {session}  {e['at'].replace('T', ' ')[:16]} UTC · {n} write{'' if n == 1 else 's'}")
             d = describe_entry(e)
             print(f"  #{str(d['seq']).ljust(4)} {d['status'].ljust(9)} {d['operationId'].ljust(28)} {d['request'].ljust(40)} ↺ {d['undo'] or '(none)'}")
             if e.get("undoError"):
@@ -75,8 +83,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"error: no journal at {args.journal}", file=sys.stderr)
         return 2
     client = UndoableClient(args.bundle, args.base_url, store=store, headers=_headers(args.header))
-    if args.all or args.after is not None:
-        result = client.undo_all(force=args.force, after=args.after)
+    if args.all or args.after is not None or args.session is not None:
+        if args.session is not None and not any(e.get("session") == args.session for e in client.journal):
+            print(f"error: no entries for session {args.session} in {args.journal} (see journal)", file=sys.stderr)
+            return 2
+        result = client.undo_all(force=args.force, after=args.after, session=args.session)
+        if not result["undone"] and not result["failed"]:
+            print("  nothing to undo")
         for e in result["undone"]:
             print(f"  ↺ #{e['seq']} {e['operationId']}  {describe_entry(e)['undo']}")
         for f in result["failed"]:

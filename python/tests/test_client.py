@@ -437,3 +437,25 @@ def test_chosen_names_are_not_matched_in_unrelated_bodies():
     ]
     c._id_map = {}
     assert [e["seq"] for e in c.dependents_of(c.journal[0])] == [3]
+
+
+def test_python_cli_sessions(bundle_path, server_url, tmp_path, capsys):
+    from undogen.__main__ import main
+
+    path = str(tmp_path / "sessions.jsonl")
+    monday = UndoableClient(bundle_path, server_url, store=FileJournalStore(path))
+    kept = monday.call("createTodo", body={"title": "monday"})["data"]["id"]
+    tuesday = UndoableClient(bundle_path, server_url, store=FileJournalStore(path))
+    a = tuesday.call("createTodo", body={"title": "tuesday a"})["data"]["id"]
+    b = tuesday.call("createTodo", body={"title": "tuesday b"})["data"]["id"]
+
+    assert main(["journal", "--journal", path]) == 0
+    out = capsys.readouterr().out
+    assert f"session {monday.session}" in out and "· 1 write\n" in out
+    assert f"session {tuesday.session}" in out and "· 2 writes\n" in out
+
+    assert main(["undo", bundle_path, "--base-url", server_url, "--journal", path, "--session", tuesday.session]) == 0
+    lines = [line.strip() for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert lines == [f"↺ #3 createTodo  DELETE /todos/{b}", f"↺ #2 createTodo  DELETE /todos/{a}"]
+    assert get(f"{server_url}/todos/{kept}")[0] == 200
+    assert main(["undo", bundle_path, "--base-url", server_url, "--journal", path, "--session", "nope"]) == 2
