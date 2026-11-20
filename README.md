@@ -209,7 +209,7 @@ Other frameworks get the same tools from `toolDefinitions(client, spec.operation
 
 ### 4b. Put undo in front of an existing MCP server (experimental)
 
-Already using an MCP server (an issue tracker's, a notes app's, the filesystem one)? `undogen wrap` sits in front of it: the agent sees the same tools, every write is journaled with the call that undoes it, and the undo tools above are added.
+Already using an MCP server (an issue tracker's, a notes app's, the filesystem one)? `undogen wrap` sits in front of it ([config example](examples/mcp/wrap_config.json)): the agent sees the same tools, every write is journaled with the call that undoes it, and the undo tools above are added.
 
 ```bash
 npx undogen wrap --analyze -- npx -y @modelcontextprotocol/server-memory   # what each tool's undo would be

@@ -1,0 +1,33 @@
+{
+  "mcpServers": {
+    "memory": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "/absolute/path/to/undogen",
+        "wrap",
+        "--journal",
+        "/absolute/path/to/.undogen/memory.jsonl",
+        "--",
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ]
+    },
+    "github": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "/absolute/path/to/undogen",
+        "wrap",
+        "--url",
+        "https://api.githubcopilot.com/mcp/",
+        "--header",
+        "authorization: Bearer ${GITHUB_TOKEN}",
+        "--journal",
+        "/absolute/path/to/.undogen/github.jsonl"
+      ],
+      "env": { "GITHUB_TOKEN": "YOUR_TOKEN" }
+    }
+  }
+}

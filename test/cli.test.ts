@@ -209,6 +209,15 @@ describe('examples', () => {
   it('the Claude Desktop config and the GitHub workflow are well-formed', async () => {
     const cfg = JSON.parse(await readFile(join(root, 'examples/mcp/claude_desktop_config.json'), 'utf8'));
     expect(cfg.mcpServers['todo-api'].args.slice(0, 3)).toEqual(['-y', '/absolute/path/to/undogen', 'mcp']);
+    // undogen wrap: a local server after --, a hosted one with --url and a header filled from the config's env.
+    const wrapCfg = JSON.parse(await readFile(join(root, 'examples/mcp/wrap_config.json'), 'utf8')).mcpServers;
+    expect(wrapCfg.memory.args.slice(0, 3)).toEqual(['-y', '/absolute/path/to/undogen', 'wrap']);
+    expect(wrapCfg.memory.args).toContain('--');
+    const { expandHeaders } = await import('../src/wrap/cli.js');
+    const header = wrapCfg.github.args[wrapCfg.github.args.indexOf('--header') + 1] as string;
+    const [name, value] = [header.slice(0, header.indexOf(':')), header.slice(header.indexOf(':') + 1).trim()];
+    expect(expandHeaders({ [name]: value }, wrapCfg.github.env)).toEqual({ authorization: 'Bearer YOUR_TOKEN' });
+    expect(new URL(wrapCfg.github.args[wrapCfg.github.args.indexOf('--url') + 1]).protocol).toBe('https:');
     const wf = parseYaml(await readFile(join(root, 'examples/github-workflow/undogen.yml'), 'utf8'));
     expect(Object.keys(wf.jobs)).toEqual(['diff', 'verify']);
     const action = parseYaml(await readFile(join(root, 'action.yml'), 'utf8'));
