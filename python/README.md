@@ -5,7 +5,7 @@ Journaled, undoable API calls for Python agents. The plans come from the
 
 ```bash
 npx undogen compile openapi.yaml -o undogen.json
-pip install undogen                    # no dependencies
+pip install undogen                    # no dependencies (until released: pip install ./python from a clone)
 pip install "undogen[langchain]"       # LangChain / LangGraph tools
 pip install "undogen[openai-agents]"   # OpenAI Agents SDK tools
 ```

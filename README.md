@@ -60,7 +60,14 @@ npm run demo        # starts a demo API, compiles, runs an agent session, verifi
 
 ## Use it
 
-> undogen is not on npm or PyPI yet. Until the first release (see `.github/workflows/release.yml`), run it from a clone: `npm install && npm run build && node dist/cli.js …`, and `pip install ./python`.
+> **undogen is not on npm or PyPI yet.** Until the first release, install it from a clone:
+>
+> ```bash
+> git clone https://github.com/anup2k13/undogen && cd undogen && npm install && npm run build
+> pip install ./python    # the Python client, if you need it
+> ```
+>
+> Then, wherever this README says `npx undogen …`, run `npx -y /path/to/undogen …` (any directory), and in MCP client configs use `"args": ["-y", "/path/to/undogen", "mcp", …]` instead of `"undogen"`.
 
 ### 1. See what's undoable in an API
 
@@ -238,7 +245,7 @@ Not yet: dependencies between journaled calls, the wrapped server's resources an
 
 ```bash
 npx undogen compile openapi.yaml -o undogen.json   # operations + compiled plans
-pip install undogen                                # no dependencies
+pip install undogen                                # no dependencies (until released: pip install ./python from a clone)
 ```
 
 ```python

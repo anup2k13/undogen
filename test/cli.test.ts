@@ -180,7 +180,7 @@ describe('cli: mcp over stdio', () => {
 describe('examples', () => {
   it('the Claude Desktop config and the GitHub workflow are well-formed', async () => {
     const cfg = JSON.parse(await readFile(join(root, 'examples/mcp/claude_desktop_config.json'), 'utf8'));
-    expect(cfg.mcpServers['todo-api'].args.slice(0, 3)).toEqual(['-y', 'undogen', 'mcp']);
+    expect(cfg.mcpServers['todo-api'].args.slice(0, 3)).toEqual(['-y', '/absolute/path/to/undogen', 'mcp']);
     const wf = parseYaml(await readFile(join(root, 'examples/github-workflow/undogen.yml'), 'utf8'));
     expect(Object.keys(wf.jobs)).toEqual(['diff', 'verify']);
     const action = parseYaml(await readFile(join(root, 'action.yml'), 'utf8'));

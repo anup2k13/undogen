@@ -17,6 +17,7 @@ jobs:
         with:
           node-version: 22
       - run: git show "origin/${{ github.base_ref }}:openapi.yaml" > /tmp/base.yaml
+      # undogen is not on npm yet: until it is, clone and build it in an earlier step and run npx -y ./undogen here.
       - run: npx -y undogen diff /tmp/base.yaml openapi.yaml --markdown >> "$GITHUB_STEP_SUMMARY"
 
   # Prove the inverses against a sandbox and annotate failures on the spec.

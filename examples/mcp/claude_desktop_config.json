@@ -4,7 +4,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "undogen",
+        "/absolute/path/to/undogen",
         "mcp",
         "/absolute/path/to/openapi.yaml",
         "--base-url",
