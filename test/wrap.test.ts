@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { ElicitRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { ElicitRequestSchema, ResourceListChangedNotificationSchema, ToolListChangedNotificationSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FileJournalStore } from '../src/index.js';
 import { planTools, resultKeysFor, type McpTool } from '../src/wrap/plans.js';
@@ -21,7 +21,7 @@ afterAll(async () => {
 
 /** The fixture issues server, wrapped, with an agent connected to the wrapper. */
 async function setup(opts: { irreversible?: 'ask' | 'allow' | 'deny'; elicit?: boolean; journal?: string; prompts?: string[] } = {}) {
-  const { server: upstreamServer, state } = createIssuesServer();
+  const { server: upstreamServer, state, addTools } = createIssuesServer();
   const [up1, up2] = InMemoryTransport.createLinkedPair();
   await upstreamServer.connect(up1);
   const upstream = new Client({ name: 'undogen', version: '1' });
@@ -39,7 +39,7 @@ async function setup(opts: { irreversible?: 'ask' | 'allow' | 'deny'; elicit?: b
   await agent.connect(b);
   const call = async (name: string, args: Record<string, unknown> = {}) => (await agent.callTool({ name, arguments: args })) as CallToolResult;
   const data = (r: CallToolResult) => JSON.parse((r.content[0] as { text: string }).text);
-  return { agent, state, call, data, session };
+  return { agent, state, call, data, session, addTools, upstreamServer };
 }
 
 describe('planTools', () => {
@@ -571,5 +571,40 @@ describe('undogen wrap: resources and prompts', () => {
     expect(JSON.parse((read.contents[0] as { text: string }).text)).toEqual([...state.issues.values()]);
     expect((await agent.listPrompts()).prompts.map((p) => p.name)).toEqual(['triage']);
     expect((await agent.getPrompt({ name: 'triage', arguments: { issue_number: '1' } })).messages[0]!.content).toEqual({ type: 'text', text: 'Triage issue 1' });
+  });
+});
+
+describe('undogen wrap: changes on the wrapped server, progress', () => {
+  it('plans tools the server adds later, and tells the agent', async () => {
+    const { agent, addTools, call, data } = await setup();
+    const changed = new Promise<void>((resolve) => agent.setNotificationHandler(ToolListChangedNotificationSchema, () => resolve()));
+    const ids = { type: 'object', properties: { repo: { type: 'string' }, issue_number: { type: 'integer' } }, required: ['repo', 'issue_number'] };
+    await addTools([{ name: 'pin_issue', inputSchema: ids }, { name: 'unpin_issue', inputSchema: ids }]);
+    await changed;
+    const pin = (await agent.listTools()).tools.find((t) => t.name === 'pin_issue');
+    expect(pin?.description).toMatch(/Can be undone with undogen_undo: unpin reverses pin/);
+    expect(data(await call('undogen_preview', { tool: 'pin_issue' }))).toMatchObject({ strategy: 'paired-action', undo: 'unpin_issue' });
+  });
+
+  it('relays resource list changes and progress', async () => {
+    const { agent, addTools, upstreamServer } = await setup();
+    const listChanged = new Promise<void>((resolve) => agent.setNotificationHandler(ResourceListChangedNotificationSchema, () => resolve()));
+    await upstreamServer.sendResourceListChanged();
+    await listChanged;
+
+    const toolsChanged = new Promise<void>((resolve) => agent.setNotificationHandler(ToolListChangedNotificationSchema, () => resolve()));
+    await addTools([{ name: 'count', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true } }]);
+    await toolsChanged; // the wrapper has planned the new tool
+    const progress: number[] = [];
+    await agent.callTool({ name: 'count', arguments: {} }, undefined, { onprogress: (p) => progress.push(p.progress) });
+    expect(progress).toEqual([1, 2, 3]);
+  });
+});
+
+describe('expandHeaders', () => {
+  it('fills ${VAR} from the environment and refuses unset ones', async () => {
+    const { expandHeaders } = await import('../src/wrap/cli.js');
+    expect(expandHeaders({ authorization: 'Bearer ${TOKEN}' }, { TOKEN: 'abc' })).toEqual({ authorization: 'Bearer abc' });
+    expect(() => expandHeaders({ authorization: 'Bearer ${MISSING}' }, {})).toThrow(/uses \$\{MISSING\}, which is not set/);
   });
 });

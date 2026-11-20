@@ -53,7 +53,13 @@ export const issueTools = [
 const newState = () => ({ issues: new Map<number, Issue>(), starred: new Set<string>(), emails: [] as Array<{ to: string; body: string }>, files: new Map<string, string>(), next: 1 });
 
 export function createIssuesServer(state = newState()) {
-  const server = new Server({ name: 'issues', version: '1.0.0' }, { capabilities: { tools: {}, resources: {}, prompts: {} }, instructions: 'Issue numbers are per repository.' });
+  const server = new Server({ name: 'issues', version: '1.0.0' }, { capabilities: { tools: { listChanged: true }, resources: { listChanged: true }, prompts: {} }, instructions: 'Issue numbers are per repository.' });
+  const extraTools: unknown[] = [];
+  /** Add tools at runtime and announce it (tools/list_changed), as servers with dynamic tools do. */
+  const addTools = async (tools: unknown[]) => {
+    extraTools.push(...tools);
+    await server.sendToolListChanged();
+  };
   // A resource and a prompt, so wrappers can be checked to pass them through.
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [{ uri: 'issues://all', name: 'All issues', mimeType: 'application/json' }] }));
   server.setRequestHandler(ReadResourceRequestSchema, async (req) => ({
@@ -66,8 +72,8 @@ export function createIssuesServer(state = newState()) {
   const text = (v: unknown): CallToolResult => ({ content: [{ type: 'text', text: JSON.stringify(v) }] });
   const fail = (message: string): CallToolResult => ({ isError: true, content: [{ type: 'text', text: message }] });
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: issueTools as never }));
-  server.setRequestHandler(CallToolRequestSchema, async (req): Promise<CallToolResult> => {
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...issueTools, ...extraTools] as never }));
+  server.setRequestHandler(CallToolRequestSchema, async (req, extra): Promise<CallToolResult> => {
     const a = (req.params.arguments ?? {}) as Record<string, any>;
     const issue = state.issues.get(Number(a.issue_number));
     switch (req.params.name) {
@@ -106,11 +112,17 @@ export function createIssuesServer(state = newState()) {
       case 'create_or_update_file':
         state.files.set(a.path, a.content);
         return text({ path: a.path });
+      case 'count': {
+        // Reports progress against the caller's token (a tool added with addTools).
+        const token = req.params._meta?.progressToken;
+        for (let i = 1; i <= 3; i++) if (token !== undefined) await extra.sendNotification({ method: 'notifications/progress', params: { progressToken: token, progress: i, total: 3 } });
+        return text({ counted: 3 });
+      }
       default:
         return fail(`Unknown tool ${req.params.name}`);
     }
   });
-  return { server, state };
+  return { server, state, addTools };
 }
 
 /**
@@ -122,7 +134,7 @@ export async function startIssuesHttpServer(opts: { token?: string } = {}) {
   const { StreamableHTTPServerTransport } = await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
   const state = newState();
   const http = createServer(async (req, res) => {
-    if (opts.token && req.headers.authorization !== `Bearer ${opts.token}`) return void res.writeHead(401).end('unauthorized');
+    if (opts.token && req.headers.authorization !== `Bearer ${opts.token}`) return void res.writeHead(401, { 'content-type': 'application/json' }).end('{"error":"invalid_token"}');
     if (req.method !== 'POST') return void res.writeHead(405).end();
     const { server } = createIssuesServer(state);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });

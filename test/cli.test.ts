@@ -149,7 +149,9 @@ describe('cli', () => {
     const http = await startIssuesHttpServer({ token: 't0ken' });
     try {
       const refused = await run('wrap', '--analyze', '--url', http.url);
-      expect(refused.code).not.toBe(0); // no token: 401
+      expect(refused.stderr).toMatch(/The server wants credentials \(HTTP 401\): pass --header "authorization: Bearer/); // a JSON 401 body, no "unauthorized" in it
+      const wrong = await run('wrap', '--analyze', '--url', http.url, '--header', 'authorization: Bearer nope');
+      expect(wrong.stderr).toMatch(/The server refused the credentials \(HTTP 401\): check the token/);
       const analyzed = await run('wrap', '--analyze', '--url', http.url, '--header', 'authorization: Bearer t0ken');
       expect(analyzed.stdout).toContain('10 tools: 2 read-only');
 
@@ -162,6 +164,9 @@ describe('cli', () => {
       await agent.close();
 
       expect((await run('wrap', '--url', http.url, '--', 'npx', 'x')).stderr).toMatch(/either --url or a command/);
+      expect((await run('wrap', '--url', 'http://mcp.example.com/mcp')).stderr).toMatch(/must be https \(plain http only for localhost\)/);
+      expect((await run('wrap', '--header', 'authorization: x', '--', 'npx', 'x')).stderr).toMatch(/--header is for servers reached with --url/);
+      expect((await run('analyze', spec, '--url', 'https://x')).stderr).toMatch(/--url is only for wrap \(did you mean --base-url\?\)/);
     } finally {
       await http.close();
     }

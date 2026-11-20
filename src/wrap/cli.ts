@@ -2,7 +2,7 @@
 import { readFile } from 'node:fs/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { c } from '../report.js';
 import { FileJournalStore } from '../runtime.js';
@@ -32,9 +32,29 @@ export interface WrapFlags {
 
 export class WrapUsageError extends Error {}
 
+/**
+ * Header values may name environment variables, `${GITHUB_TOKEN}`, so a token can stay out of MCP client
+ * config files and process listings (the client starts undogen with its environment).
+ */
+export function expandHeaders(headers: Record<string, string>, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).map(([k, v]) => [
+      k,
+      v.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name: string) => {
+        const value = env[name];
+        if (value === undefined) throw new WrapUsageError(`--header ${k} uses \${${name}}, which is not set`);
+        return value;
+      }),
+    ]),
+  );
+}
+
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
 /** Connect to the server to wrap: started with the command after `--`, or at --url over Streamable HTTP. */
-async function connectUpstream(command: string[], flags: WrapFlags): Promise<Client> {
+async function connectUpstream(command: string[], flags: WrapFlags): Promise<{ upstream: Client; http?: StreamableHTTPClientTransport; label: string }> {
   const upstream = new Client({ name: 'undogen-wrap', version: VERSION });
+  const headers = expandHeaders(flags.headers ?? {});
   if (flags.url) {
     if (command.length) throw new WrapUsageError('give either --url or a command after --, not both');
     let url: URL;
@@ -43,22 +63,32 @@ async function connectUpstream(command: string[], flags: WrapFlags): Promise<Cli
     } catch {
       throw new WrapUsageError(`--url is not a URL: ${flags.url}`);
     }
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new WrapUsageError('--url must be http(s)');
-    // Header auth only (a token): servers that need an OAuth sign-in aren't supported yet.
-    try {
-      await upstream.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: flags.headers ?? {} } }));
-    } catch (err) {
-      const message = (err as Error).message;
-      const auth = /\b401\b|unauthori[sz]ed|forbidden|\b403\b/i.test(message);
-      throw new Error(`Could not connect to ${url.origin}${url.pathname}: ${message}${auth ? '. The server wants credentials: pass --header "authorization: Bearer <token>"' : ''}`);
+    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && LOCAL_HOSTS.has(url.hostname))) {
+      throw new WrapUsageError('--url must be https (plain http only for localhost): headers such as tokens would be sent unencrypted');
     }
-    return upstream;
+    const label = `${url.origin}${url.pathname}`;
+    // Header auth only (a token): servers that need an OAuth sign-in aren't supported yet.
+    const http = new StreamableHTTPClientTransport(url, { requestInit: { headers } });
+    try {
+      await upstream.connect(http);
+    } catch (err) {
+      const status = err instanceof StreamableHTTPError ? err.code : undefined;
+      const auth = status === 401 || status === 403 || /\b40[13]\b|unauthori[sz]ed|forbidden/i.test((err as Error).message);
+      const hint = !auth
+        ? ''
+        : Object.keys(headers).length
+          ? `. The server refused the credentials${status ? ` (HTTP ${status})` : ''}: check the token and its scopes`
+          : `. The server wants credentials${status ? ` (HTTP ${status})` : ''}: pass --header "authorization: Bearer \${YOUR_TOKEN_VARIABLE}"`;
+      throw new Error(`Could not connect to ${label}: ${(err as Error).message}${hint}`);
+    }
+    return { upstream, http, label };
   }
+  if (Object.keys(headers).length) throw new WrapUsageError('--header is for servers reached with --url; a command gets its credentials from the environment');
   const [cmd, ...args] = command;
   if (!cmd) throw new WrapUsageError('wrap needs the server to wrap: a command after --, e.g. undogen wrap -- npx -y @acme/mcp-server, or --url https://…');
   // The wrapped server gets this process's environment (it usually needs a token from it); its stderr is ours.
   await upstream.connect(new StdioClientTransport({ command: cmd, args, env: process.env as Record<string, string>, stderr: 'inherit' }));
-  return upstream;
+  return { upstream, label: cmd };
 }
 
 export async function runWrap(flags: WrapFlags, command: string[]): Promise<number> {
@@ -66,7 +96,7 @@ export async function runWrap(flags: WrapFlags, command: string[]): Promise<numb
   if (!['ask', 'allow', 'deny'].includes(mode)) throw new WrapUsageError('--irreversible must be ask, allow or deny');
   const overrides = flags.overrides ? (JSON.parse(await readFile(flags.overrides, 'utf8')) as ToolOverrides) : undefined;
   if (flags.undo && !flags.journal) throw new WrapUsageError('wrap --undo needs --journal <file>');
-  const upstream = await connectUpstream(command, flags);
+  const { upstream, http, label } = await connectUpstream(command, flags);
 
   try {
     if (flags.analyze) {
@@ -131,17 +161,25 @@ export async function runWrap(flags: WrapFlags, command: string[]): Promise<numb
       store: flags.journal ? new FileJournalStore<ToolEntry>(flags.journal) : undefined,
     });
     await server.connect(new StdioServerTransport());
-    console.error(`undogen wrap: serving ${upstream.getServerVersion()?.name ?? command[0]} (${tools.length} tools) with undo over stdio`);
-    // Stop when either side goes away: the client closing our stdin (the MCP stdio shutdown), a signal, or the wrapped server exiting.
+    console.error(`undogen wrap: serving ${upstream.getServerVersion()?.name ?? label} (${tools.length} tools) with undo over stdio`);
+    // Stop when either side goes away: the client closing our stdin (the MCP stdio shutdown), a signal, the wrapped
+    // server exiting, or a hosted server dropping our session (every later call would fail).
     await new Promise<void>((resolve) => {
       server.onclose = resolve;
       upstream.onclose = resolve;
+      upstream.onerror = (err) => {
+        if (err instanceof StreamableHTTPError && err.code === 404) {
+          console.error(`undogen wrap: ${label} ended the session; stopping`);
+          resolve();
+        }
+      };
       process.stdin.once('end', resolve);
       process.stdin.once('close', resolve);
       process.once('SIGTERM', resolve);
       process.once('SIGINT', resolve);
     });
     await server.close().catch(() => undefined);
+    await http?.terminateSession().catch(() => undefined); // a hosted server can drop our session now, not at expiry
     await upstream.close().catch(() => undefined); // stops the wrapped server's process
     process.exit(0);
   } finally {

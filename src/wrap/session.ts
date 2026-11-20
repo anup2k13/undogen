@@ -3,12 +3,13 @@
  * The counterpart of UndoableClient for tools instead of HTTP operations.
  */
 import { randomUUID } from 'node:crypto';
+import type { RequestOptions } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { getPath, MemoryJournalStore, stableStringify, type JournalStore } from '../runtime.js';
 import { planKey, type ArgSource, type ToolCallTemplate, type ToolPlan } from './plans.js';
 
 /** Calls a tool on the wrapped server. */
-export type CallUpstream = (name: string, args: Record<string, unknown>) => Promise<CallToolResult>;
+export type CallUpstream = (name: string, args: Record<string, unknown>, options?: RequestOptions) => Promise<CallToolResult>;
 
 export interface ToolCall {
   tool: string;
@@ -115,6 +116,18 @@ export class ToolSession {
   private readonly plans: Map<string, ToolPlan>;
   /** Multi-action tools: the argument that picks the action. */
   private readonly dispatchArg = new Map<string, string>();
+  /** Plans a real call disproved; they survive replacePlans. */
+  private readonly downgraded = new Map<string, ToolPlan>();
+
+  /** New plans after the wrapped server's tools changed; what real calls taught is kept. */
+  replacePlans(plans: ToolPlan[]): void {
+    this.plans.clear();
+    this.dispatchArg.clear();
+    for (const p of plans) {
+      this.plans.set(planKey(p), this.downgraded.get(planKey(p)) ?? p);
+      if (p.dispatch) this.dispatchArg.set(p.tool, p.dispatch.arg);
+    }
+  }
   private readonly store: JournalStore<ToolEntry>;
   private seq = 0;
 
@@ -156,9 +169,10 @@ export class ToolSession {
   }
 
   /** Call a tool: reads pass through; writes are journaled with the call that undoes them. */
-  async call(tool: string, args: Record<string, unknown>): Promise<{ result: CallToolResult; entry?: ToolEntry }> {
+  /** `options` (cancellation, progress) apply to the call itself, not to the reads around it. */
+  async call(tool: string, args: Record<string, unknown>, options?: RequestOptions): Promise<{ result: CallToolResult; entry?: ToolEntry }> {
     let plan = this.planFor(tool, args);
-    if (plan.strategy === 'no-side-effects') return { result: await this.options.call(tool, args) };
+    if (plan.strategy === 'no-side-effects') return { result: await this.options.call(tool, args, options) };
     const flag = plan.unsafeFlags?.find((f) => args[f] === true);
     if (flag && plan.reversibility !== 'irreversible') {
       plan = { ...plan, reversibility: 'unknown', reasons: [`with ${flag}: true, ${tool} replaces something its undo can't put back`, ...plan.reasons] };
@@ -183,7 +197,7 @@ export class ToolSession {
     if (plan.reversibility === 'irreversible' || plan.reversibility === 'unknown') {
       if (!(await this.options.approve?.(plan, { tool, arguments: args }))) throw new ToolRefusedError(plan);
     }
-    const result = await this.options.call(tool, args);
+    const result = await this.options.call(tool, args, options);
     if (result.isError) return { result }; // nothing happened: nothing to undo
 
     const data = resultData(result);
@@ -216,7 +230,9 @@ export class ToolSession {
       entry.inverseError = (err as Error).message;
       // The plan was a guess that this call disproved: from now on, treat the tool as unknown (approval needed).
       if (plan.reversibility !== 'irreversible' && plan.reversibility !== 'unknown') {
-        this.plans.set(planKey(plan), { ...plan, reversibility: 'unknown', strategy: 'none', inverse: undefined, reasons: [`its undo could not be worked out from a real call (${entry.inverseError})`, ...plan.reasons] });
+        const downgraded: ToolPlan = { ...plan, reversibility: 'unknown', strategy: 'none', inverse: undefined, reasons: [`its undo could not be worked out from a real call (${entry.inverseError})`, ...plan.reasons] };
+        this.plans.set(planKey(plan), downgraded);
+        this.downgraded.set(planKey(plan), downgraded);
       }
     }
     if (plan.detectNoop && plan.snapshot && before !== undefined) {

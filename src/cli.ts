@@ -203,6 +203,7 @@ async function main(argv: string[]) {
   const { values, positionals } = parseArgs({ args: wrapping ? own : argv, allowPositionals: true, options: OPTIONS });
   if (values.version) return console.log(VERSION);
   const [command, specPath] = positionals;
+  if (values.url && !wrapping) throw new UsageError('--url is only for wrap (did you mean --base-url?)');
   if (wrapping && !values.help) {
     if (positionals.length > 1) throw new UsageError(`wrap takes the server's command after --, e.g. undogen wrap -- ${positionals.slice(1).join(' ')}`);
     const { runWrap, WrapUsageError } = await import('./wrap/cli.js');

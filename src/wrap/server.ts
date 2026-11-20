@@ -7,15 +7,24 @@
  */
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import type { RequestOptions } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import {
   CallToolRequestSchema,
+  CompleteRequestSchema,
   GetPromptRequestSchema,
   ListPromptsRequestSchema,
   ListResourcesRequestSchema,
   ListResourceTemplatesRequestSchema,
   ListToolsRequestSchema,
+  PromptListChangedNotificationSchema,
   ReadResourceRequestSchema,
+  ResourceListChangedNotificationSchema,
+  ResourceUpdatedNotificationSchema,
+  SubscribeRequestSchema,
+  ToolListChangedNotificationSchema,
+  UnsubscribeRequestSchema,
   type CallToolResult,
+  type ServerNotification,
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
 import { maskedJson } from '../mcp.js';
@@ -66,13 +75,17 @@ const json = (value: unknown): CallToolResult => ({ content: [{ type: 'text', te
 export async function createWrapServer(options: WrapOptions): Promise<{ server: Server; session: ToolSession; plans: ToolPlan[]; tools: Tool[] }> {
   const upstreamInfo = options.upstream.getServerVersion();
   const title = upstreamInfo?.name ?? 'wrapped';
-  const tools = await listAllTools(options.upstream);
+  let tools = await listAllTools(options.upstream);
   const clash = tools.find((t) => UNDO_TOOLS.includes(t.name));
   if (clash) throw new Error(`The wrapped server already has a tool named ${clash.name}`);
-  const plans = planTools(tools as McpTool[], options.overrides);
+  let plans = planTools(tools as McpTool[], options.overrides);
   const upstreamCaps = options.upstream.getServerCapabilities();
   const plansOf = new Map<string, ToolPlan[]>();
-  for (const p of plans) plansOf.set(p.tool, [...(plansOf.get(p.tool) ?? []), p]);
+  const indexPlans = () => {
+    plansOf.clear();
+    for (const p of plans) plansOf.set(p.tool, [...(plansOf.get(p.tool) ?? []), p]);
+  };
+  indexPlans();
   /** One line per plan; per action for a multi-action tool. */
   const describeTool = (name: string) =>
     plansOf
@@ -85,7 +98,12 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
     { name: `undogen-wrap(${title})`, version: VERSION },
     {
       // Resources and prompts are reads: they pass through unchanged when the wrapped server has them.
-      capabilities: { tools: {}, ...(upstreamCaps?.resources ? { resources: {} } : {}), ...(upstreamCaps?.prompts ? { prompts: {} } : {}) },
+      capabilities: {
+        tools: { listChanged: true },
+        ...(upstreamCaps?.resources ? { resources: { subscribe: !!upstreamCaps.resources.subscribe, listChanged: !!upstreamCaps.resources.listChanged } } : {}),
+        ...(upstreamCaps?.prompts ? { prompts: { listChanged: !!upstreamCaps.prompts.listChanged } } : {}),
+        ...(upstreamCaps?.completions ? { completions: {} } : {}),
+      },
       instructions: [
         `These are the tools of ${title}, wrapped by undogen: every write is journaled with the call that undoes it.`,
         '- Before a multi-step task, call undogen_checkpoint and keep the number; undogen_undo_all with { to: checkpoint } rolls back only that task.',
@@ -97,7 +115,7 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
   );
 
   const session = await ToolSession.open({
-    call: async (name, args) => (await options.upstream.callTool({ name, arguments: args })) as CallToolResult,
+    call: async (name, args, opts) => (await options.upstream.callTool({ name, arguments: args }, undefined, opts)) as CallToolResult,
     plans,
     store: options.store,
     approve: async (plan, call) => {
@@ -166,15 +184,63 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
     },
   ];
 
+  /**
+   * The agent's request, as the wrapper sends it on: its progress token is replaced by our own (progress is relayed
+   * back under the agent's token), and its cancellation applies upstream too.
+   */
+  const relay = <P extends { _meta?: { progressToken?: string | number } } | undefined>(
+    params: P,
+    extra: { signal: AbortSignal; sendNotification: (n: ServerNotification) => Promise<void> },
+  ): [P, RequestOptions] => {
+    const token = params?._meta?.progressToken;
+    const { _meta, ...rest } = (params ?? {}) as NonNullable<P>;
+    void _meta;
+    return [
+      rest as P,
+      {
+        signal: extra.signal,
+        resetTimeoutOnProgress: true,
+        ...(token !== undefined
+          ? { onprogress: (p) => void extra.sendNotification({ method: 'notifications/progress', params: { ...p, progressToken: token } }).catch(() => undefined) }
+          : {}),
+      },
+    ];
+  };
+
+  // Resources and prompts are reads: requests and change notifications pass through unchanged.
   if (upstreamCaps?.resources) {
-    server.setRequestHandler(ListResourcesRequestSchema, (req) => options.upstream.listResources(req.params));
-    server.setRequestHandler(ListResourceTemplatesRequestSchema, (req) => options.upstream.listResourceTemplates(req.params));
-    server.setRequestHandler(ReadResourceRequestSchema, (req) => options.upstream.readResource(req.params));
+    server.setRequestHandler(ListResourcesRequestSchema, (req, extra) => options.upstream.listResources(...relay(req.params, extra)));
+    server.setRequestHandler(ListResourceTemplatesRequestSchema, (req, extra) => options.upstream.listResourceTemplates(...relay(req.params, extra)));
+    server.setRequestHandler(ReadResourceRequestSchema, (req, extra) => options.upstream.readResource(...relay(req.params, extra)));
+    if (upstreamCaps.resources.subscribe) {
+      server.setRequestHandler(SubscribeRequestSchema, (req, extra) => options.upstream.subscribeResource(...relay(req.params, extra)));
+      server.setRequestHandler(UnsubscribeRequestSchema, (req, extra) => options.upstream.unsubscribeResource(...relay(req.params, extra)));
+    }
+    options.upstream.setNotificationHandler(ResourceListChangedNotificationSchema, () => server.sendResourceListChanged());
+    options.upstream.setNotificationHandler(ResourceUpdatedNotificationSchema, (n) => server.sendResourceUpdated(n.params));
   }
   if (upstreamCaps?.prompts) {
-    server.setRequestHandler(ListPromptsRequestSchema, (req) => options.upstream.listPrompts(req.params));
-    server.setRequestHandler(GetPromptRequestSchema, (req) => options.upstream.getPrompt(req.params));
+    server.setRequestHandler(ListPromptsRequestSchema, (req, extra) => options.upstream.listPrompts(...relay(req.params, extra)));
+    server.setRequestHandler(GetPromptRequestSchema, (req, extra) => options.upstream.getPrompt(...relay(req.params, extra)));
+    options.upstream.setNotificationHandler(PromptListChangedNotificationSchema, () => server.sendPromptListChanged());
   }
+  if (upstreamCaps?.completions) {
+    server.setRequestHandler(CompleteRequestSchema, (req, extra) => options.upstream.complete(...relay(req.params, extra)));
+  }
+  // New or changed tools on the wrapped server: plan them, then tell the agent.
+  options.upstream.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
+    try {
+      const next = await listAllTools(options.upstream);
+      if (next.some((t) => UNDO_TOOLS.includes(t.name))) return;
+      tools = next;
+      plans = planTools(tools as McpTool[], options.overrides);
+      indexPlans();
+      session.replacePlans(plans);
+      await server.sendToolListChanged();
+    } catch {
+      /* keep the tools we have */
+    }
+  });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
@@ -185,7 +251,7 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
     ],
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (req): Promise<CallToolResult> => {
+  server.setRequestHandler(CallToolRequestSchema, async (req, extra): Promise<CallToolResult> => {
     const name = req.params.name;
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
     try {
@@ -239,7 +305,8 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
         }
       }
       if (!plansOf.has(name)) return { isError: true, content: [{ type: 'text', text: `Unknown tool ${name}` }] };
-      const { result, entry } = await session.call(name, args);
+      const [, callOptions] = relay(req.params, extra);
+      const { result, entry } = await session.call(name, args, callOptions);
       if (!entry) return result;
       const note = entry.inverse
         ? `undogen: journaled as #${entry.seq}; undogen_undo { "seq": ${entry.seq} } undoes it with ${entry.inverse.tool}.${entry.undoWarnings?.length ? ` Note: ${entry.undoWarnings.join('; ')}.` : ''}`
