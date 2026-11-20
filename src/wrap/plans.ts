@@ -28,8 +28,8 @@ export type ArgSource =
   | { from: 'args'; key: string }
   /** A field of the original call's result: the first of these (dotted) keys that is present; `items[].id` collects a field of every item. */
   | { from: 'result'; keys: string[] }
-  /** A field of the state read before the call. */
-  | { from: 'before'; key: string }
+  /** A field of the state read before the call; `optional`: left out when the state has no value for it. */
+  | { from: 'before'; key: string; optional?: boolean }
   /** A fixed value, e.g. `state: "closed"`. */
   | { value: unknown };
 
@@ -114,7 +114,9 @@ interface Named {
 
 function parse(tool: McpTool): Named {
   const words = tokenize(tool.name);
-  const i = words.findIndex((w) => ALL_VERBS.has(w));
+  // A write verb wins over a read verb anywhere in the name: shopping_list_add_item adds, saved_view_delete deletes.
+  const write = words.findIndex((w) => ALL_VERBS.has(w) && !READ_VERBS.has(w));
+  const i = write !== -1 ? write : words.findIndex((w) => ALL_VERBS.has(w));
   const verb = i === -1 ? undefined : words[i];
   const noun = words
     .filter((_, j) => j !== i)
@@ -233,15 +235,17 @@ function planOne(n: Named, all: Named[], override?: ToolOverrides[string]): Tool
 
   const words = tokenize(n.tool.name).map(stem);
   const annotations = n.tool.annotations ?? {};
-  if (annotations.readOnlyHint === true || (n.verb && READ_VERBS.has(n.verb) && annotations.readOnlyHint !== false && annotations.destructiveHint !== true)) {
-    return plan({ reversibility: 'reversible', strategy: 'no-side-effects', reasons: [annotations.readOnlyHint ? 'the server marks it read-only' : `"${n.verb}" reads without changing anything`] });
-  }
+  // The server's own read-only flag is trusted; names are checked for writes before they're taken for reads.
+  if (annotations.readOnlyHint === true) return plan({ reversibility: 'reversible', strategy: 'no-side-effects', reasons: ['the server marks it read-only'] });
   const irreversible = words.find((w) => IRREVERSIBLE_VERBS.has(w));
   if (irreversible) {
     return plan({ reversibility: 'irreversible', strategy: 'none', reasons: [`"${irreversible}" has effects that can't be called back`] });
   }
   if (words.includes('or')) {
     return plan({ reversibility: 'unknown', strategy: 'none', reasons: [`${n.tool.name} does one of several things, so its inverse depends on what happened; declare it in overrides`] });
+  }
+  if (n.verb && READ_VERBS.has(n.verb) && annotations.readOnlyHint !== false && annotations.destructiveHint !== true) {
+    return plan({ reversibility: 'reversible', strategy: 'no-side-effects', reasons: [`"${n.verb}" reads without changing anything`] });
   }
 
   // Moves and renames are undone by moving back.
@@ -344,7 +348,8 @@ function planOne(n: Named, all: Named[], override?: ToolOverrides[string]): Tool
     const recreatable = getter && create && (!getter.out || create.required.every((p) => n.props.has(p) || p in getter.out!));
     if (getter && create && recreatable) {
       const args: Record<string, ArgSource> = {};
-      for (const p of create.props) args[p] = n.props.has(p) ? { from: 'args', key: p } : { from: 'before', key: p };
+      // Optional fields the deleted item didn't have are left out, not required.
+      for (const p of create.props) args[p] = n.props.has(p) ? { from: 'args', key: p } : { from: 'before', key: p, optional: !create.required.includes(p) };
       return plan({
         reversibility: 'compensable',
         strategy: 'recreate-from-snapshot',

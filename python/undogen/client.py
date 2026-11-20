@@ -305,7 +305,10 @@ class UndoableClient:
         self.journal_detail = journal_detail
         self.journal: List[dict] = []
         self._id_map: Dict[str, Dict[str, Scalar]] = {}
-        for entry in self.store.load():
+        loaded = self.store.load()
+        if any(e.get("kind") == "tool" for e in loaded):
+            raise UndogenError("This journal was written by `undogen wrap` (tool calls, not HTTP requests); undo it with `undogen wrap --journal <file> --undo ... -- <server command>`")
+        for entry in loaded:
             self.journal.append(entry)
             for param, mapping in (entry.get("idMap") or {}).items():
                 for old, new in mapping.items():

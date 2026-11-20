@@ -108,7 +108,11 @@ export class ToolSession {
   /** Open a session, loading earlier sessions' entries from the store. */
   static async open(options: ToolSessionOptions): Promise<ToolSession> {
     const s = new ToolSession(options);
-    s.journal.push(...(await s.store.load()));
+    const entries = await s.store.load();
+    if (entries.some((e) => (e as { kind?: string }).kind !== 'tool')) {
+      throw new Error('This journal holds entries written by `undogen mcp` or UndoableClient; give `undogen wrap` its own --journal file');
+    }
+    s.journal.push(...entries);
     s.seq = Math.max(0, ...s.journal.map((e) => e.seq));
     return s;
   }
@@ -119,16 +123,26 @@ export class ToolSession {
 
   /** Call a tool: reads pass through; writes are journaled with the call that undoes them. */
   async call(tool: string, args: Record<string, unknown>): Promise<{ result: CallToolResult; entry?: ToolEntry }> {
-    const plan = this.planFor(tool);
+    let plan = this.planFor(tool);
     if (plan.strategy === 'no-side-effects') return { result: await this.options.call(tool, args) };
-    if (plan.reversibility === 'irreversible' || plan.reversibility === 'unknown') {
-      if (!(await this.options.approve?.(plan, { tool, arguments: args }))) throw new ToolRefusedError(plan);
-    }
 
+    // Read what the call will change first. If that fails, the call couldn't be undone: it needs approval like any other.
     let before: unknown;
     if (plan.snapshot) {
-      const read = await this.options.call(plan.snapshot.tool, resolve(plan.snapshot, args, undefined, undefined));
-      if (!read.isError) before = resultData(read);
+      let failure: string | undefined;
+      try {
+        const read = await this.options.call(plan.snapshot.tool, resolve(plan.snapshot, args, undefined, undefined));
+        if (read.isError) failure = errorText(read);
+        else before = resultData(read);
+      } catch (err) {
+        failure = (err as Error).message;
+      }
+      if (failure !== undefined) {
+        plan = { ...plan, reversibility: 'unknown', reasons: [`${plan.snapshot.tool} could not read the current state first (${failure}), so this call could not be undone`, ...plan.reasons] };
+      }
+    }
+    if (plan.reversibility === 'irreversible' || plan.reversibility === 'unknown') {
+      if (!(await this.options.approve?.(plan, { tool, arguments: args }))) throw new ToolRefusedError(plan);
     }
     const result = await this.options.call(tool, args);
     if (result.isError) return { result }; // nothing happened: nothing to undo
@@ -148,7 +162,11 @@ export class ToolSession {
       status: 'active',
     };
     try {
-      entry.inverse = this.inverseOf(plan, args, data, before);
+      const { call, notRestored } = this.inverseOf(plan, args, data, before);
+      entry.inverse = call;
+      if (notRestored.length) {
+        entry.undoWarnings = [`undo will not restore ${notRestored.join(', ')}: ${plan.snapshot?.tool} returned no earlier value for ${notRestored.length === 1 ? 'it' : 'them'}`];
+      }
     } catch (err) {
       entry.inverseError = (err as Error).message;
       // The plan was a guess that this call disproved: from now on, treat the tool as unknown (approval needed).
@@ -156,33 +174,43 @@ export class ToolSession {
         this.plans.set(tool, { ...plan, reversibility: 'unknown', strategy: 'none', inverse: undefined, reasons: [`its undo could not be worked out from a real call (${entry.inverseError})`, ...plan.reasons] });
       }
     }
-    if (entry.inverse && plan.check && this.options.checkConflicts !== false) {
-      // Record what the call left, as the server reports it, so undo can tell whether someone changed it since.
-      const checkArgs = resolve(plan.check, args, data, before);
-      const touched = Object.keys(args).filter((k) => !(k in checkArgs));
-      const after = await this.options.call(plan.check.tool, checkArgs);
-      if (!after.isError) {
-        const state = resultData(after);
-        const expected = Object.fromEntries(touched.filter((k) => getPath(state, k) !== undefined).map((k) => [k, getPath(state, k)]));
-        if (Object.keys(expected).length) entry.check = { tool: plan.check.tool, arguments: checkArgs, expected };
-      }
-    }
+    // The write happened: journal it before anything else can fail.
     this.journal.push(entry);
     await this.store.save(entry);
+    if (entry.inverse && plan.check && this.options.checkConflicts !== false) {
+      // Record what the call left, as the server reports it, so undo can tell whether someone changed it since.
+      try {
+        const checkArgs = resolve(plan.check, args, data, before);
+        const touched = Object.keys(args).filter((k) => !(k in checkArgs));
+        const after = await this.options.call(plan.check.tool, checkArgs);
+        if (!after.isError) {
+          const state = resultData(after);
+          const expected = Object.fromEntries(touched.filter((k) => getPath(state, k) !== undefined).map((k) => [k, getPath(state, k)]));
+          if (Object.keys(expected).length) {
+            entry.check = { tool: plan.check.tool, arguments: checkArgs, expected };
+            await this.store.save(entry);
+          }
+        }
+      } catch {
+        /* no check possible; undo proceeds unchecked */
+      }
+    }
     return { result, entry };
   }
 
-  private inverseOf(plan: ToolPlan, args: Record<string, unknown>, data: unknown, before: unknown): ToolCall | undefined {
-    if (!plan.inverse) return undefined;
+  private inverseOf(plan: ToolPlan, args: Record<string, unknown>, data: unknown, before: unknown): { call?: ToolCall; notRestored: string[] } {
+    if (!plan.inverse) return { notRestored: [] };
     const out = resolve(plan.inverse, args, data, before);
+    let notRestored: string[] = [];
     if (plan.restoreSent) {
       if (before === undefined) throw new Error(`${plan.snapshot?.tool} could not read the old values before the call`);
       const sent = Object.keys(args).filter((k) => !plan.restoreSent!.includes(k));
       const restorable = sent.filter((k) => getPath(before, k) !== undefined);
       if (!restorable.length) throw new Error(`the old values of ${sent.join(', ')} were not in what ${plan.snapshot?.tool} returned`);
       for (const k of restorable) out[k] = getPath(before, k);
+      notRestored = sent.filter((k) => !restorable.includes(k));
     }
-    return { tool: plan.inverse.tool, arguments: out };
+    return { call: { tool: plan.inverse.tool, arguments: out }, notRestored };
   }
 
   /** Undo one entry (default: this session's most recent active one). */
@@ -268,7 +296,7 @@ function resolve(t: ToolCallTemplate, args: Record<string, unknown>, data: unkno
   for (const [name, src] of Object.entries(t.arguments)) {
     const value = valueOf(src, args, data, before);
     if (value !== undefined) out[name] = value;
-    else if (!('from' in src && src.from === 'args')) {
+    else if (!('from' in src && (src.from === 'args' || (src.from === 'before' && src.optional)))) {
       const where = 'value' in src ? 'value' : src.from === 'result' ? `result (${src.keys.join(' / ')})` : `${src.from}.${src.key}`;
       throw new Error(`${t.tool} needs ${name}, and the ${where} was not there`);
     }

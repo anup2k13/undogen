@@ -136,7 +136,13 @@ describe('cli', () => {
     const forced = await run('wrap', '--journal', journal, '--undo', '--seq', '1', '--force', ...fixture);
     expect(forced.stdout).toContain('✗ Undo of #1 (create_issue) failed: update_issue failed: Issue 1 not found'); // no check: the inverse itself ran
     expect((await run('wrap', 'npx', 'server')).stderr).toMatch(/after --/);
-  }, 30_000); // starts six processes
+
+    // The same journal, read by the other commands.
+    expect((await run('journal', '--journal', journal)).stdout).toMatch(/#1 +failed +create_issue +\{"repo":"r","title":"from the agent"\} +↺ update_issue/);
+    expect((await run('undo', spec, '--base-url', server.url, '--journal', journal, '--all')).stderr).toMatch(/written by `undogen wrap`/);
+    expect((await run('wrap', '--help', '--', 'npx', 'server')).stdout).toContain('undogen wrap');
+    expect((await run('analyze', '--', spec)).code).toBe(0); // -- keeps its usual meaning elsewhere
+  }, 40_000); // starts several processes
 
   it('init, annotate, arazzo and compile write files', async () => {
     await run('init', spec, '--overrides-out', 'init/overrides.json', '--fixtures-out', 'init/fixtures.json');

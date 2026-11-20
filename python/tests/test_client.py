@@ -459,3 +459,16 @@ def test_python_cli_sessions(bundle_path, server_url, tmp_path, capsys):
     assert lines == [f"↺ #3 createTodo  DELETE /todos/{b}", f"↺ #2 createTodo  DELETE /todos/{a}"]
     assert get(f"{server_url}/todos/{kept}")[0] == 200
     assert main(["undo", bundle_path, "--base-url", server_url, "--journal", path, "--session", "nope"]) == 2
+
+
+def test_wrap_journals_are_refused_with_a_pointer(bundle_path, server_url, tmp_path, capsys):
+    from undogen import UndogenError
+    from undogen.__main__ import main
+
+    path = tmp_path / "wrap.jsonl"
+    path.write_text(json.dumps({"kind": "tool", "seq": 1, "session": "s", "tool": "star_repo"}) + "\n")
+    with pytest.raises(UndogenError, match="written by `undogen wrap`"):
+        UndoableClient(bundle_path, server_url, store=FileJournalStore(str(path)))
+    assert main(["journal", "--journal", str(path)]) == 2
+    assert main(["undo", bundle_path, "--base-url", server_url, "--journal", str(path), "--all"]) == 2
+    assert "undogen wrap" in capsys.readouterr().err

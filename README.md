@@ -221,10 +221,11 @@ Tools don't come with routes, so plans come from names, input schemas, annotatio
 | `update_issue` + `get_issue` | read before, write the old values back; refuse if someone changed them since |
 | `star_repo` / `unstar_repo`, `add_labels` / `remove_labels` | the counterpart, same arguments |
 | `move_file {source, destination}` | move back |
-| `send_email`, `merge_pull_request`, `delete_*` | irreversible: asks the human |
+| `delete_issue` + `get_issue` + `create_issue` | read before, re-create under a new id (compensable) |
+| `send_email`, `merge_pull_request`, other `delete_*` | irreversible: asks the human |
 | `create_or_update_file`, `edit_file` (when `read_file` can't return what it writes) | unknown: asks the human |
 
-On the reference servers: memory gets undo for `create_entities` and `create_relations` (checked end to end: the graph is empty again after `undogen_undo_all`), filesystem for `move_file`; their other writes ask first. A plan that rests on a guess about a result the tool doesn't declare says so; if a real call disproves it, that call is journaled as not undoable and later calls of the tool need approval. Undo a past run with `undogen wrap --journal <file> --undo --session <id> -- <server command>`. Declare what can't be inferred with `--overrides tools.json`:
+If the read a plan depends on fails before a call (an update's or a delete's snapshot), that call asks the human instead of running without a way back. On the reference servers: memory gets undo for `create_entities` and `create_relations` (checked end to end: the graph is empty again after `undogen_undo_all`), filesystem for `move_file`; their other writes ask first. A plan that rests on a guess about a result the tool doesn't declare says so; if a real call disproves it, that call is journaled as not undoable and later calls of the tool need approval. Undo a past run with `undogen wrap --journal <file> --undo --session <id> -- <server command>`. Declare what can't be inferred with `--overrides tools.json`:
 
 ```json
 { "create_page": { "inverse": "archive_page", "arguments": { "page_id": "result.id" } },

@@ -249,3 +249,100 @@ describe('undogen wrap: guesses disproved at runtime', () => {
     expect(calls).toEqual(['create_page']);
   });
 });
+
+describe('review fixes (wrap)', () => {
+  const o = (props: string[], required = props) => ({ type: 'object' as const, properties: Object.fromEntries(props.map((p) => [p, {}])), required });
+
+  it("doesn't take compound or resource-first names for reads", () => {
+    const plans = Object.fromEntries(
+      planTools([
+        { name: 'get_or_create_label', inputSchema: o(['name']) },
+        { name: 'shopping_list_add_item', inputSchema: o(['item']) },
+        { name: 'saved_view_delete', inputSchema: o(['id']) },
+        { name: 'list_items', inputSchema: o([]) },
+      ]).map((p) => [p.tool, p]),
+    );
+    expect(plans.get_or_create_label).toMatchObject({ reversibility: 'unknown' });
+    expect(plans.shopping_list_add_item!.strategy).not.toBe('no-side-effects');
+    expect(plans.saved_view_delete).toMatchObject({ reversibility: 'irreversible' });
+    expect(plans.list_items).toMatchObject({ strategy: 'no-side-effects' });
+  });
+
+  const issueApi = (calls: string[], getFails = () => false) => {
+    const issues = new Map<number, Record<string, unknown>>([[1, { number: 1, title: 'a' }]]); // no milestone, no assignee
+    let next = 2;
+    const call = async (name: string, args: Record<string, unknown>) => {
+      calls.push(name);
+      const ok = (v: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(v) }] });
+      if (name === 'get_issue') return getFails() || !issues.has(args.number as number) ? { isError: true, content: [{ type: 'text' as const, text: 'rate limited' }] } : ok(issues.get(args.number as number));
+      if (name === 'delete_issue') return (issues.delete(args.number as number), ok({}));
+      if (name === 'create_issue') return (issues.set(next, { ...args, number: next }), ok({ ...args, number: next++ }));
+      if (name === 'update_issue') return (Object.assign(issues.get(args.number as number)!, args), ok(issues.get(args.number as number)));
+      return { isError: true, content: [] };
+    };
+    const plans = planTools([
+      { name: 'get_issue', inputSchema: o(['number']) },
+      { name: 'create_issue', inputSchema: o(['title', 'milestone', 'assignee'], ['title']) },
+      { name: 'update_issue', inputSchema: o(['number', 'title', 'assignee'], ['number']) },
+      { name: 'delete_issue', inputSchema: o(['number']) },
+    ]);
+    return { issues, call, plans };
+  };
+
+  it('asks before writing when the snapshot read fails, instead of writing without a way back', async () => {
+    const { ToolSession } = await import('../src/wrap/session.js');
+    const calls: string[] = [];
+    const asked: string[] = [];
+    const { call, plans } = issueApi(calls, () => true);
+    const session = await ToolSession.open({ call, plans, approve: async (plan) => (asked.push(plan.reasons[0]!), false) });
+    await expect(session.call('delete_issue', { number: 1 })).rejects.toThrow(/get_issue could not read the current state first \(rate limited\)/);
+    expect(asked).toHaveLength(1);
+    expect(calls).toEqual(['get_issue']); // the delete never ran
+    expect(session.planFor('delete_issue').reversibility).toBe('compensable'); // one failed read doesn't change the plan
+  });
+
+  it('re-creates a deleted item that lacks optional fields', async () => {
+    const { ToolSession } = await import('../src/wrap/session.js');
+    const { issues, call, plans } = issueApi([]);
+    const session = await ToolSession.open({ call, plans });
+    const { entry } = await session.call('delete_issue', { number: 1 });
+    expect(entry!.inverse).toEqual({ tool: 'create_issue', arguments: { title: 'a' } });
+    await session.undo();
+    expect([...issues.values()]).toEqual([{ title: 'a', number: 2 }]);
+  });
+
+  it('says which sent fields undo cannot restore', async () => {
+    const { ToolSession } = await import('../src/wrap/session.js');
+    const { call, plans } = issueApi([]);
+    const session = await ToolSession.open({ call, plans });
+    const { entry } = await session.call('update_issue', { number: 1, title: 'b', assignee: 'bob' });
+    expect(entry!.inverse!.arguments).toEqual({ number: 1, title: 'a' });
+    expect(entry!.undoWarnings).toEqual(['undo will not restore assignee: get_issue returned no earlier value for it']);
+  });
+
+  it('journals a write even when the read after it fails', async () => {
+    const { ToolSession } = await import('../src/wrap/session.js');
+    const { call, plans } = issueApi([]);
+    let reads = 0;
+    const flaky = async (name: string, args: Record<string, unknown>) => {
+      if (name === 'get_issue' && ++reads > 1) throw new Error('Request timed out');
+      return call(name, args);
+    };
+    const session = await ToolSession.open({ call: flaky, plans });
+    const { entry } = await session.call('update_issue', { number: 1, title: 'b' });
+    expect(session.journal).toEqual([entry]);
+    expect(entry!.check).toBeUndefined();
+  });
+
+  it('keeps wrap journals and HTTP journals apart', async () => {
+    const { ToolSession } = await import('../src/wrap/session.js');
+    const { UndoableClient, parseSpec } = await import('../src/index.js');
+    const http = join(dir, 'http.jsonl');
+    await new FileJournalStore(http).save({ seq: 1, session: 's' } as never);
+    await expect(ToolSession.open({ call: async () => ({ content: [] }), plans: [], store: new FileJournalStore<ToolEntry>(http) })).rejects.toThrow(/give `undogen wrap` its own --journal/);
+    const tools = join(dir, 'tools.jsonl');
+    await new FileJournalStore(tools).save({ seq: 1, session: 's', kind: 'tool' } as never);
+    const spec = parseSpec({ openapi: '3.0.3', info: { title: 'x', version: '1' }, paths: {} });
+    await expect(UndoableClient.open({ spec, baseUrl: 'http://x', store: new FileJournalStore(tools) })).rejects.toThrow(/written by `undogen wrap`/);
+  });
+});

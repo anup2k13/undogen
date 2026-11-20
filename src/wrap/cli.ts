@@ -104,12 +104,18 @@ export async function runWrap(flags: WrapFlags, command: string[]): Promise<numb
     });
     await server.connect(new StdioServerTransport());
     console.error(`undogen wrap: serving ${upstream.getServerVersion()?.name ?? command[0]} (${tools.length} tools) with undo over stdio`);
-    // Stop when either side goes away.
+    // Stop when either side goes away: the client closing our stdin (the MCP stdio shutdown), a signal, or the wrapped server exiting.
     await new Promise<void>((resolve) => {
       server.onclose = resolve;
       upstream.onclose = resolve;
+      process.stdin.once('end', resolve);
+      process.stdin.once('close', resolve);
+      process.once('SIGTERM', resolve);
+      process.once('SIGINT', resolve);
     });
-    return 0;
+    await server.close().catch(() => undefined);
+    await upstream.close().catch(() => undefined); // stops the wrapped server's process
+    process.exit(0);
   } finally {
     await upstream.close().catch(() => undefined);
   }

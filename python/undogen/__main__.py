@@ -61,6 +61,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"  {args.journal}: {r['before']} lines -> {r['after']} entries")
             return 0
         entries = [e for e in store.load() if args.session is None or e.get("session") == args.session]
+        if any(e.get("kind") == "tool" for e in entries):
+            print("error: this journal was written by `undogen wrap`; show it with `npx undogen journal --journal <file>`", file=sys.stderr)
+            return 2
         if args.json:
             print(json.dumps(entries, indent=2))
             return 0
@@ -82,7 +85,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not os.path.exists(args.journal):
         print(f"error: no journal at {args.journal}", file=sys.stderr)
         return 2
-    client = UndoableClient(args.bundle, args.base_url, store=store, headers=_headers(args.header))
+    try:
+        client = UndoableClient(args.bundle, args.base_url, store=store, headers=_headers(args.header))
+    except UndogenError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
     if args.all or args.after is not None or args.session is not None:
         if args.session is not None and not any(e.get("session") == args.session for e in client.journal):
             print(f"error: no entries for session {args.session} in {args.journal} (see journal)", file=sys.stderr)

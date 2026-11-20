@@ -323,6 +323,7 @@ export class UndoableClient {
   ready(): Promise<void> {
     this.loading ??= (async () => {
       const entries = (await this.store?.load()) ?? [];
+      if (entries.some((e) => (e as { kind?: string }).kind === 'tool')) throw new Error('This journal was written by `undogen wrap` (tool calls, not HTTP requests); undo it with `undogen wrap --journal <file> --undo ... -- <server command>`');
       const known = new Set(this.journal.map((e) => e.seq));
       for (const entry of entries) {
         if (known.has(entry.seq)) continue;

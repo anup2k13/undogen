@@ -12,6 +12,7 @@ import { FileJournalStore, UndoableClient } from './runtime.js';
 import { loadSpec } from './spec.js';
 import { describeEntry } from './tools.js';
 import type { ApiSpec, Declaration } from './types.js';
+import type { ToolEntry } from './wrap/session.js';
 import { DEFAULT_IGNORED_FIELDS, verify, type Fixtures, type VerifyReport } from './verify.js';
 import { VERSION } from './version.js';
 
@@ -193,13 +194,14 @@ function needBaseUrl(values: Values): string {
 }
 
 async function main(argv: string[]) {
-  // `wrap` passes everything after `--` to the server it starts, untouched.
+  // `wrap` passes everything after `--` to the server it starts, untouched; for other commands `--` keeps its usual meaning.
   const dashes = argv.indexOf('--');
   const own = dashes === -1 ? argv : argv.slice(0, dashes);
-  const { values, positionals } = parseArgs({ args: own, allowPositionals: true, options: OPTIONS });
+  const wrapping = parseArgs({ args: own, allowPositionals: true, options: OPTIONS }).positionals[0] === 'wrap';
+  const { values, positionals } = parseArgs({ args: wrapping ? own : argv, allowPositionals: true, options: OPTIONS });
   if (values.version) return console.log(VERSION);
   const [command, specPath] = positionals;
-  if (command === 'wrap' && !values.help) {
+  if (wrapping && !values.help) {
     if (positionals.length > 1) throw new UsageError(`wrap takes the server's command after --, e.g. undogen wrap -- ${positionals.slice(1).join(' ')}`);
     const { runWrap, WrapUsageError } = await import('./wrap/cli.js');
     try {
@@ -210,7 +212,6 @@ async function main(argv: string[]) {
     }
     return;
   }
-  if (dashes !== -1) throw new UsageError('-- is only used by wrap');
   if (values.help || !command) {
     console.log(HELP);
     return process.exit(command || values.help ? 0 : 2);
@@ -224,6 +225,7 @@ async function main(argv: string[]) {
     }
     const all = await new FileJournalStore(values.journal).load();
     const entries = values.session ? all.filter((e) => e.session === values.session) : all;
+    const isTool = (e: unknown): e is ToolEntry => (e as { kind?: string }).kind === 'tool';
     if (values.json) return console.log(JSON.stringify(entries, null, 2));
     if (!entries.length) return console.log(values.session ? `  (no entries for session ${values.session})` : '  (empty journal)');
     let session: string | undefined;
@@ -234,8 +236,15 @@ async function main(argv: string[]) {
         const n = entries.filter((x) => x.session === session).length;
         console.log(c.bold(`  session ${session}`) + c.dim(`  ${e.at.replace('T', ' ').slice(0, 16)} UTC · ${n} write${n === 1 ? '' : 's'}`));
       }
-      const d = describeEntry(e);
       const color = e.status === 'undone' ? c.dim : e.status === 'active' ? (s: string) => s : c.red;
+      if (isTool(e)) {
+        // Written by `undogen wrap`: a tool call and the tool call that undoes it.
+        const undo = e.inverse ? `${e.inverse.tool} ${JSON.stringify(e.inverse.arguments)}` : `(none${e.inverseError ? `: ${e.inverseError}` : ''})`;
+        console.log(color(`  #${String(e.seq).padEnd(4)} ${e.status.padEnd(9)} ${e.tool.padEnd(28)} ${JSON.stringify(e.arguments).slice(0, 40).padEnd(40)} ↺ ${undo}`));
+        if (e.undoError) console.log(c.dim(`        ${e.undoError}`));
+        continue;
+      }
+      const d = describeEntry(e);
       console.log(color(`  #${String(d.seq).padEnd(4)} ${d.status.padEnd(9)} ${d.operationId.padEnd(28)} ${d.request.padEnd(40)} ↺ ${d.undo ?? '(none)'}`));
       if (e.undoError) console.log(c.dim(`        ${e.undoError}`));
     }

@@ -188,7 +188,7 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
       const { result, entry } = await session.call(name, args);
       if (!entry) return result;
       const note = entry.inverse
-        ? `undogen: journaled as #${entry.seq}; undogen_undo { "seq": ${entry.seq} } undoes it with ${entry.inverse.tool}.`
+        ? `undogen: journaled as #${entry.seq}; undogen_undo { "seq": ${entry.seq} } undoes it with ${entry.inverse.tool}.${entry.undoWarnings?.length ? ` Note: ${entry.undoWarnings.join('; ')}.` : ''}`
         : `undogen: journaled as #${entry.seq}; it cannot be undone (${entry.inverseError ?? 'no inverse'}).`;
       return { ...result, content: [...(result.content ?? []), { type: 'text', text: note }] };
     } catch (err) {
