@@ -159,11 +159,32 @@ describe('undogen wrap', () => {
     expect((out.content.at(-1) as { text: string }).text).toBe('undogen: journaled as #1; it cannot be undone (no inverse).');
   });
 
-  it('passes errors through without journaling them', async () => {
+  it("passes the server's errors through without journaling them", async () => {
+    const { call, data } = await setup();
+    // add_issue_labels doesn't depend on its pre-read, so the call reaches the server, which fails it.
+    const r = await call('add_issue_labels', { repo: 'r', issue_number: 99, labels: ['x'] });
+    expect(r).toMatchObject({ isError: true, content: [{ text: 'Issue 99 not found' }] });
+    expect(data(await call('undogen_journal')).entries).toEqual([]);
+  });
+
+  it('refuses an update whose old values could not be read first', async () => {
     const { call, data } = await setup();
     const r = await call('update_issue', { repo: 'r', issue_number: 99, title: 'x' });
-    expect(r.isError).toBe(true);
-    expect(data(await call('undogen_journal')).entries).toEqual([]);
+    expect(data(r)).toMatchObject({ error: 'ToolRefusedError' });
+    expect(data(r).message).toMatch(/get_issue could not read the current state first \(Issue 99 not found\)/);
+  });
+
+  it('marks an undo whose inverse call fails, and undo_all reports it', async () => {
+    const { call, state, data } = await setup();
+    const n = data(await call('create_issue', { repo: 'r', title: 'a' })).number;
+    await call('add_issue_labels', { repo: 'r', issue_number: n, labels: ['p1'] });
+    state.issues.delete(n); // the labels' undo (remove_issue_labels) now fails
+    const out = data(await call('undogen_undo_all'));
+    expect(out.failed.map((f: { seq: number; error: string }) => [f.seq, f.error])).toEqual([
+      [2, 'Undo of #2 (add_issue_labels) failed: remove_issue_labels failed: Issue 1 not found'],
+      [1, expect.stringMatching(/refused: later calls use what it created \(#2 add_issue_labels\)/)], // #2 is still there
+    ]);
+    expect(data(await call('undogen_journal')).entries.map((e: { status: string }) => e.status)).toEqual(['active', 'failed']);
   });
 
   it('previews without calling', async () => {
@@ -520,5 +541,22 @@ describe('review fixes (wrap, round 2)', () => {
     expect(texts).toContain('undo calls sub_issue_write {method: "remove"} even if this call changed nothing');
     const { call, data } = await setup();
     expect(data(await call('undogen_preview', { tool: 'create_issue' }))).toMatchObject({ undo: 'update_issue', undoWith: { state: 'closed' } });
+  });
+});
+
+describe('undogen wrap: getters that do not return what an update writes', () => {
+  it('journals the call as not undoable and asks before the next one', async () => {
+    const { ToolSession } = await import('../src/wrap/session.js');
+    const o = (props: string[], required = props) => ({ type: 'object' as const, properties: Object.fromEntries(props.map((p) => [p, {}])), required });
+    const plans = planTools([
+      { name: 'get_doc', inputSchema: o(['id']) },
+      { name: 'update_doc', inputSchema: o(['id', 'content'], ['id']) },
+    ]);
+    const asked: string[] = [];
+    const session = await ToolSession.open({ plans, call: async () => ({ content: [{ type: 'text', text: '{"id":"d1","title":"t"}' }] }), approve: async (p) => (asked.push(p.tool), false) });
+    const { entry } = await session.call('update_doc', { id: 'd1', content: 'new' });
+    expect(entry).toMatchObject({ inverseError: 'the old values of content were not in what get_doc returned' });
+    await expect(session.call('update_doc', { id: 'd1', content: 'newer' })).rejects.toThrow(/not approved/);
+    expect(asked).toEqual(['update_doc']);
   });
 });
