@@ -67,7 +67,7 @@ npm run demo        # starts a demo API, compiles, runs an agent session, verifi
 > pip install ./python    # the Python client, if you need it
 > ```
 >
-> Then, wherever this README says `npx undogen …`, run `npx -y /path/to/undogen …` (any directory), and in MCP client configs use `"args": ["-y", "/path/to/undogen", "mcp", …]` instead of `"undogen"`.
+> Then, wherever this README says `npx undogen …`, run `npx -y /path/to/undogen …` (any directory), and in MCP client configs use `"args": ["-y", "/path/to/undogen", "mcp", …]` instead of `"undogen"`. For the library, `npm install /path/to/undogen` in your project makes `import … from 'undogen'` (and `undogen/mcp`, `undogen/wrap`) work as shown.
 
 ### 1. See what's undoable in an API
 
