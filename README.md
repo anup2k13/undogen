@@ -200,6 +200,39 @@ For Claude Desktop or any client that launches stdio servers:
 
 Other frameworks get the same tools from `toolDefinitions(client, spec.operations)`: a name, a JSON Schema and an `execute` function each, ready for the Vercel AI SDK (`tool({ description, inputSchema: jsonSchema(t.inputSchema), execute: t.execute })`) or OpenAI function calling.
 
+### 4b. Put undo in front of an existing MCP server (experimental)
+
+Already using an MCP server (an issue tracker's, a notes app's, the filesystem one)? `undogen wrap` sits in front of it: the agent sees the same tools, every write is journaled with the call that undoes it, and the undo tools above are added.
+
+```bash
+npx undogen wrap --analyze -- npx -y @modelcontextprotocol/server-memory   # what each tool's undo would be
+```
+
+```json
+{ "mcpServers": { "memory": { "command": "npx", "args": ["-y", "undogen", "wrap", "--journal", ".undogen/memory.jsonl", "--", "npx", "-y", "@modelcontextprotocol/server-memory"] } } }
+```
+
+Tools don't come with routes, so plans come from names, input schemas, annotations and, where the server declares them, output schemas:
+
+| The wrapped server has | undogen plans |
+| --- | --- |
+| `create_entities` + `delete_entities {entityNames}`, output `entities[]` | delete what was created: `entityNames` ← `entities[].name` |
+| `create_issue`, no delete, `update_issue {state: open\|closed}` | close what was created (compensable) |
+| `update_issue` + `get_issue` | read before, write the old values back; refuse if someone changed them since |
+| `star_repo` / `unstar_repo`, `add_labels` / `remove_labels` | the counterpart, same arguments |
+| `move_file {source, destination}` | move back |
+| `send_email`, `merge_pull_request`, `delete_*` | irreversible: asks the human |
+| `create_or_update_file`, `edit_file` (when `read_file` can't return what it writes) | unknown: asks the human |
+
+On the reference servers: memory gets undo for `create_entities` and `create_relations` (checked end to end: the graph is empty again after `undogen_undo_all`), filesystem for `move_file`; their other writes ask first. A plan that rests on a guess about a result the tool doesn't declare says so; if a real call disproves it, that call is journaled as not undoable and later calls of the tool need approval. Undo a past run with `undogen wrap --journal <file> --undo --session <id> -- <server command>`. Declare what can't be inferred with `--overrides tools.json`:
+
+```json
+{ "create_page": { "inverse": "archive_page", "arguments": { "page_id": "result.id" } },
+  "run_workflow": { "reversibility": "irreversible", "reason": "starts a deploy" } }
+```
+
+Not yet: dependencies between journaled calls, the wrapped server's resources and prompts, and servers reached over HTTP (stdio only).
+
 ### 5. Python agents
 
 ```bash

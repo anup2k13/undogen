@@ -111,6 +111,33 @@ describe('cli', () => {
     expect((await run('undo', spec, '--base-url', server.url, '--journal', journal, '--seq', '1', '--all')).stderr).toMatch(/use one of/);
   });
 
+  it('wrap puts undo in front of another MCP server, over stdio', async () => {
+    const fixture = ['--', tsx, join(root, 'test/fixtures/issues-mcp-server.ts')];
+    const analyzed = await run('wrap', '--analyze', ...fixture);
+    expect(analyzed.stdout).toMatch(/create_issue +compensable/);
+    expect(analyzed.stdout).toMatch(/get_issue +read-only/);
+    expect(analyzed.stdout).toContain('10 tools: 2 read-only · 5 reversible · 1 compensable · 1 irreversible · 1 unknown');
+
+    const journal = join(dir, 'wrap.jsonl');
+    const agent = new Client({ name: 'agent', version: '1' });
+    await agent.connect(new StdioClientTransport({ command: tsx, args: [cli, 'wrap', '--journal', journal, ...fixture], cwd: dir, stderr: 'ignore' }));
+    const created = await agent.callTool({ name: 'create_issue', arguments: { repo: 'r', title: 'from the agent' } });
+    expect((created.content as Array<{ text: string }>).at(-1)!.text).toContain('journaled as #1');
+    await agent.callTool({ name: 'star_repository', arguments: { repo: 'r' } });
+    await agent.close();
+
+    const entries = await new FileJournalStore<{ seq: number; session: string; tool: string }>(journal).load();
+    expect(entries.map((e) => e.tool)).toEqual(['create_issue', 'star_repository']);
+    // A new fixture process starts empty: issue #1 can't be read, so the check refuses, and --force goes ahead.
+    const undone = await run('wrap', '--journal', journal, '--undo', '--session', entries[0]!.session, ...fixture);
+    expect(undone.code).toBe(1);
+    expect(undone.stdout).toContain('↺ #2 star_repository  unstar_repository {"repo":"r"}');
+    expect(undone.stdout).toMatch(/✗ #1 create_issue: Undo of #1: could not read the current state \(get_issue: Issue 1 not found\)/);
+    const forced = await run('wrap', '--journal', journal, '--undo', '--seq', '1', '--force', ...fixture);
+    expect(forced.stdout).toContain('✗ Undo of #1 (create_issue) failed: update_issue failed: Issue 1 not found'); // no check: the inverse itself ran
+    expect((await run('wrap', 'npx', 'server')).stderr).toMatch(/after --/);
+  }, 30_000); // starts six processes
+
   it('init, annotate, arazzo and compile write files', async () => {
     await run('init', spec, '--overrides-out', 'init/overrides.json', '--fixtures-out', 'init/fixtures.json');
     expect(JSON.parse(await readFile(join(dir, 'init/fixtures.json'), 'utf8')).unarchiveTodo.prepare).toEqual([{ operationId: 'archiveTodo' }]);

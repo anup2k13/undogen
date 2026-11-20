@@ -22,6 +22,7 @@ ${c.bold('Usage')}
   undogen analyze  <spec> [--json | --html <file>] Derive an inverse for every write operation (no network)
   undogen verify   <spec> --base-url <url>         Run each operation and its inverse on a sandbox, diff the state
   undogen mcp      <spec> --base-url <url>         Serve the API as MCP tools with journaling and undo tools
+  undogen wrap     [--journal <file>] -- <cmd...>  Put undo in front of another MCP server (experimental; --analyze, --undo)
   undogen undo     <spec> --base-url <url> --journal <file> [--seq n | --all | --session id]
   undogen journal  --journal <file> [--session id] [--json]  Show a persisted journal (--compact rewrites it smaller)
   undogen learn    <spec> --base-url <url> --out <overrides.json>   Find id bindings for unknown creates by experiment
@@ -108,6 +109,8 @@ const OPTIONS = {
   seq: { type: 'string' },
   after: { type: 'string' },
   session: { type: 'string' },
+  analyze: { type: 'boolean' },
+  undo: { type: 'boolean' },
   all: { type: 'boolean' },
   force: { type: 'boolean' },
   cascade: { type: 'boolean' },
@@ -190,9 +193,24 @@ function needBaseUrl(values: Values): string {
 }
 
 async function main(argv: string[]) {
-  const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: OPTIONS });
+  // `wrap` passes everything after `--` to the server it starts, untouched.
+  const dashes = argv.indexOf('--');
+  const own = dashes === -1 ? argv : argv.slice(0, dashes);
+  const { values, positionals } = parseArgs({ args: own, allowPositionals: true, options: OPTIONS });
   if (values.version) return console.log(VERSION);
   const [command, specPath] = positionals;
+  if (command === 'wrap' && !values.help) {
+    if (positionals.length > 1) throw new UsageError(`wrap takes the server's command after --, e.g. undogen wrap -- ${positionals.slice(1).join(' ')}`);
+    const { runWrap, WrapUsageError } = await import('./wrap/cli.js');
+    try {
+      process.exitCode = await runWrap(values, dashes === -1 ? [] : argv.slice(dashes + 1));
+    } catch (err) {
+      if (err instanceof WrapUsageError) throw new UsageError(err.message);
+      throw err;
+    }
+    return;
+  }
+  if (dashes !== -1) throw new UsageError('-- is only used by wrap');
   if (values.help || !command) {
     console.log(HELP);
     return process.exit(command || values.help ? 0 : 2);

@@ -17,6 +17,12 @@ export interface McpServerOptions extends Omit<ClientOptions, 'allowIrreversible
 
 const SECRET_KEY = /token|secret|password|passwd|api[-_]?key|authorization|cookie|session|credential|private[-_]?key/i;
 
+/** JSON for a human to read: values under secret-looking keys hidden, long output cut. */
+export function maskedJson(value: unknown, max = 400): string {
+  const masked = JSON.stringify(value, (k, v) => (k && SECRET_KEY.test(k) && v !== null && typeof v !== 'object' ? '‹hidden›' : v)) ?? 'undefined';
+  return masked.length > max ? `${masked.slice(0, max)}…` : masked;
+}
+
 /** The concrete request, as the human approving it should see it: resolved path, query, and the body (secrets masked, truncated). */
 export function describeCall(op: Operation, input: CallInput): string {
   let path: string;
@@ -26,11 +32,7 @@ export function describeCall(op: Operation, input: CallInput): string {
     path = `${op.path} (${(err as Error).message})`;
   }
   const query = input.query && Object.keys(input.query).length ? `?${new URLSearchParams(Object.entries(input.query).map(([k, v]) => [k, String(v)]))}` : '';
-  let body = '';
-  if (input.body !== undefined) {
-    const masked = JSON.stringify(input.body, (k, v) => (k && SECRET_KEY.test(k) && v !== null && typeof v !== 'object' ? '‹hidden›' : v));
-    body = ` with body ${masked && masked.length > 400 ? `${masked.slice(0, 400)}…` : masked}`;
-  }
+  const body = input.body !== undefined ? ` with body ${maskedJson(input.body)}` : '';
   return `${op.method.toUpperCase()} ${path}${query}${body}`;
 }
 

@@ -24,6 +24,10 @@
       "types": "./dist/mcp.d.ts",
       "import": "./dist/mcp.js"
     },
+    "./wrap": {
+      "types": "./dist/wrap/index.d.ts",
+      "import": "./dist/wrap/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Wrap an existing MCP server (experimental)
+- `undogen wrap [--journal f] [--overrides f] -- <server command>` puts journaling, undo tools and approvals in front of any stdio MCP server; `--analyze` prints each tool's plan, `--undo --session|--seq|--all|--after` rolls back a past run. Plans come from tool names, input schemas, annotations and declared output schemas (array results bind as `entities[].name`); guesses are labelled, and a guess disproved by a real call makes later calls need approval. Library: `undogen/wrap` (`planTools`, `ToolSession`, `createWrapServer`).
+
 ### Safety
 - Path parameters `.`, `..` and empty are refused, so a tool call can't reach a different route than the approved operation (found in a security review; reproduced as `DELETE …/members/..` deleting the parent project without approval).
 - A spec loaded from a URL only follows `$ref`s on its own origin (every redirect hop is checked), never local files or other hosts (`--trust-refs` to allow); reserved header parameters (`Authorization`, `Cookie`, …) are ignored and configured headers always win; MCP approval prompts show the concrete request.

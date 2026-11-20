@@ -159,27 +159,27 @@ export class DependencyError extends UndoError {
 }
 
 /** Where the journal lives. Implement this to keep it in a database. */
-export interface JournalStore {
-  load(): Promise<JournalEntry[]>;
+export interface JournalStore<E extends { seq: number } = JournalEntry> {
+  load(): Promise<E[]>;
   /** Called after every change to an entry; the latest save of a seq wins. */
-  save(entry: JournalEntry): Promise<void>;
+  save(entry: E): Promise<void>;
 }
 
 /** Keeps the journal in memory only (the default). */
-export class MemoryJournalStore implements JournalStore {
-  private readonly entries = new Map<number, JournalEntry>();
+export class MemoryJournalStore<E extends { seq: number } = JournalEntry> implements JournalStore<E> {
+  private readonly entries = new Map<number, E>();
   async load() {
     return [...this.entries.values()].map(clone);
   }
-  async save(entry: JournalEntry) {
+  async save(entry: E) {
     this.entries.set(entry.seq, clone(entry));
   }
 }
 
 /** An append-only JSON Lines file. Survives restarts; another process can resume and undo from it. */
-export class FileJournalStore implements JournalStore {
+export class FileJournalStore<E extends { seq: number } = JournalEntry> implements JournalStore<E> {
   constructor(readonly path: string) {}
-  async load(): Promise<JournalEntry[]> {
+  async load(): Promise<E[]> {
     let text: string;
     try {
       text = await readFile(this.path, 'utf8');
@@ -187,15 +187,15 @@ export class FileJournalStore implements JournalStore {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
       throw err;
     }
-    const bySeq = new Map<number, JournalEntry>();
+    const bySeq = new Map<number, E>();
     for (const line of text.split('\n')) {
       if (!line.trim()) continue;
-      const e = JSON.parse(line) as JournalEntry;
+      const e = JSON.parse(line) as E;
       bySeq.set(e.seq, e);
     }
     return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
   }
-  async save(entry: JournalEntry) {
+  async save(entry: E) {
     await mkdir(dirname(this.path), { recursive: true });
     // Entries hold request and response bodies: keep the file readable by its owner only.
     await appendFile(this.path, JSON.stringify(entry) + '\n', { mode: 0o600 });

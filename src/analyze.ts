@@ -15,7 +15,7 @@ import type {
 import { structuralPath } from './spec.js';
 
 /** Action endpoints that undo each other: POST /x/{id}/archive <-> POST /x/{id}/unarchive. */
-const ACTION_PAIRS: Array<[string, string]> = [
+export const ACTION_PAIRS: Array<[string, string]> = [
   ['archive', 'unarchive'],
   ['lock', 'unlock'],
   ['enable', 'disable'],
@@ -46,7 +46,7 @@ const ACTION_PAIRS: Array<[string, string]> = [
 ];
 
 /** Verbs whose effects leave the system boundary or cannot be called back. */
-const IRREVERSIBLE_VERBS = new Set([
+export const IRREVERSIBLE_VERBS = new Set([
   'send', 'email', 'mail', 'notify', 'sms', 'broadcast', 'charge', 'pay', 'payout',
   'transfer', 'refund', 'purge', 'wipe', 'shred', 'deliver', 'dispatch', 'execute', 'remind',
   'cancel', 'merge', 'revoke', 'rerun', 'rerequest', 'ping', 'redeliver', 'dismiss', 'trigger',
@@ -72,7 +72,7 @@ const PAST_TENSE_EFFECTS = new Set(['sent', 'notified', 'emailed', 'charged', 'd
 const NEGATIONS = new Set(['not', 'no', 'without', 'never', 'dont', 'doesn', 'don', 't']);
 
 /** Verbs for POSTs that compute something and change nothing. */
-const SIDE_EFFECT_FREE_VERBS = new Set([
+export const SIDE_EFFECT_FREE_VERBS = new Set([
   'render', 'preview', 'search', 'query', 'validate', 'lint', 'estimate', 'simulate', 'compare', 'diff',
   'list', 'lookup', 'check', 'count', 'calculate',
 ]);
@@ -81,14 +81,14 @@ const SIDE_EFFECT_FREE_VERBS = new Set([
  * State transitions with no way back, used only when nothing else matched (so
  * approve still pairs with unapprove where the API has one): void, finalize, ...
  */
-const ONE_WAY_VERBS = new Set([
+export const ONE_WAY_VERBS = new Set([
   'void', 'expire', 'finalize', 'capture', 'confirm', 'submit', 'reverse', 'reject', 'decline', 'fail',
   'redact', 'complete', 'accept', 'approve', 'advance', 'migrate', 'delete', 'destroy', 'erase', 'revoke',
   'evict', 'eviction',
 ]);
 
 /** Values of a state/status field that mean "this is gone" for APIs without DELETE. */
-const SOFT_DELETE_STATES = ['closed', 'archived', 'cancelled', 'canceled', 'inactive', 'deleted', 'disabled', 'revoked'];
+export const SOFT_DELETE_STATES = ['closed', 'archived', 'cancelled', 'canceled', 'inactive', 'deleted', 'disabled', 'revoked'];
 
 /** Crude singularisation so "dispatches"/"pings" match "dispatch"/"ping". */
 const stems = (t: string) => [t, t.replace(/es$/, ''), t.replace(/s$/, '')];
