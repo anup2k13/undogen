@@ -228,6 +228,7 @@ Tools don't come with routes, so plans come from names, input schemas, annotatio
 | `update_issue` + `get_issue` | read before, write the old values back; refuse if someone changed them since |
 | `star_repo` / `unstar_repo`, `add_issue_labels` / `remove_issue_labels` | the counterpart, same arguments; with `get_issue`, nothing if the call changed nothing |
 | `move_file {source, destination}` | move back |
+| one tool with several actions, like GitHub's `issue_write {method: create\|update}` and `issue_read {method: get\|…}` | each action planned on its own: create closed via `issue_write {method: update, state: closed}`, update restored from `issue_read {method: get}`; an action not in the schema asks the human |
 | `delete_issue` + `get_issue` + `create_issue` | read before, re-create under a new id (compensable) |
 | `send_email`, `merge_pull_request`, other `delete_*` | irreversible: asks the human |
 | `create_or_update_file`, `edit_file` (when `read_file` can't return what it writes) | unknown: asks the human |

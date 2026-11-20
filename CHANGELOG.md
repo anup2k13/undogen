@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Wrap an existing MCP server (experimental)
-- `undogen wrap [--journal f] [--overrides f] -- <server command>` puts journaling, undo tools and approvals in front of any stdio MCP server; `--analyze` prints each tool's plan, `--undo --session|--seq|--all|--after` rolls back a past run. Plans come from tool names, input schemas, annotations and declared output schemas (array results bind as `entities[].name`); guesses are labelled, and a guess disproved by a real call makes later calls need approval. Library: `undogen/wrap` (`planTools`, `ToolSession`, `createWrapServer`).
+- `undogen wrap [--journal f] [--overrides f] -- <server command>` puts journaling, undo tools and approvals in front of any stdio MCP server; `--analyze` prints each tool's plan, `--undo --session|--seq|--all|--after` rolls back a past run. Plans come from tool names, input schemas, annotations and declared output schemas (array results bind as `entities[].name`); guesses are labelled, and a guess disproved by a real call makes later calls need approval. Tools with several actions selected by an argument (GitHub's `issue_write {method}`) are planned per action. Undo refuses to orphan later calls that use what a create made (`cascade` undoes them), and a paired action that changed nothing is not reversed. Library: `undogen/wrap` (`planTools`, `ToolSession`, `createWrapServer`).
 
 ### Safety
 - Path parameters `.`, `..` and empty are refused, so a tool call can't reach a different route than the approved operation (found in a security review; reproduced as `DELETE …/members/..` deleting the parent project without approval).

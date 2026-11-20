@@ -403,3 +403,48 @@ describe('undogen wrap: paired actions that changed nothing', () => {
     expect(plans.star_repository!.detectNoop).toBeUndefined(); // no way to read stars: undo calls unstar regardless
   });
 });
+
+describe('multi-action tools (shaped like GitHub\'s official MCP server)', () => {
+  it('plans each action, and binds a created id from the result even when the shared schema has the field', async () => {
+    const { githubTools } = await import('./fixtures/github-mcp-tools.js');
+    const plans = Object.fromEntries(planTools(githubTools).map((p) => [p.dispatch ? `${p.tool}#${p.dispatch.value}` : p.tool, p]));
+    expect(plans['issue_read#get']).toMatchObject({ strategy: 'no-side-effects' });
+    expect(plans['issue_write#create']).toMatchObject({
+      strategy: 'close-created',
+      inverse: { tool: 'issue_write', arguments: { method: { value: 'update' }, issue_number: { from: 'result', keys: ['issue_number', 'number'] }, state: { value: 'closed' } } },
+    });
+    expect(plans['issue_write#update']).toMatchObject({ strategy: 'restore-snapshot', snapshot: { tool: 'issue_read', arguments: { method: { value: 'get' } } } });
+    expect(plans['sub_issue_write#add']).toMatchObject({ strategy: 'paired-action', inverse: { tool: 'sub_issue_write', arguments: { method: { value: 'remove' } } } }); // options listed only in the description
+    expect(plans['sub_issue_write#reprioritize']).toMatchObject({ reversibility: 'unknown' });
+    expect(plans.update_pull_request).toMatchObject({ strategy: 'restore-snapshot', snapshot: { tool: 'pull_request_read', arguments: { method: { value: 'get' } } } });
+    expect(plans.merge_pull_request).toMatchObject({ reversibility: 'irreversible' });
+  });
+
+  it('undoes them through the same tool with the right action', async () => {
+    const { githubTools } = await import('./fixtures/github-mcp-tools.js');
+    const { ToolSession } = await import('../src/wrap/session.js');
+    const issues = new Map<number, Record<string, unknown>>();
+    const calls: Array<[string, Record<string, unknown>]> = [];
+    let next = 7;
+    const ok = (v: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(v) }] });
+    const call = async (name: string, a: Record<string, unknown>) => {
+      calls.push([name, a]);
+      const issue = issues.get(a.issue_number as number);
+      if (name === 'issue_read') return issue ? ok(issue) : { isError: true, content: [{ type: 'text' as const, text: 'not found' }] };
+      if (name === 'issue_write' && a.method === 'create') return issues.set(next, { number: next, title: a.title, state: 'open' }), ok(issues.get(next++));
+      if (name === 'issue_write' && a.method === 'update') return Object.assign(issue!, Object.fromEntries(Object.entries(a).filter(([k]) => ['title', 'state'].includes(k)))), ok(issue);
+      return ok({});
+    };
+    const asked: string[] = [];
+    const session = await ToolSession.open({ call, plans: planTools(githubTools), approve: async (p) => (asked.push(p.reasons[0]!), false) });
+    await session.call('issue_write', { method: 'create', owner: 'o', repo: 'r', title: 'Bug' });
+    await session.call('issue_write', { method: 'update', owner: 'o', repo: 'r', issue_number: 7, title: 'Bug in login' });
+    expect(calls.find(([n]) => n === 'issue_read')![1]).toEqual({ method: 'get', owner: 'o', repo: 'r', issue_number: 7 });
+    await session.undoAll();
+    expect(issues.get(7)).toEqual({ number: 7, title: 'Bug', state: 'closed' });
+    expect(calls.at(-1)).toEqual(['issue_write', { method: 'update', owner: 'o', repo: 'r', issue_number: 7, state: 'closed' }]);
+
+    await expect(session.call('issue_write', { method: 'transfer', owner: 'o', repo: 'r' })).rejects.toThrow(/not approved/);
+    expect(asked).toEqual(['issue_write has no known action method: "transfer"']);
+  });
+});

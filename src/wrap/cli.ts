@@ -51,11 +51,12 @@ export async function runWrap(flags: WrapFlags, command: string[]): Promise<numb
         console.log(JSON.stringify(plans, null, 2));
         return 0;
       }
-      const w = Math.max(...plans.map((p) => p.tool.length));
+      const name = (p: (typeof plans)[number]) => (p.dispatch ? `${p.tool} ${p.dispatch.arg}=${p.dispatch.value}` : p.tool);
+      const w = Math.max(...plans.map((p) => name(p).length));
       const color = { reversible: c.green, compensable: c.yellow, irreversible: c.magenta, unknown: c.dim } as const;
       for (const p of plans) {
         const label = p.strategy === 'no-side-effects' ? c.dim('read-only'.padEnd(12)) : color[p.reversibility](p.reversibility.padEnd(12));
-        console.log(`  ${p.tool.padEnd(w)}  ${label} ${c.dim(describePlan(p))}`);
+        console.log(`  ${name(p).padEnd(w)}  ${label} ${c.dim(describePlan(p))}`);
       }
       const count = (r: string) => plans.filter((p) => p.reversibility === r && p.strategy !== 'no-side-effects').length;
       const reads = plans.filter((p) => p.strategy === 'no-side-effects').length;

@@ -50,6 +50,8 @@ export type ToolStrategy =
 
 export interface ToolPlan {
   tool: string;
+  /** For one action of a multi-action tool: the argument that selects it and its value (issue_write { method: "update" }). */
+  dispatch?: { arg: string; value: string };
   reversibility: Reversibility;
   strategy: ToolStrategy;
   /** The call that undoes this one. */
@@ -105,6 +107,12 @@ const stem = (t: string) => (t.length > 3 && t.endsWith('ies') ? t.slice(0, -3) 
 
 interface Named {
   tool: McpTool;
+  /** The tool's name, or `name#value` for one action of a tool that takes several (issue_write#update). */
+  key: string;
+  /** For one action of a multi-action tool: the argument that selects it, and its value. */
+  dispatch?: { arg: string; value: string };
+  /** The words the plan is made from: the tool's name, or the action and the tool's noun. */
+  words: string[];
   verb: string | undefined;
   /** The other words of the name, singular: create_issue_comments -> "issue comment". */
   noun: string;
@@ -114,8 +122,21 @@ interface Named {
   out?: Record<string, unknown>;
 }
 
-function parse(tool: McpTool): Named {
-  const words = tokenize(tool.name);
+/** Arguments that pick one of several actions: issue_write { method: "create" | "update" }. */
+const DISPATCH_ARGS = ['method', 'action', 'operation', 'op'];
+/** Words in a multi-action tool's name that say nothing about the resource: issue_write -> issue. */
+const GENERIC_WORDS = new Set(['write', 'read', 'manage', 'mutate', 'tool', 'ops', 'action', 'actions', 'operation', 'operations']);
+
+/** The values of a dispatch argument: its enum, or options listed in its description ("- 'add' - ...", "1. get - ..."). */
+function dispatchValues(prop: unknown): string[] {
+  const p = prop as { type?: string; enum?: unknown[]; description?: string } | undefined;
+  if (!p) return [];
+  if (Array.isArray(p.enum)) return p.enum.filter((v): v is string => typeof v === 'string');
+  const listed = [...(p.description ?? '').matchAll(/^\s*(?:-|\*|\d+\.)\s*'?([a-z][a-z0-9_]*)'?\s+[-:]/gim)].map((m) => m[1]!);
+  return [...new Set(listed)];
+}
+
+function named(tool: McpTool, key: string, words: string[], required: string[], dispatch?: Named['dispatch']): Named {
   // A write verb wins over a read verb anywhere in the name: shopping_list_add_item adds, saved_view_delete deletes.
   const write = words.findIndex((w) => ALL_VERBS.has(w) && !READ_VERBS.has(w));
   const i = write !== -1 ? write : words.findIndex((w) => ALL_VERBS.has(w));
@@ -124,14 +145,31 @@ function parse(tool: McpTool): Named {
     .filter((_, j) => j !== i)
     .map(stem)
     .join(' ');
-  return {
-    tool,
-    verb,
-    noun,
-    props: new Set(Object.keys(tool.inputSchema.properties ?? {})),
-    required: tool.inputSchema.required ?? [],
-    out: tool.outputSchema?.properties,
-  };
+  const props = new Set(Object.keys(tool.inputSchema.properties ?? {}));
+  if (dispatch) props.delete(dispatch.arg);
+  return { tool, key, dispatch, words, verb, noun, props, required: required.filter((r) => r !== dispatch?.arg), out: tool.outputSchema?.properties };
+}
+
+/** A tool, or one entry per action when one argument picks among several (GitHub's issue_write { method }). */
+function parse(tool: McpTool): Named[] {
+  const required = tool.inputSchema.required ?? [];
+  const arg = DISPATCH_ARGS.find((a) => required.includes(a) && dispatchValues(tool.inputSchema.properties?.[a]).length >= 2);
+  if (!arg) return [named(tool, tool.name, tokenize(tool.name), required)];
+  const nounWords = tokenize(tool.name).filter((w) => !GENERIC_WORDS.has(w) && !ALL_VERBS.has(w));
+  return dispatchValues(tool.inputSchema.properties?.[arg]).map((value) => {
+    const words = [...tokenize(value), ...nounWords];
+    const n = named(tool, `${tool.name}#${value}`, words, required, { arg, value });
+    // An update or delete of one resource needs its id even when the schema (shared with create) can't require it: issue_number.
+    if (n.verb && !CREATE_VERBS.has(n.verb) && !READ_VERBS.has(n.verb)) {
+      const last = nounWords.map(stem).at(-1);
+      for (const p of n.props) {
+        const t = tokenize(p).map(stem);
+        const id = t.at(-1) === 'id' || t.at(-1) === 'number';
+        if (id && (t.length === 1 || (t.length === 2 && t[0] === last) || t.slice(0, -1).join(' ') === nounWords.map(stem).join(' ')) && !n.required.includes(p)) n.required.push(p);
+      }
+    }
+    return n;
+  });
 }
 
 /** Result fields that may hold a value an inverse needs as `name`: issue_number <- number, page_id <- id. */
@@ -187,7 +225,9 @@ function resultCandidates(name: string, target: Named, source: Named): string[] 
 function mapArgs(source: Named, target: Named, fromResult: boolean): Record<string, ArgSource> | undefined {
   const out: Record<string, ArgSource> = {};
   for (const p of target.props) {
-    if (source.props.has(p)) out[p] = { from: 'args', key: p };
+    // A create isn't given the id of what it creates, even when its schema (shared with update) has the field: issue_write's issue_number.
+    const createdId = fromResult && !!source.verb && CREATE_VERBS.has(source.verb) && !source.required.includes(p) && isIdLike(p);
+    if (source.props.has(p) && !createdId) out[p] = { from: 'args', key: p };
     else if (target.required.includes(p)) {
       if (!fromResult) return undefined;
       const keys = resultCandidates(p, target, source);
@@ -196,6 +236,12 @@ function mapArgs(source: Named, target: Named, fromResult: boolean): Record<stri
     }
   }
   return out;
+}
+
+/** issue_number, pageId, id: names of identifiers. */
+function isIdLike(name: string): boolean {
+  const last = tokenize(name).at(-1);
+  return last === 'id' || last === 'number' || last === 'uuid' || last === 'gid';
 }
 
 /** Whether a plan rests on guesses about results the tools don't declare. */
@@ -215,7 +261,7 @@ function stateValue(prop: unknown): string | undefined {
 }
 
 function planOne(n: Named, all: Named[], override?: ToolOverrides[string]): ToolPlan {
-  const plan = (p: Omit<ToolPlan, 'tool' | 'caveats'> & { caveats?: string[] }): ToolPlan => ({ tool: n.tool.name, caveats: [], ...p });
+  const plan = (p: Omit<ToolPlan, 'tool' | 'caveats'> & { caveats?: string[] }): ToolPlan => ({ tool: n.tool.name, ...(n.dispatch ? { dispatch: n.dispatch } : {}), caveats: [], ...p });
   const others = all.filter((o) => o !== n);
   const find = (verbs: Set<string> | string[], match = sameNoun) => others.find((o) => o.verb && (verbs instanceof Set ? verbs.has(o.verb) : verbs.includes(o.verb)) && match(o, n));
 
@@ -235,7 +281,7 @@ function planOne(n: Named, all: Named[], override?: ToolOverrides[string]): Tool
     }
   }
 
-  const words = tokenize(n.tool.name).map(stem);
+  const words = n.words.map(stem);
   const annotations = n.tool.annotations ?? {};
   // The server's own read-only flag is trusted; names are checked for writes before they're taken for reads.
   if (annotations.readOnlyHint === true) return plan({ reversibility: 'reversible', strategy: 'no-side-effects', reasons: ['the server marks it read-only'] });
@@ -244,7 +290,7 @@ function planOne(n: Named, all: Named[], override?: ToolOverrides[string]): Tool
     return plan({ reversibility: 'irreversible', strategy: 'none', reasons: [`"${irreversible}" has effects that can't be called back`] });
   }
   if (words.includes('or')) {
-    return plan({ reversibility: 'unknown', strategy: 'none', reasons: [`${n.tool.name} does one of several things, so its inverse depends on what happened; declare it in overrides`] });
+    return plan({ reversibility: 'unknown', strategy: 'none', reasons: [`${n.key} does one of several things, so its inverse depends on what happened; declare it in overrides`] });
   }
   if (n.verb && READ_VERBS.has(n.verb) && annotations.readOnlyHint !== false && annotations.destructiveHint !== true) {
     return plan({ reversibility: 'reversible', strategy: 'no-side-effects', reasons: [`"${n.verb}" reads without changing anything`] });
@@ -258,8 +304,8 @@ function planOne(n: Named, all: Named[], override?: ToolOverrides[string]): Tool
       return plan({
         reversibility: 'reversible',
         strategy: 'paired-action',
-        inverse: { tool: n.tool.name, arguments: { ...Object.fromEntries([...n.props].map((p) => [p, { from: 'args', key: p } as ArgSource])), [a]: { from: 'args', key: b }, [b]: { from: 'args', key: a } } },
-        reasons: [`${n.tool.name} back from ${b} to ${a}`],
+        inverse: { tool: n.key, arguments: { ...Object.fromEntries([...n.props].map((p) => [p, { from: 'args', key: p } as ArgSource])), [a]: { from: 'args', key: b }, [b]: { from: 'args', key: a } } },
+        reasons: [`${n.key} back from ${b} to ${a}`],
         caveats: [`fails if something has been put at ${a} since`],
       });
     }
@@ -277,10 +323,10 @@ function planOne(n: Named, all: Named[], override?: ToolOverrides[string]): Tool
       return plan({
         reversibility: 'reversible',
         strategy: 'paired-action',
-        inverse: { tool: other.tool.name, arguments: args },
-        ...(getter ? { snapshot: { tool: getter.tool.name, arguments: Object.fromEntries(getter.required.map((r) => [r, { from: 'args', key: r } as ArgSource])) }, detectNoop: true } : {}),
+        inverse: { tool: other.key, arguments: args },
+        ...(getter ? { snapshot: { tool: getter.key, arguments: Object.fromEntries(getter.required.map((r) => [r, { from: 'args', key: r } as ArgSource])) }, detectNoop: true } : {}),
         reasons: [`${counterpart} reverses ${n.verb}`],
-        caveats: [getter ? `if ${getter.tool.name} shows the call changed nothing, undo does nothing` : `undo calls ${other.tool.name} even if this call changed nothing`],
+        caveats: [getter ? `if ${getter.key} shows the call changed nothing, undo does nothing` : `undo calls ${other.key} even if this call changed nothing`],
       });
     }
   }
@@ -293,9 +339,9 @@ function planOne(n: Named, all: Named[], override?: ToolOverrides[string]): Tool
       return plan({
         reversibility: 'reversible',
         strategy: 'delete-created',
-        inverse: { tool: del.tool.name, arguments: args },
+        inverse: { tool: del.key, arguments: args },
         check: checkFor(n, all, args),
-        reasons: [`${del.tool.name} deletes what it creates`],
+        reasons: [`${del.key} deletes what it creates`],
         caveats: guessed(n, args) ? [GUESS] : [],
       });
     }
@@ -305,9 +351,9 @@ function planOne(n: Named, all: Named[], override?: ToolOverrides[string]): Tool
       return plan({
         reversibility: 'compensable',
         strategy: 'close-created',
-        inverse: { tool: close.tool.name, arguments: closeArgs },
+        inverse: { tool: close.key, arguments: closeArgs },
         check: checkFor(n, all, closeArgs),
-        reasons: [`${close.tool.name} closes what it creates (there is no delete tool)`],
+        reasons: [`${close.key} closes what it creates (there is no delete tool)`],
         caveats: ['undo closes it; it is not deleted', ...(guessed(n, closeArgs) ? [GUESS] : [])],
       });
     }
@@ -319,9 +365,9 @@ function planOne(n: Named, all: Named[], override?: ToolOverrides[string]): Tool
       return plan({
         reversibility: 'compensable',
         strategy: 'close-created',
-        inverse: { tool: updater.tool.name, arguments: { ...updArgs, [state]: { value } } },
+        inverse: { tool: updater.key, arguments: { ...updArgs, [state]: { value } } },
         check: checkFor(n, all, updArgs),
-        reasons: [`${updater.tool.name} with ${state}: "${value}" closes what it creates (there is no delete tool)`],
+        reasons: [`${updater.key} with ${state}: "${value}" closes what it creates (there is no delete tool)`],
         caveats: [`undo sets ${state} to "${value}"; it is not deleted`, ...(guessed(n, updArgs) ? [GUESS] : [])],
       });
     }
@@ -330,22 +376,22 @@ function planOne(n: Named, all: Named[], override?: ToolOverrides[string]): Tool
 
   if (n.verb && UPDATE_VERBS.has(n.verb)) {
     const getter = getterFor(n, others, argNames);
-    if (!getter) return plan({ reversibility: 'unknown', strategy: 'none', reasons: [`no get tool reads a ${n.noun || 'resource'} with ${n.tool.name}'s arguments, so the old values can't be captured`] });
+    if (!getter) return plan({ reversibility: 'unknown', strategy: 'none', reasons: [`no get tool reads a ${n.noun || 'resource'} with ${n.key}'s arguments, so the old values can't be captured`] });
     const identifying = getter.required;
     const written = [...n.props].filter((p) => !identifying.includes(p));
     if (getter.out && !written.some((p) => p in getter.out!)) {
-      return plan({ reversibility: 'unknown', strategy: 'none', reasons: [`${getter.tool.name} returns none of the values ${n.tool.name} writes (${written.join(', ')}), so they can't be restored`] });
+      return plan({ reversibility: 'unknown', strategy: 'none', reasons: [`${getter.key} returns none of the values ${n.key} writes (${written.join(', ')}), so they can't be restored`] });
     }
     const ids = Object.fromEntries(identifying.map((r) => [r, { from: 'args', key: r } as ArgSource]));
     return plan({
       reversibility: 'reversible',
       strategy: 'restore-snapshot',
-      snapshot: { tool: getter.tool.name, arguments: ids },
-      inverse: { tool: n.tool.name, arguments: ids },
+      snapshot: { tool: getter.key, arguments: ids },
+      inverse: { tool: n.key, arguments: ids },
       restoreSent: identifying,
-      check: { tool: getter.tool.name, arguments: ids },
-      reasons: [`${getter.tool.name} reads the old values; ${n.tool.name} writes them back`],
-      caveats: getter.out ? [] : [`guessed: ${getter.tool.name} declares no output schema, so whether it returns the values to restore is only known after a call`],
+      check: { tool: getter.key, arguments: ids },
+      reasons: [`${getter.key} reads the old values; ${n.key} writes them back`],
+      caveats: getter.out ? [] : [`guessed: ${getter.key} declares no output schema, so whether it returns the values to restore is only known after a call`],
     });
   }
 
@@ -360,9 +406,9 @@ function planOne(n: Named, all: Named[], override?: ToolOverrides[string]): Tool
       return plan({
         reversibility: 'compensable',
         strategy: 'recreate-from-snapshot',
-        snapshot: { tool: getter.tool.name, arguments: Object.fromEntries(getter.required.map((r) => [r, { from: 'args', key: r } as ArgSource])) },
-        inverse: { tool: create.tool.name, arguments: args },
-        reasons: [`${getter.tool.name} reads it first; ${create.tool.name} re-creates it`],
+        snapshot: { tool: getter.key, arguments: Object.fromEntries(getter.required.map((r) => [r, { from: 'args', key: r } as ArgSource])) },
+        inverse: { tool: create.key, arguments: args },
+        reasons: [`${getter.key} reads it first; ${create.key} re-creates it`],
         caveats: ['re-created under a new id; what only the server kept (comments, history) is not restored'],
       });
     }
@@ -371,7 +417,7 @@ function planOne(n: Named, all: Named[], override?: ToolOverrides[string]): Tool
 
   const oneWay = words.find((w) => ONE_WAY_VERBS.has(w));
   if (oneWay) return plan({ reversibility: 'irreversible', strategy: 'none', reasons: [`"${oneWay}" has no way back here`] });
-  return plan({ reversibility: 'unknown', strategy: 'none', reasons: [n.verb ? `no tool undoes "${n.verb}" for ${n.noun || 'this'}` : `can't tell what ${n.tool.name} changes`] });
+  return plan({ reversibility: 'unknown', strategy: 'none', reasons: [n.verb ? `no tool undoes "${n.verb}" for ${n.noun || 'this'}` : `can't tell what ${n.key} changes`] });
 }
 
 /** A read of what a create made, to compare before undoing it. */
@@ -379,13 +425,29 @@ function checkFor(n: Named, all: Named[], inverseArgs: Record<string, ArgSource>
   const available = new Set([...n.props, ...Object.keys(inverseArgs)]);
   const getter = getterFor(n, all, available);
   if (!getter) return undefined;
-  return { tool: getter.tool.name, arguments: Object.fromEntries(getter.required.map((r) => [r, n.props.has(r) ? ({ from: 'args', key: r } as ArgSource) : inverseArgs[r]!])) };
+  // Where the inverse knows a value (a created id from the result), the read uses the same.
+  return { tool: getter.key, arguments: Object.fromEntries(getter.required.map((r) => [r, inverseArgs[r] ?? ({ from: 'args', key: r } as ArgSource)])) };
 }
 
 /** Plan every tool of an MCP server. */
 export function planTools(tools: McpTool[], overrides: ToolOverrides = {}): ToolPlan[] {
-  const named = tools.map(parse);
-  return named.map((n) => planOne(n, named, overrides[n.tool.name]));
+  const all = tools.flatMap(parse);
+  const byKey = new Map(all.map((n) => [n.key, n]));
+  // Templates name actions by key (issue_write#update): turn that into the tool and its fixed dispatch argument.
+  const resolveKey = (t: ToolCallTemplate | undefined): ToolCallTemplate | undefined => {
+    const target = t && byKey.get(t.tool);
+    if (!t || !target?.dispatch) return t;
+    return { tool: target.tool.name, arguments: { [target.dispatch.arg]: { value: target.dispatch.value }, ...t.arguments } };
+  };
+  return all.map((n) => {
+    const p = planOne(n, all, overrides[n.key] ?? overrides[n.tool.name]);
+    return { ...p, inverse: resolveKey(p.inverse), snapshot: resolveKey(p.snapshot), check: resolveKey(p.check) };
+  });
+}
+
+/** The plan for a call: by tool name, and for multi-action tools by the action its arguments pick. */
+export function planKey(plan: Pick<ToolPlan, 'tool' | 'dispatch'>): string {
+  return plan.dispatch ? `${plan.tool}#${plan.dispatch.value}` : plan.tool;
 }
 
 /** One line for a tool description and the journal: what undo does. */

@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { getPath, MemoryJournalStore, stableStringify, type JournalStore } from '../runtime.js';
-import type { ArgSource, ToolCallTemplate, ToolPlan } from './plans.js';
+import { planKey, type ArgSource, type ToolCallTemplate, type ToolPlan } from './plans.js';
 
 /** Calls a tool on the wrapped server. */
 export type CallUpstream = (name: string, args: Record<string, unknown>) => Promise<CallToolResult>;
@@ -111,12 +111,15 @@ export class ToolSession {
   readonly session: string;
   readonly journal: ToolEntry[] = [];
   private readonly plans: Map<string, ToolPlan>;
+  /** Multi-action tools: the argument that picks the action. */
+  private readonly dispatchArg = new Map<string, string>();
   private readonly store: JournalStore<ToolEntry>;
   private seq = 0;
 
   private constructor(private readonly options: ToolSessionOptions) {
     this.session = options.session ?? randomUUID().slice(0, 8);
-    this.plans = new Map(options.plans.map((p) => [p.tool, p]));
+    this.plans = new Map(options.plans.map((p) => [planKey(p), p]));
+    for (const p of options.plans) if (p.dispatch) this.dispatchArg.set(p.tool, p.dispatch.arg);
     this.store = options.store ?? new MemoryJournalStore<ToolEntry>();
   }
 
@@ -132,13 +135,27 @@ export class ToolSession {
     return s;
   }
 
-  planFor(tool: string): ToolPlan {
+  /** The plan for a call; for a multi-action tool, the one for the action its arguments pick. */
+  planFor(tool: string, args: Record<string, unknown> = {}): ToolPlan {
+    const arg = this.dispatchArg.get(tool);
+    if (arg) {
+      const value = args[arg];
+      return (
+        this.plans.get(`${tool}#${String(value)}`) ?? {
+          tool,
+          reversibility: 'unknown',
+          strategy: 'none',
+          reasons: [`${tool} has no known action ${arg}: ${JSON.stringify(value)}`],
+          caveats: [],
+        }
+      );
+    }
     return this.plans.get(tool) ?? { tool, reversibility: 'unknown', strategy: 'none', reasons: ['not in the plans'], caveats: [] };
   }
 
   /** Call a tool: reads pass through; writes are journaled with the call that undoes them. */
   async call(tool: string, args: Record<string, unknown>): Promise<{ result: CallToolResult; entry?: ToolEntry }> {
-    let plan = this.planFor(tool);
+    let plan = this.planFor(tool, args);
     if (plan.strategy === 'no-side-effects') return { result: await this.options.call(tool, args) };
 
     // Read what the call will change first. If that fails, the call couldn't be undone: it needs approval like any other.
@@ -189,7 +206,7 @@ export class ToolSession {
       entry.inverseError = (err as Error).message;
       // The plan was a guess that this call disproved: from now on, treat the tool as unknown (approval needed).
       if (plan.reversibility !== 'irreversible' && plan.reversibility !== 'unknown') {
-        this.plans.set(tool, { ...plan, reversibility: 'unknown', strategy: 'none', inverse: undefined, reasons: [`its undo could not be worked out from a real call (${entry.inverseError})`, ...plan.reasons] });
+        this.plans.set(planKey(plan), { ...plan, reversibility: 'unknown', strategy: 'none', inverse: undefined, reasons: [`its undo could not be worked out from a real call (${entry.inverseError})`, ...plan.reasons] });
       }
     }
     if (plan.detectNoop && plan.snapshot && before !== undefined) {

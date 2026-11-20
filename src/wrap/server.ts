@@ -60,7 +60,14 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
   const clash = tools.find((t) => UNDO_TOOLS.includes(t.name));
   if (clash) throw new Error(`The wrapped server already has a tool named ${clash.name}`);
   const plans = planTools(tools as McpTool[], options.overrides);
-  const planOf = new Map(plans.map((p) => [p.tool, p]));
+  const plansOf = new Map<string, ToolPlan[]>();
+  for (const p of plans) plansOf.set(p.tool, [...(plansOf.get(p.tool) ?? []), p]);
+  /** One line per plan; per action for a multi-action tool. */
+  const describeTool = (name: string) =>
+    plansOf
+      .get(name)!
+      .map((p) => (p.dispatch ? `${p.dispatch.arg} "${p.dispatch.value}": ${describePlan(p)}` : describePlan(p)))
+      .join('\n');
   const mode = options.irreversible ?? 'ask';
 
   const server = new Server(
@@ -134,8 +141,8 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
     },
     {
       name: 'undogen_preview',
-      description: 'Before calling a tool: can it be undone, how, and does it need approval? Makes no calls.',
-      inputSchema: { type: 'object', properties: { tool: { type: 'string' } }, required: ['tool'] },
+      description: 'Before calling a tool: can it be undone, how, and does it need approval? Makes no calls. For a tool with several actions, pass the arguments you would call it with.',
+      inputSchema: { type: 'object', properties: { tool: { type: 'string' }, arguments: { type: 'object' } }, required: ['tool'] },
       annotations: { title: 'Preview undo', readOnlyHint: true },
     },
   ];
@@ -143,8 +150,7 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
       ...tools.map((t) => {
-        const plan = planOf.get(t.name)!;
-        return { ...t, description: `${t.description ?? ''}${t.description ? '\n\n' : ''}${describePlan(plan)}`.trim() };
+        return { ...t, description: `${t.description ?? ''}${t.description ? '\n\n' : ''}${describeTool(t.name)}`.trim() };
       }),
       ...undoTools,
     ],
@@ -179,10 +185,11 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
         case 'undogen_checkpoint':
           return json({ checkpoint: session.checkpoint() });
         case 'undogen_preview': {
-          const plan = planOf.get(String(args.tool));
-          if (!plan) throw new Error(`No tool named ${String(args.tool)}`);
+          if (!plansOf.has(String(args.tool))) throw new Error(`No tool named ${String(args.tool)}`);
+          const plan = session.planFor(String(args.tool), (args.arguments ?? {}) as Record<string, unknown>);
           return json({
             tool: plan.tool,
+            ...(plan.dispatch ? { [plan.dispatch.arg]: plan.dispatch.value } : {}),
             reversibility: plan.reversibility,
             strategy: plan.strategy,
             undo: plan.inverse?.tool ?? null,
@@ -192,7 +199,7 @@ export async function createWrapServer(options: WrapOptions): Promise<{ server: 
           });
         }
       }
-      if (!planOf.has(name)) return { isError: true, content: [{ type: 'text', text: `Unknown tool ${name}` }] };
+      if (!plansOf.has(name)) return { isError: true, content: [{ type: 'text', text: `Unknown tool ${name}` }] };
       const { result, entry } = await session.call(name, args);
       if (!entry) return result;
       const note = entry.inverse
