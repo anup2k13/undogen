@@ -20,12 +20,13 @@ const files = await ensureSpecs(cache);
 
 /** Every plan field that matters, per "<api> <operationId>". */
 const dumpScript = `
-const [mod, cache, ...files] = process.argv.slice(2);
+const [mod, helpers, cache, ...files] = process.argv.slice(2);
 const { loadSpec, analyze } = await import(mod);
+const { specLocation, specName } = await import(helpers);
 const out = {};
 for (const f of files) {
-  const a = analyze(await loadSpec(cache + '/' + f), { restoreChildren: true });
-  for (const p of a.plans) out[f.split('.')[0] + ' ' + p.operationId] = [p.reversibility, p.strategy, p.confidence, p.inverse, p.capture, p.check, p.checkMode, p.children, p.inverseIfMissing, p.identity];
+  const a = analyze(await loadSpec(specLocation(cache, f)), { restoreChildren: true });
+  for (const p of a.plans) out[specName(f) + ' ' + p.operationId] = [p.reversibility, p.strategy, p.confidence, p.inverse, p.capture, p.check, p.checkMode, p.children, p.inverseIfMissing, p.identity];
 }
 process.stdout.write(JSON.stringify(out));
 `;
@@ -34,7 +35,7 @@ const script = join(work, 'dump.mts');
 writeFileSync(script, dumpScript);
 const tsx = join(root, 'node_modules/.bin/tsx');
 const dump = (srcRoot: string) =>
-  JSON.parse(execFileSync(tsx, [script, join(srcRoot, 'src/index.ts'), cache, ...files], { maxBuffer: 1 << 28, encoding: 'utf8' })) as Record<string, unknown[]>;
+  JSON.parse(execFileSync(tsx, [script, join(srcRoot, 'src/index.ts'), join(root, 'scripts/public-specs.ts'), cache, ...files], { maxBuffer: 1 << 28, encoding: 'utf8' })) as Record<string, unknown[]>;
 
 const base = join(work, 'base');
 execFileSync('git', ['-C', root, 'worktree', 'add', '--detach', base, values.ref!], { stdio: 'ignore' });

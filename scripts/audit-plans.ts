@@ -10,7 +10,7 @@
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { analyze, loadSpec, tokenize, type InversePlan } from '../src/index.js';
-import { ensureSpecs } from './public-specs.js';
+import { ensureSpecs, specLocation, specName } from './public-specs.js';
 
 const { values } = parseArgs({ options: { cache: { type: 'string', default: '.cache/specs' }, refresh: { type: 'boolean' } } });
 const dir = resolve(new URL('..', import.meta.url).pathname, values.cache!);
@@ -33,8 +33,9 @@ const EXPECT: Array<{ when: (p: InversePlan) => boolean; label: string; words: R
 const NEVER_REVERSIBLE = /^(send|exec|execute|proxy|charge|pay|transfer|refund|dispatch|deliver|notify|broadcast)$/;
 
 let flagged = 0;
-for (const file of files) {
-  const analysis = analyze(await loadSpec(join(dir, file)));
+for (const entry of files) {
+  const file = specName(entry);
+  const analysis = analyze(await loadSpec(specLocation(dir, entry)));
   for (const p of analysis.plans) {
     const words = tokenize(p.operationId.split('/').pop() ?? p.operationId);
     for (const e of EXPECT) {
